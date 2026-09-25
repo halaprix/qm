@@ -11,7 +11,7 @@ import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
 import type { TurnRequest, TurnResult } from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
 
-export interface SurfaceRunHooks {
+interface SurfaceRunHooks {
   onFirstBlock?(text: string): void;
   onSurfacePosted?(): void;
   onTasks?(tasks: Array<{ id: string; title: string; status: TaskStatus }>): void | Promise<void>;
