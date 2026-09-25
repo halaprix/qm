@@ -2,23 +2,7 @@ import { sleep } from "./util.ts";
 import { channelShareTs, parseUploadedFileIds, slackErrorCode } from "./payloads.ts";
 import { BlobTooLargeError } from "../persistence/blob-transfer.ts";
 
-export interface IncomingAttachment {
-  name: string;
-  mimetype: string;
-  sizeBytes: number;
-  blobId: string;
-  sourceId?: string;
-  author?: string;
-}
-
-export interface OutgoingAttachment {
-  name: string;
-  mimetype: string;
-  sizeBytes: number;
-  blobId: string;
-  artifactId?: string;
-  artifactViewerId?: string;
-}
+import type { IncomingAttachment, OutgoingAttachment } from "../types.ts";
 
 export interface SlackFile {
   id?: string;
