@@ -17,7 +17,7 @@ export const WORKING_TEXT = "⚙ Working…";
 export const FAILURE_TEXT = "Something went wrong on my side and I couldn't finish that. Please try again.";
 const EMPTY_REPLY_TEXT = "(no response)";
 const APPROVAL_TEXT = "This needs an approval before I can continue. Approve it in the QM web app";
-export const STREAM_EDIT_INTERVAL_MS = 1500;
+const STREAM_EDIT_INTERVAL_MS = 1500;
 
 async function streamRun(
   core: SurfaceCoreClient,

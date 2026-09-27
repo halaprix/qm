@@ -40,6 +40,7 @@ function core(opts: {
     waitRun: opts.wait ?? (async () => ({ status: "ok", reply: "done" })),
     streamSnapshot: () => snaps.shift() ?? null,
     readBlob: async (id: string) => Buffer.from(id),
+    readFileArtifact: async () => Buffer.from(""),
   } as unknown as SurfaceCoreClient;
 }
 

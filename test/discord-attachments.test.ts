@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  DISCORD_DOWNLOAD_TIMEOUT_MS,
   DISCORD_MAX_FILES,
   DISCORD_UPLOAD_LIMIT_BYTES,
   ingestAttachments,
@@ -15,6 +16,7 @@ const core = {
     return { blobId: `b${staged.length}`, sizeBytes: bytes.length };
   },
   readBlob: async (id: string) => Buffer.from(`bytes-of-${id}`),
+  readFileArtifact: async () => Buffer.from(""),
 };
 const okFetch = (async () => new Response(new Uint8Array([1, 2, 3]))) as typeof fetch;
 
@@ -146,4 +148,43 @@ test("rejected fetch on one attachment skips it and continues staging others", a
   assert.equal(r.attachments[0]!.name, "ok.txt");
   assert.equal(r.notes.length, 1);
   assert.equal(r.notes[0]!, "Skipped failing.txt: download failed.");
+});
+
+test("unreadable outbound file becomes a text note instead of throwing", async () => {
+  const failingCore = {
+    readBlob: async () => {
+      throw new Error("not found");
+    },
+    readFileArtifact: async () => {
+      throw new Error("not found");
+    },
+  };
+  const r = await toDiscordFiles(
+    [{ name: "missing.txt", mimetype: "text/plain", sizeBytes: 10, blobId: "b1" }],
+    failingCore,
+  );
+  assert.equal(r.files.length, 0);
+  assert.equal(r.notes.length, 1);
+  assert.match(r.notes[0]!, /missing\.txt.*could not be read/);
+});
+
+test("inbound download timeout is 300s and abort lands in per-file catch", async () => {
+  assert.equal(DISCORD_DOWNLOAD_TIMEOUT_MS, 300_000);
+  const timingOutFetch = (async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  }) as typeof fetch;
+  const r = await ingestAttachments(
+    [
+      {
+        url: "https://cdn.discordapp.com/attachments/1/2/timeout.txt",
+        name: "timeout.txt",
+        contentType: "text/plain",
+        size: 3,
+      },
+    ],
+    core,
+    timingOutFetch,
+  );
+  assert.equal(r.attachments.length, 0);
+  assert.equal(r.notes[0]!, "Skipped timeout.txt: download failed.");
 });

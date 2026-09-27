@@ -1,32 +1,32 @@
-import {
-  ChannelType,
-  Client,
-  Events,
-  GatewayIntentBits,
-  Partials,
-  type Message,
-  type MessageCreateOptions,
-} from "discord.js";
+import { Client, Events, GatewayIntentBits, Partials, type Message, type MessageCreateOptions } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
-import { swallowAs } from "../util/errors.ts";
+import { reportFailureAs, swallowAs } from "../util/errors.ts";
 import { ingestAttachments } from "./attachments.ts";
 import { createDiscordGate, type DiscordPluginConfig } from "./config.ts";
-import { conversationFor, routeMessage, threadName, type DiscordInbound } from "./events.ts";
-import { runDiscordTurn, STREAM_EDIT_INTERVAL_MS, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
+import { conversationFor, routeMessage, type DiscordInbound } from "./events.ts";
+import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
 
-function toInbound(message: Message, botUserId: string): DiscordInbound {
-  const ch = message.channel;
+export const DISCORD_STOP_DRAIN_MS = 30_000;
+
+export interface DiscordPlugin {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+
+export interface DiscordPluginOptions {
+  clientFactory?: () => Client;
+  drainTimeoutMs?: number;
+}
+
+function toInbound(message: Message): DiscordInbound {
   return {
     id: message.id,
     channelId: message.channelId,
-    ...("name" in ch && ch.name ? { channelName: ch.name } : {}),
     guildId: message.guildId,
-    isThread: ch.isThread(),
     authorId: message.author.id,
     authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
     authorIsBot: message.author.bot,
     content: message.content,
-    mentionsBot: message.mentions.users.has(botUserId),
     attachments: [...message.attachments.values()].map((a) => ({
       url: a.url,
       name: a.name,
@@ -42,56 +42,98 @@ function replyChannel(ch: { send(options: MessageCreateOptions): Promise<StatusM
   };
 }
 
-export async function startDiscordPlugin(
+export function createDiscordPlugin(
   cfg: DiscordPluginConfig,
   core: SurfaceCoreClient,
-): Promise<{ stop(): Promise<void> }> {
+  opts: DiscordPluginOptions = {},
+): DiscordPlugin {
   const gate = createDiscordGate(cfg);
-  const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages],
-    partials: [Partials.Channel],
-    allowedMentions: { parse: [], repliedUser: false },
-  });
+  const clientFactory =
+    opts.clientFactory ??
+    (() =>
+      new Client({
+        intents: [GatewayIntentBits.DirectMessages],
+        partials: [Partials.Channel],
+        allowedMentions: { parse: [], repliedUser: false },
+      }));
+  const drainTimeoutMs = opts.drainTimeoutMs ?? DISCORD_STOP_DRAIN_MS;
 
-  async function handle(message: Message): Promise<void> {
-    const botUserId = client.user!.id;
-    const inbound = toInbound(message, botUserId);
+  let client: Client | null = null;
+  let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
+
+  async function handle(message: Message, activeClient: Client): Promise<void> {
+    const botUserId = activeClient.user?.id ?? "";
+    const inbound = toInbound(message);
     const routed = routeMessage(inbound, botUserId, gate);
     if (!routed) return;
-    const target =
-      routed.target === "new-thread" && message.channel.type === ChannelType.GuildText
-        ? await message.startThread({ name: threadName(routed.text) })
-        : message.channel;
+    const target = message.channel;
     if (!("send" in target)) return;
     const { attachments, notes } = await ingestAttachments(inbound.attachments, core);
     await runDiscordTurn({
       core,
       channel: replyChannel(target),
-      streamIntervalMs: STREAM_EDIT_INTERVAL_MS,
       body: {
         actor: routed.actor,
-        conversation: conversationFor(
-          routed.target === "new-thread" ? "thread" : routed.target,
-          target.id,
-          inbound.channelName,
-        ),
+        conversation: conversationFor(target.id),
         text: routed.text,
         triggerTs: message.id,
         entryTs: message.id,
+        redeliveryKey: `discord:${message.id}`,
         ...(attachments.length ? { attachments } : {}),
         ...(notes.length ? { inboundNotes: notes } : {}),
       },
     });
   }
 
-  client.on(Events.MessageCreate, (message) => {
-    void handle(message).catch(swallowAs("discord: message handler", undefined));
-  });
-  client.once(Events.ClientReady, (c) => console.log(`[qm] discord connected as @${c.user.tag}`));
-  await client.login(cfg.botToken);
   return {
+    async start() {
+      if (client) return;
+      let accepting = true;
+      const inFlight = new Set<Promise<void>>();
+      const c = clientFactory();
+      client = c;
+      detachClient = () => {
+        accepting = false;
+        return { client: c, inFlight };
+      };
+      c.on(Events.MessageCreate, (message) => {
+        if (!accepting) return;
+        const p = handle(message, c)
+          .catch(swallowAs("discord: message handler", undefined))
+          .finally(() => {
+            inFlight.delete(p);
+          });
+        inFlight.add(p);
+      });
+      c.once(Events.ClientReady, (readyClient) => console.log(`[qm] discord connected as @${readyClient.user.tag}`));
+      try {
+        await c.login(cfg.botToken);
+      } catch (err) {
+        reportFailureAs("discord plugin login", undefined)(err);
+        await c.destroy().catch(swallowAs("discord client cleanup", undefined));
+        if (client === c) {
+          client = null;
+          detachClient = null;
+        }
+        accepting = false;
+      }
+    },
+
     async stop() {
-      await client.destroy();
+      const detached = detachClient?.();
+      client = null;
+      detachClient = null;
+      if (!detached) return;
+      if (detached.inFlight.size > 0) {
+        let timer: NodeJS.Timeout;
+        const timeoutPromise = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, drainTimeoutMs);
+        });
+        await Promise.race([Promise.allSettled([...detached.inFlight]).then(() => {}), timeoutPromise]).finally(() =>
+          clearTimeout(timer),
+        );
+      }
+      await detached.client.destroy();
     },
   };
 }

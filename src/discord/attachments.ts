@@ -1,10 +1,11 @@
-import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
+import { readOutgoingAttachment, type SurfaceCoreClient } from "../api/surface-core-client.ts";
 import { MAX_BLOB_BYTES } from "../persistence/blob-transfer.ts";
 import type { IncomingAttachment, OutgoingAttachment } from "../types.ts";
 import type { DiscordAttachmentRef } from "./events.ts";
 
 export const DISCORD_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 export const DISCORD_MAX_FILES = 10;
+export const DISCORD_DOWNLOAD_TIMEOUT_MS = 300_000;
 const DISCORD_CDN_HOSTS = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 const DEFAULT_MIMETYPE = "application/octet-stream";
 const MIB = 1024 * 1024;
@@ -40,7 +41,10 @@ export async function ingestAttachments(
       continue;
     }
     try {
-      const res = await fetchImpl(ref.url, { redirect: "error" });
+      const res = await fetchImpl(ref.url, {
+        redirect: "error",
+        signal: AbortSignal.timeout(DISCORD_DOWNLOAD_TIMEOUT_MS),
+      });
       if (!res.ok) {
         notes.push(`Skipped ${ref.name}: download failed (${res.status}).`);
         continue;
@@ -58,7 +62,7 @@ export async function ingestAttachments(
 
 export async function toDiscordFiles(
   out: readonly OutgoingAttachment[],
-  core: Pick<SurfaceCoreClient, "readBlob">,
+  core: Pick<SurfaceCoreClient, "readBlob" | "readFileArtifact">,
 ): Promise<{ files: DiscordFile[]; notes: string[] }> {
   const files: DiscordFile[] = [];
   const notes: string[] = [];
@@ -75,7 +79,12 @@ export async function toDiscordFiles(
       );
       continue;
     }
-    files.push({ attachment: await core.readBlob(a.blobId), name: a.name });
+    try {
+      const attachment = await readOutgoingAttachment(core, a);
+      files.push({ attachment, name: a.name });
+    } catch {
+      notes.push(`${a.name} could not be read; open it in the QM web app.`);
+    }
   }
   return { files, notes };
 }

@@ -12,53 +12,30 @@ export interface DiscordAttachmentRef {
 export interface DiscordInbound {
   id: string;
   channelId: string;
-  channelName?: string;
   guildId: string | null;
-  isThread: boolean;
   authorId: string;
   authorName: string;
   authorIsBot: boolean;
   content: string;
-  mentionsBot: boolean;
   attachments: DiscordAttachmentRef[];
 }
 
-export type RouteTarget = "dm" | "new-thread" | "thread";
-
 export interface Routed {
-  target: RouteTarget;
+  target: "dm";
   actor: ActorAssertion;
   text: string;
 }
 
-const THREAD_NAME_MAX = 100;
-const DEFAULT_THREAD_NAME = "QM";
-
 export function routeMessage(msg: DiscordInbound, botUserId: string, gate: DiscordGate): Routed | null {
+  if (msg.guildId !== null) return null;
   if (msg.authorIsBot || msg.authorId === botUserId) return null;
-  if (!gate(msg.authorId, msg.guildId)) return null;
-  const text = msg.content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
+  if (!gate(msg.authorId)) return null;
+  const text = msg.content.trim();
   if (!text && msg.attachments.length === 0) return null;
   const actor: ActorAssertion = { externalId: discordExternalId(msg.authorId), displayName: msg.authorName };
-  if (msg.guildId === null) return { target: "dm", actor, text };
-  if (!msg.mentionsBot) return null;
-  return { target: msg.isThread ? "thread" : "new-thread", actor, text };
+  return { target: "dm", actor, text };
 }
 
-export function conversationFor(
-  target: RouteTarget,
-  channelId: string,
-  channelName?: string,
-): CoreTurnBody["conversation"] {
-  if (target === "dm") return { kind: "dm", threadRef: `${DISCORD_SURFACE}:dm:${channelId}`, channelRef: channelId };
-  return {
-    kind: "channel",
-    threadRef: `${DISCORD_SURFACE}:thread:${channelId}`,
-    channelRef: channelId,
-    ...(channelName ? { channelName } : {}),
-  };
-}
-
-export function threadName(text: string): string {
-  return text.trim().slice(0, THREAD_NAME_MAX) || DEFAULT_THREAD_NAME;
+export function conversationFor(channelId: string): CoreTurnBody["conversation"] {
+  return { kind: "dm", threadRef: `${DISCORD_SURFACE}:dm:${channelId}`, channelRef: channelId };
 }

@@ -8,7 +8,7 @@ import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
 import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
-import type { TurnRequest, TurnResult } from "../types.ts";
+import type { OutgoingAttachment, TurnRequest, TurnResult } from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
 
 interface SurfaceRunHooks {
@@ -30,6 +30,18 @@ export interface SurfaceCoreClient {
   stageBlob(bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }>;
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
+}
+
+export async function readOutgoingAttachment(
+  source: Pick<SurfaceCoreClient, "readBlob" | "readFileArtifact">,
+  a: OutgoingAttachment,
+): Promise<Buffer> {
+  try {
+    return await source.readBlob(a.blobId);
+  } catch (err) {
+    if (!a.artifactId || !a.artifactViewerId) throw err;
+    return source.readFileArtifact(a.artifactId, a.artifactViewerId);
+  }
 }
 
 export interface SurfaceCoreClientDeps {

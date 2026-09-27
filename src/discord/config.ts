@@ -3,10 +3,9 @@ export const DISCORD_SURFACE = "discord";
 export interface DiscordPluginConfig {
   botToken: string;
   allowUserIds: ReadonlySet<string>;
-  allowGuildIds: ReadonlySet<string>;
 }
 
-export type DiscordGate = (userId: string, guildId: string | null) => boolean;
+export type DiscordGate = (userId: string) => boolean;
 
 function idList(raw: string | undefined): Set<string> {
   return new Set(
@@ -26,11 +25,11 @@ export function discordPluginConfigFromEnv(env: Record<string, string | undefine
       "DISCORD_BOT_TOKEN is set but DISCORD_ALLOW_USER_IDS is empty; refusing to start an open Discord bot",
     );
   }
-  return { botToken, allowUserIds, allowGuildIds: idList(env.DISCORD_GUILD_IDS) };
+  return { botToken, allowUserIds };
 }
 
 export function createDiscordGate(cfg: DiscordPluginConfig): DiscordGate {
-  return (userId, guildId) => cfg.allowUserIds.has(userId) && (guildId === null || cfg.allowGuildIds.has(guildId));
+  return (userId) => cfg.allowUserIds.has(userId);
 }
 
 export function discordExternalId(userId: string): string {
