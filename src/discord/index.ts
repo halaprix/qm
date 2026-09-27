@@ -6,7 +6,9 @@ import { createDiscordGate, type DiscordPluginConfig } from "./config.ts";
 import { conversationFor, routeMessage, type DiscordInbound } from "./events.ts";
 import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
 
-export const DISCORD_STOP_DRAIN_MS = 30_000;
+const DISCORD_STOP_DRAIN_MS = 30_000;
+export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
+const DISCORD_LOGIN_RETRY_MAX_MS = 300_000;
 
 export interface DiscordPlugin {
   start(): Promise<void>;
@@ -60,6 +62,10 @@ export function createDiscordPlugin(
 
   let client: Client | null = null;
   let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
+  let stopPromise: Promise<void> | null = null;
+  let retryTimer: NodeJS.Timeout | null = null;
+  let retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
+  let stopped = true;
 
   async function handle(message: Message, activeClient: Client): Promise<void> {
     const botUserId = activeClient.user?.id ?? "";
@@ -85,55 +91,91 @@ export function createDiscordPlugin(
     });
   }
 
+  async function connect(): Promise<void> {
+    if (stopped || client) return;
+    let accepting = true;
+    const inFlight = new Set<Promise<void>>();
+    const c = clientFactory();
+    client = c;
+    detachClient = () => {
+      accepting = false;
+      return { client: c, inFlight };
+    };
+    c.on(Events.MessageCreate, (message) => {
+      if (!accepting) return;
+      const p = handle(message, c)
+        .catch(swallowAs("discord: message handler", undefined))
+        .finally(() => {
+          inFlight.delete(p);
+        });
+      inFlight.add(p);
+    });
+    c.once(Events.ClientReady, (readyClient) => console.log(`[qm] discord connected as @${readyClient.user.tag}`));
+    try {
+      await c.login(cfg.botToken);
+      retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
+    } catch (err) {
+      reportFailureAs("discord plugin login", undefined)(err);
+      await c.destroy().catch(swallowAs("discord client cleanup", undefined));
+      if (client === c) {
+        client = null;
+        detachClient = null;
+      }
+      accepting = false;
+      if (!stopped && !retryTimer) {
+        const delay = retryDelay;
+        retryDelay = Math.min(retryDelay * 2, DISCORD_LOGIN_RETRY_MAX_MS);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          void connect();
+        }, delay);
+      }
+    }
+  }
+
   return {
     async start() {
-      if (client) return;
-      let accepting = true;
-      const inFlight = new Set<Promise<void>>();
-      const c = clientFactory();
-      client = c;
-      detachClient = () => {
-        accepting = false;
-        return { client: c, inFlight };
-      };
-      c.on(Events.MessageCreate, (message) => {
-        if (!accepting) return;
-        const p = handle(message, c)
-          .catch(swallowAs("discord: message handler", undefined))
-          .finally(() => {
-            inFlight.delete(p);
-          });
-        inFlight.add(p);
-      });
-      c.once(Events.ClientReady, (readyClient) => console.log(`[qm] discord connected as @${readyClient.user.tag}`));
-      try {
-        await c.login(cfg.botToken);
-      } catch (err) {
-        reportFailureAs("discord plugin login", undefined)(err);
-        await c.destroy().catch(swallowAs("discord client cleanup", undefined));
-        if (client === c) {
-          client = null;
-          detachClient = null;
-        }
-        accepting = false;
-      }
+      stopped = false;
+      if (client || retryTimer) return;
+      await connect();
     },
 
     async stop() {
+      stopped = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
       const detached = detachClient?.();
       client = null;
       detachClient = null;
-      if (!detached) return;
-      if (detached.inFlight.size > 0) {
-        let timer: NodeJS.Timeout;
-        const timeoutPromise = new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, drainTimeoutMs);
-        });
-        await Promise.race([Promise.allSettled([...detached.inFlight]).then(() => {}), timeoutPromise]).finally(() =>
-          clearTimeout(timer),
-        );
-      }
-      await detached.client.destroy();
+      if (!detached) return stopPromise ?? Promise.resolve();
+      const previousStop = stopPromise;
+      const drainCurrent = async () => {
+        if (detached.inFlight.size > 0) {
+          let timer: NodeJS.Timeout;
+          const timeoutPromise = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, drainTimeoutMs);
+          });
+          await Promise.race([Promise.allSettled([...detached.inFlight]).then(() => {}), timeoutPromise]).finally(() =>
+            clearTimeout(timer),
+          );
+        }
+        await detached.client.destroy();
+      };
+      let drainPromise: Promise<void> | null = null;
+      drainPromise = (async () => {
+        try {
+          await (previousStop ? Promise.all([previousStop, drainCurrent()]) : drainCurrent());
+        } finally {
+          if (stopPromise === drainPromise) {
+            stopPromise = null;
+          }
+        }
+      })();
+      stopPromise = drainPromise;
+      return stopPromise;
     },
   };
 }

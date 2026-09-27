@@ -206,6 +206,7 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[qm] ${signal} received, shutting down`);
+  const discordStopped = stopDiscord();
   void slackRuntime.stop().catch((e: unknown) => console.error("[qm] slack plugin stop failed:", errMessage(e)));
   for (const runtime of slackAccountRuntimes)
     void runtime.stop().catch((e: unknown) => console.error("[qm] slack account stop failed:", errMessage(e)));
@@ -219,7 +220,7 @@ function shutdown(signal: string): void {
       async stop() {
         await backgroundController?.stop();
         await built.runtime.stop();
-        await stopDiscord();
+        await discordStopped;
       },
       releaseInFlightRuns: () => built.runtime.releaseInFlightRuns(),
     },
