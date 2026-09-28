@@ -101,6 +101,7 @@ export const SUBAGENT_TREE_RUN_CAP = 10;
 const SESSION_MESSAGE_DEPTH_CAP = 8;
 const READ_DEFAULT_LIMIT = 30;
 const SESSION_LIST_LIMIT = 50;
+const WEB_ONLY = "sessions are a web UI feature and aren't available here.";
 const READ_DEFAULT_MAX_CHARS = 4_000;
 const READ_MAX_CHARS_CEILING = 20_000;
 const MAIL_ERROR_CAP = 1_000;
@@ -122,6 +123,7 @@ type SessionOpenResult =
 
 export interface SessionWriteInput {
   target: string;
+  peer?: boolean;
   text?: string;
   interrupt?: boolean;
   followup?: boolean;
@@ -139,6 +141,7 @@ type SessionWriteResult =
 
 export interface SessionReadInput {
   target?: string;
+  peer?: boolean;
   limit?: number;
   maxChars?: number;
 }
@@ -150,7 +153,7 @@ interface SessionChildSummary {
   lastSaid?: string;
 }
 
-export interface SessionStartInput {
+interface SessionStartInput {
   fork: boolean;
   text?: string;
   title?: string;
@@ -466,6 +469,13 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
         return [...children, ...siblings].find((c) => c.title?.trim().toLowerCase() === trimmed.toLowerCase()) ?? null;
       }
 
+      function peerRefusal(target: Session): string | null {
+        if (binding.request.surface !== "web") return WEB_ONLY;
+        if (target.parentSessionId || isSubagentThreadRef(target.threadRef) || target.threadRef.startsWith("swarm:"))
+          return `"${target.title?.trim() || target.id}" is a subagent, not a session — use the subagents tool for it.`;
+        return null;
+      }
+
       async function statusOf(session: Session): Promise<"running" | "pending" | "idle"> {
         const inFlight = await deps.runs.inFlightForThread(session.threadRef);
         if (inFlight.some((r) => r.status === "running")) return "running";
@@ -677,6 +687,8 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
                   ok: false,
                   message: `no session matches "${input.target}" — use a sessionId from open, read, or list.`,
                 };
+              const refusal = input.peer ? peerRefusal(target) : null;
+              if (refusal) return { ok: false, message: refusal };
               if (target.threadRef.startsWith("swarm:"))
                 throw new Error("send messages to swarm workers through the swarm API");
               if (target.id === binding.session.id)
@@ -837,6 +849,8 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
               ok: false,
               message: `no session matches "${input.target}" — use a sessionId from open, read, or list.`,
             };
+          const refusal = input.peer ? peerRefusal(target) : null;
+          if (refusal) return { ok: false, message: refusal };
           if (target.scopeId !== binding.scopeId)
             return { ok: false, message: "that session lives in a different context and cannot be read from here." };
           const limit = Math.min(Math.max(1, input.limit ?? READ_DEFAULT_LIMIT), 200);
@@ -865,6 +879,7 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
           await currentCaller();
           const conversations = deps.conversations;
           if (!conversations) return { ok: false, message: "sessions aren't available on this deployment." };
+          if (binding.request.surface !== "web") return { ok: false, message: WEB_ONLY };
           const audience = binding.request.conversation.audience.length
             ? binding.request.conversation.audience
             : [binding.request.actor];
@@ -904,6 +919,7 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
           }
           const conversations = deps.conversations;
           if (!conversations) return { ok: false, message: "sessions aren't available on this deployment." };
+          if (binding.request.surface !== "web") return { ok: false, message: WEB_ONLY };
           const verb = input.fork ? "fork" : "new";
           if (binding.liveTurn !== true)
             return {

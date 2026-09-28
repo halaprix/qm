@@ -1437,14 +1437,7 @@ test("readOnly exposes observation and constrained session coordination without 
   for (const t of ["execute", "background", "files", "apps", "cron", "webhook", "guidance"]) {
     assert.ok(names(full).has(t), `full toolset has ${t}`);
   }
-  assert.deepEqual([...names(readOnly)].sort(), [
-    "finish_silently",
-    "history",
-    "memory",
-    "runtime",
-    "sessions",
-    "subagents",
-  ]);
+  assert.deepEqual([...names(readOnly)].sort(), ["finish_silently", "history", "memory", "runtime", "subagents"]);
   for (const t of ["execute", "background", "files", "apps", "cron", "webhook", "guidance"]) {
     assert.ok(!names(readOnly).has(t), `read-only toolset drops ${t}`);
   }
@@ -3515,7 +3508,7 @@ test("resource catalog exposes one home per operation and leaves MCP tools intac
     },
   );
   const names = tools.map((tool) => tool.name);
-  for (const name of ["files", "apps", "skills", "sessions", "subagents", "goal", "cron", "example_search"])
+  for (const name of ["files", "apps", "skills", "subagents", "goal", "cron", "example_search"])
     assert.ok(names.includes(name));
   for (const name of [
     "read",
@@ -3997,7 +3990,7 @@ test("subagents and sessions are separate tools with one noun each", async () =>
       return { ok: true, sessionId: "made", title: "made" };
     },
   };
-  const tools = createAgentTools({ current: tc });
+  const tools = createAgentTools({ current: tc }, { surfaceName: "web" });
   const subagents = tools.find((tool) => tool.name === "subagents")!;
   const sessions = tools.find((tool) => tool.name === "sessions")!;
   assert.match(subagents.description, /does not get its own sidebar entry/);
@@ -4017,4 +4010,12 @@ test("subagents and sessions are separate tools with one noun each", async () =>
     writes.map(({ followup, target, text }) => ({ followup, target, text })),
     [{ followup: undefined, target: "peer", text: "fyi" }],
   );
+});
+
+test("sessions is a web UI tool: Slack turns get subagents only", () => {
+  const slack = createAgentTools({ current: fakeToolContext() }, { surfaceName: "slack" });
+  assert.ok(slack.some((tool) => tool.name === "subagents"));
+  assert.ok(!slack.some((tool) => tool.name === "sessions"));
+  assert.doesNotMatch(slack.find((tool) => tool.name === "subagents")!.description, /use sessions/);
+  assert.ok(!createAgentTools({ current: fakeToolContext() }).some((tool) => tool.name === "sessions"));
 });

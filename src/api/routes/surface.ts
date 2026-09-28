@@ -30,7 +30,6 @@ import {
 } from "../../surfaces/ui-state.ts";
 import { redactWebhook } from "./webhooks.ts";
 import { type ApiCtx, type Route } from "./route.ts";
-import { seedSessionTurn } from "../seed-session.ts";
 import {
   ARTIFACT_TYPES,
   isArtifactType,
@@ -59,19 +58,6 @@ function sharedSkillCreateBlock(capability: ApiCtx["capability"]): string | null
 
 function isConversationColor(value: unknown): value is string | null {
   return value === null || (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value));
-}
-
-function conversationWebUrl(publicWebUrl: string | undefined, sessionId: string): string | undefined {
-  const raw = publicWebUrl?.trim();
-  if (!raw || !/^https?:\/\//i.test(raw) || /[?#]/.test(raw)) return undefined;
-  try {
-    const base = new URL(raw);
-    if ((base.protocol !== "http:" && base.protocol !== "https:") || base.username || base.password) return undefined;
-    base.pathname = `${base.pathname.replace(/\/+$/, "")}/s/${encodeURIComponent(sessionId)}`;
-    return base.toString();
-  } catch {
-    return undefined;
-  }
 }
 
 async function regenerateSessionTitle(ctx: ApiCtx): Promise<void> {
@@ -119,48 +105,6 @@ async function forkSession(ctx: ApiCtx): Promise<void> {
   const out = await app.forkSession(id, b.principalId, b.upToSeq !== undefined ? { upToSeq: b.upToSeq } : undefined);
   if (!out) return sendJson(res, 404, { error: "not_found" });
   return sendJson(res, 200, out);
-}
-
-async function spawnAgentConversation(ctx: ApiCtx): Promise<void> {
-  const { res, app, body, capability, deps } = ctx;
-  if (!capability) {
-    return sendJson(res, 401, { error: "capability_required", message: "this endpoint is for the agent self-API" });
-  }
-  if (!livePersonCapability(capability)) {
-    return sendJson(res, 403, {
-      error: "human_attended_only",
-      message:
-        "starting a fresh conversation requires a turn a person is attending — not a cron, trigger, or other automation",
-    });
-  }
-  const b = isObj(body) ? body : {};
-  if (typeof b.text !== "string" || !b.text.trim()) {
-    return sendJson(res, 400, { error: "bad_request", message: "text required — the new session's first message" });
-  }
-  if (b.title !== undefined && typeof b.title !== "string") {
-    return sendJson(res, 400, { error: "bad_request", message: "title must be a string" });
-  }
-  const out = await app.spawnSession(capability.actorId, {
-    scopeId: capability.scopeId,
-    ...(typeof b.title === "string" ? { title: b.title } : {}),
-  });
-  if (!out) return sendJson(res, 404, { error: "not_found", message: "cannot start a session in this scope" });
-  const session = out.session;
-  const turn = await seedSessionTurn(app, capability.actorId, session, b.text);
-  if (turn.status === "refused") {
-    await app.discardSession(session.id, capability.actorId);
-    return sendJson(res, 409, {
-      error: "seed_turn_refused",
-      message: (turn as { reason?: string }).reason ?? "the first message was refused",
-    });
-  }
-  const runId = (turn as { runId?: string }).runId;
-  const webUrl = conversationWebUrl(deps.portalUrl, session.id);
-  return sendJson(res, 202, {
-    session,
-    turn: { status: turn.status, ...(runId ? { runId } : {}) },
-    ...(webUrl ? { webUrl } : {}),
-  });
 }
 
 async function forkAgentConversation(ctx: ApiCtx): Promise<void> {
@@ -1397,7 +1341,6 @@ export const surfaceRoutes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/conversations", auth: "either", handle: listAgentConversations },
   { method: "GET", path: "/v1/conversations/:id", auth: "either", handle: getAgentConversation },
   { method: "POST", path: "/v1/conversations/:id", auth: "either", handle: patchAgentConversation },
-  { method: "POST", path: "/v1/conversations", auth: "either", handle: spawnAgentConversation },
   { method: "POST", path: "/v1/conversations/:id/fork", auth: "either", handle: forkAgentConversation },
   { method: "GET", path: "/v1/contexts", auth: "source", handle: listContexts },
   { method: "GET", path: "/v1/scope-resources", auth: "source", handle: listScopeResources },

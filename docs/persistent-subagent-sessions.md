@@ -1,6 +1,6 @@
 # Persistent subagent sessions
 
-A delegated task runs in a durable session with its own transcript and a mutable parent. The `subagents` tool opens children, reads their transcripts, and sends attributed messages. Subagents have no sidebar entry. The separate `sessions` tool works with the user-visible conversations in the sidebar: it lists and reads them, sends them private notes, and, on a turn a person is attending, starts a new clean session or forks the current one. Parentage is organization data: it survives restarts and can be changed independently of the original delegation.
+A delegated task runs in a durable session with its own transcript and a mutable parent. The `subagents` tool opens children, reads their transcripts, and sends attributed messages. Subagents have no sidebar entry. The separate `sessions` tool is offered only on web UI turns and works with the user-visible conversations in the sidebar: it lists and reads them, sends them private notes, and, on a turn a person is attending, starts a new clean session or forks the current one. It refuses subagents; use the `subagents` tool for those. Parentage is organization data: it survives restarts and can be changed independently of the original delegation.
 
 ## Lifecycle
 

@@ -1696,13 +1696,13 @@ test("sessions list shows only sidebar sessions the whole audience can see and c
       },
     },
   });
-  const forTurn = (liveTurn: boolean, opts: { readOnly?: boolean; audience?: Principal[] } = {}) =>
+  const forTurn = (liveTurn: boolean, opts: { readOnly?: boolean; audience?: Principal[]; surface?: string } = {}) =>
     factory.forTurn({
       session: room,
       scopeId: scope,
       liveTurn,
       request: {
-        surface: "web",
+        surface: opts.surface ?? "web",
         conversation: { kind: "dm", threadRef: room.threadRef, audience: opts.audience ?? [actor] },
         actor,
         origin: { kind: "human" },
@@ -1732,6 +1732,25 @@ test("sessions list shows only sidebar sessions the whole audience can see and c
     { scopeId: scope, text: "hello", title: "fresh" },
     { scopeId: scope, forkOf: room.id },
   ]);
+  const child = await sessions.getOrCreateByThread("agent:main:subagent:w", "dm", scope, undefined, "web");
+  await sessions.updateTitle(child.id, "worker");
+  await sessions.addParticipant(child.id, actor.id);
+  await sessions.setParentSession(child.id, room.id);
+  for (const out of [
+    await live.read({ peer: true, target: child.id }),
+    await live.write({ peer: true, target: child.id, text: "hi" }),
+  ])
+    assert.deepEqual(out, {
+      ok: false,
+      message: '"worker" is a subagent, not a session — use the subagents tool for it.',
+    });
+  const slack = forTurn(true, { surface: "slack" });
+  for (const out of [
+    await slack.list!(),
+    await slack.start!({ fork: true }),
+    await slack.read({ peer: true, target: peer.id }),
+  ])
+    assert.deepEqual(out, { ok: false, message: "sessions are a web UI feature and aren't available here." });
   for (const blocked of [forTurn(false), forTurn(true, { readOnly: true })]) {
     const out = await blocked.start!({ fork: true });
     assert.equal(out.ok, false);
