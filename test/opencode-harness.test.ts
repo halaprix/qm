@@ -724,6 +724,11 @@ for (const surfaceTools of [false, true]) {
 }
 
 test("OpenCode's fixed tool list includes the web-only sessions tool", () => {
-  const names = openCodeToolDefinitions({}).map((tool) => tool.name);
-  for (const name of ["subagents", "sessions"]) assert.ok(names.includes(name), name);
+  const definitions = openCodeToolDefinitions({});
+  for (const name of ["subagents", "sessions"])
+    assert.ok(
+      definitions.some((tool) => tool.name === name),
+      name,
+    );
+  assert.doesNotMatch(definitions.find((tool) => tool.name === "subagents")!.description, /use sessions/);
 });

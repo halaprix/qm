@@ -472,9 +472,9 @@ export function openCodeToolDefinitions(
 ): Array<{ name: string; description: string; parameters: unknown }> {
   const definitionRef: ToolContextRef = { current: null };
   const definitionTools = [
+    ...bridgedTools(definitionRef, { ...harnessToolOptions(opts), surfaceName: "web" }),
     ...bridgedTools(definitionRef, harnessToolOptions(opts)),
     ...bridgedTools(definitionRef, { ...harnessToolOptions(opts), surfaceTools: false }),
-    ...bridgedTools(definitionRef, { ...harnessToolOptions(opts), surfaceName: "web" }),
   ];
   return [
     ...new Map(
