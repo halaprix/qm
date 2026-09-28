@@ -642,7 +642,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         return result;
       };
       const mirrorRunActivity = async (appended: SessionEntry): Promise<void> => {
-        if (input.runId && deps.runActivity && ACTIVITY_ENTRY_TYPES.has(appended.type)) {
+        if (
+          input.runId &&
+          deps.runActivity &&
+          (ACTIVITY_ENTRY_TYPES.has(appended.type) ||
+            (appended.type === "user" && (appended.payload as { steered?: boolean })?.steered === true))
+        ) {
           await deps.runActivity
             .append(input.runId, {
               seq: appended.seq,
@@ -2254,7 +2259,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (orgMemoryWrite
               ? ', and for plain "remember this org-wide" requests the lighter path is `"scope":"org"` on the memory self-API (memory skill)'
               : "") +
-            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs.";
+            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs." +
+            " System administration is not limited to the admin dashboard. Use the admin's independently authorized infrastructure or provider access to diagnose, repair, and manage this instance, including resources owned by other users. Ordinary resource-owner restrictions do not by themselves prohibit that administrative work or require the resource owner to do it. An owner-only API denial is not a denial of separately authorized system administration; verify that authority before taking another route. Using that independently authorized access as the admin is not impersonation or circumvention. Credential grants, provider permissions, explicit restrictions (including the portal-only actions above), mutation approvals, and audience privacy still apply. Keep actions attributed to the admin; never borrow another user's identity or credentials without authorization. Follow the admin and cloud-cli skills.";
         }
         if (deps.signingSecret && deps.apiBaseUrl && (deps.crons || deps.webhooks || deps.monitors)) {
           const nowMs = Date.now();
@@ -2777,7 +2783,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           input.attachments?.length && !strictReadOnly
             ? await materializeInbound(
                 deps.sandbox,
-                await provision(),
+                provision,
                 input.attachments,
                 blobTransfer,
                 fileRegistration,
@@ -2794,7 +2800,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   : undefined,
               )
             : { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] };
-        const manifest = inboundManifest(inbound.metas, turnInboxDir);
+        const manifest = inboundManifest(inbound.metas, turnInboxDir, inbound.unstaged);
         const inboundIssues = inboundIssueList({
           tooMany: inbound.tooMany,
           unavailable: inbound.unavailable,
@@ -3396,7 +3402,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   payload.name = actor.displayName.trim();
                 if (input.displayText?.trim() && payload.text === input.text && typeof payload.display !== "string")
                   payload.display = input.displayText;
-                if (syntheticPrompt || continuation) payload.hidden = true;
+                if ((syntheticPrompt || continuation) && payload.steered !== true) payload.hidden = true;
                 return { ...tainted, payload };
               })();
               const appended = await withManagedRosterVersion(() => deps.sessions.append(lease, stored));
@@ -3433,6 +3439,31 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           return deps.harness.turns.runTurn({
             session,
             prepareSteer: async (text, request) => {
+              const refreshedInbox =
+                input.surface === "web" &&
+                conversation.kind === "dm" &&
+                /^web:.+:inbox$/.test(conversation.threadRef) &&
+                request?.conversation.threadRef === conversation.threadRef
+                  ? request.conversationHeader?.trim()
+                  : undefined;
+              if (refreshedInbox) {
+                let allowed = true;
+                if (securityPolicy.inboundScreening === "external") {
+                  for (const chunk of securityScreenChunks("conversation-header", refreshedInbox)) {
+                    const verdict = await classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
+                      hook: "user_input",
+                      request: text,
+                      surface: "steer",
+                      origin: input.origin.kind,
+                    });
+                    if (verdict?.decision !== "auto" || verdict.unscreened) {
+                      allowed = false;
+                      break;
+                    }
+                  }
+                }
+                text = `${text}\n\n${allowed ? refreshedInbox : "Updated inbox context was withheld by the security screen."}`;
+              }
               if (!request?.attachments?.length) return { text };
               const seed = `${fileRegistration.seed}:steer:${randomUUID()}`;
               const inboxDir = `${turnInboxDir}/${randomUUID()}`;
@@ -3440,7 +3471,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 ? { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] }
                 : await materializeInbound(
                     deps.sandbox,
-                    await provision(),
+                    provision,
                     request.attachments,
                     blobTransfer,
                     { ...fileRegistration, seed },
@@ -3484,7 +3515,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               return {
                 text: [
                   text,
-                  inboundManifest(received.metas, inboxDir),
+                  inboundManifest(received.metas, inboxDir, received.unstaged),
                   ...steeredDocuments.notices,
                   issues.length ? fileEventPayload("in", issues).text : "",
                   securityPolicy.inboundScreening === "external" &&
@@ -3701,11 +3732,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               if (rec.kind !== "message" || rec.meta?.bareText === undefined) {
                 return withManagedRosterVersion(() => deps.sessions.appendTape(lease, rec));
               }
+              const recordedSteer = emittedEntries.find(
+                (entry) =>
+                  entry.seq === rec.entrySeq &&
+                  entry.type === "user" &&
+                  isObj(entry.payload) &&
+                  entry.payload.steered === true,
+              )?.payload;
               const meta = {
                 ...rec.meta,
                 ...swarmEntryProvenance,
                 ...(actor.displayName?.trim() ? { author: actor.displayName.trim() } : {}),
-                ...(syntheticPrompt || continuation ? { hidden: true } : {}),
+                ...((isObj(recordedSteer) && recordedSteer.hidden === true) ||
+                ((syntheticPrompt || continuation) && !recordedSteer)
+                  ? { hidden: true }
+                  : {}),
                 ...(input.displayText?.trim() && rec.meta.bareText === input.text
                   ? { display: input.displayText }
                   : {}),

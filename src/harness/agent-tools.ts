@@ -3054,14 +3054,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             (channel!.orders.trim() ? channel!.orders : "[no channel guidance set]") + ambient + ledger + note;
           return recordResult(callId, { tool: "guidance", scope, ok: true }, text(body));
         }
-        let orders = channel!.orders;
+        let orders = typeof params.content === "string" ? params.content : undefined;
         if (params.action === "edit") {
-          const edited = applyEdit(orders);
+          const edited = applyEdit(channel!.orders);
           if (!edited.ok) return editError(edited.message);
           orders = edited.next;
-        } else if (typeof params.content === "string") {
-          orders = params.content;
-        } else if (params.bots === undefined && params.ambientEnabled === undefined) {
+        } else if (typeof orders !== "string" && params.bots === undefined && params.ambientEnabled === undefined) {
           return recordResult(
             callId,
             { tool: "guidance", scope, error: "content, bots, or ambientEnabled required" },
@@ -3071,7 +3069,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
             true,
           );
         }
-        const r = await tc.setStandingOrder(orders, params.bots, params.ambientEnabled);
+        const r = await tc.setStandingOrder(
+          orders,
+          params.bots,
+          params.ambientEnabled,
+          params.action === "edit" ? channel!.orders : undefined,
+        );
         if (!r.ok)
           return recordResult(callId, { tool: "guidance", scope, ok: false }, text(`[error] ${r.message}`), true);
         return recordResult(callId, { tool: "guidance", scope, ok: true }, text("[channel guidance updated]"));
@@ -3096,12 +3099,14 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         );
       }
       let content = params.content;
+      let expectedVersion: number | undefined;
       if (params.action === "edit") {
         const current = tc.soulRead();
         if (isUnavailable(current)) return unavailable(callId, "guidance");
         const edited = applyEdit(current.soul ?? "");
         if (!edited.ok) return editError(edited.message);
         content = edited.next;
+        expectedVersion = current.soulVersion;
       } else if (typeof content !== "string") {
         return recordResult(
           callId,
@@ -3110,7 +3115,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           true,
         );
       }
-      const r = await tc.soulWrite(content);
+      const r = await tc.soulWrite(content, expectedVersion);
       if (isUnavailable(r)) return unavailable(callId, "guidance");
       if (!r.ok)
         return recordResult(callId, { tool: "guidance", scope, error: r.code }, text(`[error] ${r.message}`), true);

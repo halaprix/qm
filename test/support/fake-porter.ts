@@ -124,7 +124,9 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
       },
       async refresh() {
         known = true;
-        return { name, host: observe(bodies.get(name))?.host ?? "" };
+        const cur = observe(bodies.get(name));
+        const internal = cur?.networking?.[0]?.internal ? cur.networking[0].port : undefined;
+        return { name, host: cur?.host ?? "", ...(internal ? { internal_address: `127.0.0.1:${internal}` } : {}) };
       },
       async terminate() {
         const cur = bodies.get(name);
@@ -158,7 +160,7 @@ export function installFakePorter(opts: FakePorterOptions = {}): FakePorter {
         mkdirSync(app, { recursive: true });
         const exposed = spec.networking?.[0];
         const named = opts.assignHost === false ? undefined : `${spec.name}.fake.test`;
-        const host = exposed ? (exposed.domains?.[0]?.domain ?? named ?? "") : "";
+        const host = exposed && !exposed.internal ? (exposed.domains?.[0]?.domain ?? named ?? "") : "";
         bodies.set(spec.name!, {
           id: `sb-${++bodySeq}`,
           phase: "running",

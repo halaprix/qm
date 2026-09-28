@@ -43,6 +43,7 @@ export interface StoredPorterDeployBody {
   sandboxId: string;
   name: string;
   host: string;
+  port?: number;
   createdAtMs: number;
 }
 
@@ -51,7 +52,7 @@ export interface PorterDeployProviderOptions {
   token?: string;
   baseUrl?: string;
   runnerImage?: string;
-  visibility?: "public" | "private";
+  visibility?: "public" | "private" | "internal";
   namePrefix?: string;
   ttlSec?: number;
   appPort?: number;
@@ -65,7 +66,7 @@ export interface PorterDeployProviderOptions {
 export function createPorterDeployProvider(opts: PorterDeployProviderOptions): DeployProvider {
   const appsDomain = opts.appsDomain;
   const image = opts.runnerImage ?? DEFAULT_RUNNER_IMAGE;
-  const visibility = opts.visibility ?? "private";
+  const visibility = opts.visibility ?? (appsDomain ? "private" : "internal");
   const prefix = opts.namePrefix ?? "qm";
   const appPort = opts.appPort ?? APP_PORT_DEFAULT;
   const readyWindowSec = opts.readyWindowSec ?? APP_READY_WINDOW_SEC_DEFAULT;
@@ -88,13 +89,11 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
   const baseName = (d: Deployment): string => `${prefix}-app-${d.id.slice(0, 12).toLowerCase()}`;
   const volumeName = (d: Deployment): string => `${baseName(d)}-data`;
   const domainOf = (d: Deployment): string | undefined =>
-    appsDomain ? `${porterDnsLabel(d.name ?? d.id)}.${appsDomain}` : undefined;
-  const endpointOf = (host: string): DeployEndpoint => ({
-    host,
-    port: ENDPOINT_PORT,
-    tls: true,
-    publicUrl: `https://${host}/`,
-  });
+    appsDomain && visibility !== "internal" ? `${porterDnsLabel(d.name ?? d.id)}.${appsDomain}` : undefined;
+  const endpointOf = (body: { host: string; port?: number }): DeployEndpoint =>
+    body.port
+      ? { host: body.host, port: body.port }
+      : { host: body.host, port: ENDPOINT_PORT, tls: true, publicUrl: `https://${body.host}/` };
 
   const serialized = <T>(d: Deployment, fn: () => Promise<T>): Promise<T> =>
     queue(d.id, () => advisoryLock.withLock(`porter-deploy:${d.id}`, fn));
@@ -137,6 +136,28 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
     });
   }
 
+  async function addressOf(d: Deployment, sb: PorterSandboxLike): Promise<{ host: string; port?: number }> {
+    const status = await sb.refresh();
+    if (visibility === "internal") {
+      const address = status.internal_address ?? "";
+      const split = address.lastIndexOf(":");
+      const port = Number(address.slice(split + 1));
+      if (split <= 0 || !Number.isInteger(port) || port <= 0) {
+        throw new Error(
+          `porter deploy ${d.id}: the cluster reported no internal address for the app (${JSON.stringify(address)}) — internal visibility needs sandbox-api 0.1.58 or newer`,
+        );
+      }
+      return { host: address.slice(0, split), port };
+    }
+    const host = status.host || domainOf(d);
+    if (!host) {
+      throw new Error(
+        `porter deploy ${d.id}: the cluster named no host for the app — its sandbox ingress has no root domain, so set PORTER_DEPLOY_APPS_DOMAIN to a domain whose wildcard resolves to that ingress (docs/porter.md)`,
+      );
+    }
+    return { host };
+  }
+
   async function liveStored(d: Deployment): Promise<StoredPorterDeployBody | null> {
     const stored = await store.get(d.id);
     if (!stored) return null;
@@ -167,11 +188,14 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
             tags: { [KIND_TAG]: "app", [DEPLOY_TAG]: d.id },
             env: appEnv(version),
             volume_mounts: { [DATA_DIR]: volumeId },
-            networking: [{ port: appPort, ...(domainOf(d) ? { domains: [{ domain: domainOf(d), visibility }] } : {}) }],
+            networking:
+              visibility === "internal"
+                ? [{ port: appPort, internal: true }]
+                : [{ port: appPort, ...(domainOf(d) ? { domains: [{ domain: domainOf(d), visibility }] } : {}) }],
             ...(opts.ttlSec ? { ttl_seconds: opts.ttlSec } : {}),
           })
           .catch((e) => {
-            if (errMessage(e).includes("sandbox ingress")) {
+            if (visibility !== "internal" && errMessage(e).includes("sandbox ingress")) {
               throw new Error(
                 `porter deploy ${d.id}: the cluster refused the app's ${visibility} domain because sandbox ingress is not enabled — turn it on for this cluster (docs/porter.md), then point PORTER_DEPLOY_APPS_DOMAIN's wildcard DNS record at it (${errMessage(e)})`,
                 { cause: e },
@@ -181,16 +205,11 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
           });
         try {
           await waitPorterRunning(name, sb);
-          const host = (await sb.refresh()).host || domainOf(d);
-          if (!host) {
-            throw new Error(
-              `porter deploy ${d.id}: the cluster named no host for the app — its sandbox ingress has no root domain, so set PORTER_DEPLOY_APPS_DOMAIN to a domain whose wildcard resolves to that ingress (docs/porter.md)`,
-            );
-          }
+          const address = await addressOf(d, sb);
           await materialize(sb.id, version);
           await startApp(sb.id, version);
-          await store.put(d.id, { deploymentId: d.id, sandboxId: sb.id, name, host, createdAtMs: Date.now() });
-          return endpointOf(host);
+          await store.put(d.id, { deploymentId: d.id, sandboxId: sb.id, name, ...address, createdAtMs: Date.now() });
+          return endpointOf(address);
         } catch (e) {
           await sb.terminate().catch((err) => swallow("porter-deploy: abandon failed body", err));
           throw e;
@@ -205,7 +224,7 @@ export function createPorterDeployProvider(opts: PorterDeployProviderOptions): D
         resolveCache.delete(d.id);
         return null;
       }
-      const endpoint = endpointOf(stored.host);
+      const endpoint = endpointOf(stored);
       if (resolveCacheMs > 0) resolveCache.set(d.id, endpoint);
       return endpoint;
     },

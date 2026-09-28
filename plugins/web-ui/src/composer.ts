@@ -202,6 +202,11 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     void refreshRuntimeSelection(ctx.chat.state.scopeId, ctx.chat.state.agent ?? undefined, true);
   };
   window.addEventListener("model-account-changed", refreshAccount);
+  const revalidateRuntime = () => {
+    if (document.visibilityState === "visible")
+      void refreshRuntimeSelection(ctx.chat.state.scopeId, ctx.chat.state.agent ?? undefined, true);
+  };
+  document.addEventListener("visibilitychange", revalidateRuntime);
   let runtimeRequest = 0;
   let runtimeIdentity = "";
   let unsubscribeRuntime: (() => void) | undefined;
@@ -295,6 +300,24 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     );
   }
 
+  const steeringRuns = new Map<string, Array<QueuedRun & { ts: string }>>();
+
+  function steeringRunsFor(threadRef: string | null, agent: Agent): QueuedRun[] {
+    const steering = threadRef ? steeringRuns.get(threadRef) : undefined;
+    if (!threadRef || !steering) return [];
+    const settled = !agent.state.isStreaming && !ctx.chat.hasLiveRun();
+    const intakes = new Set(
+      agent.state.messages.flatMap((m) => {
+        const { steered, ts } = m as { steered?: boolean; ts?: string };
+        return steered && ts ? [ts] : [];
+      }),
+    );
+    const waiting = settled ? [] : steering.filter((run) => !intakes.has(run.ts));
+    if (waiting.length) steeringRuns.set(threadRef, waiting);
+    else steeringRuns.delete(threadRef);
+    return waiting;
+  }
+
   const fileDrag = createFileDragState((dragging) => {
     composerState.dragging = dragging;
     ctx.chat.drawActiveChat();
@@ -353,6 +376,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
               )
             ) {
               restoredLoadout = undefined;
+              followDefault(defaults);
             }
             defaults = next;
             syncRuntimeSelection(ctx.chat.state.agent ?? undefined);
@@ -367,6 +391,18 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       loadoutRestored = true;
     }
     syncRuntimeSelection(agent);
+  }
+
+  function followDefault(previous: { harnessId: string; modelId: string } | undefined): void {
+    const threadRef = ctx.chat.state.threadRef;
+    const pick = threadRef ? threadModelPicks.get(threadRef) : undefined;
+    const picked = pick ? modelOptionFor(pick, scopeKey()) : undefined;
+    if (!threadRef || !previous || !picked) return;
+    if (picked.harnessId !== previous.harnessId || picked.model.id !== previous.modelId) return;
+    forgetThreadPick(threadRef);
+    effortOverride = undefined;
+    fastModeOverride = undefined;
+    loadoutRestored = false;
   }
 
   function restoreLoadoutSelection(): void {
@@ -774,7 +810,9 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     const queued = [...queuedRunsFor(ctx.chat.state.threadRef)];
     if (queuedEdit?.threadRef === ctx.chat.state.threadRef && !queued.some((q) => q.runId === queuedEdit?.runId))
       queued.push({ runId: queuedEdit.runId, text: queuedEdit.original });
-    if (!queued.length) return nothing;
+    const threadRef = ctx.chat.state.threadRef;
+    const steering = steeringRunsFor(threadRef, agent);
+    if (!queued.length && !steering.length) return nothing;
     const steerable =
       agent.state.isStreaming &&
       !ctx.chat.isStopping() &&
@@ -786,6 +824,16 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
     };
     return html`
       <div class="queued-strip" role="list" aria-label="Queued messages">
+        ${steering.map(
+          (q) => html`
+            <div class="queued-chip queued-steering" role="listitem" aria-busy="true">
+              <span class="queued-tag">Steering</span>
+              <span class="queued-text" dir="auto" ${tip(q.text || "Files, no text")}
+                >${q.text || (q.hasAttachments ? "(files)" : "")}</span
+              >
+            </div>
+          `,
+        )}
         ${queued.map((q) =>
           queuedEdit?.runId === q.runId && queuedEdit.threadRef === ctx.chat.state.threadRef
             ? html` <div class="queued-chip queued-editing" role="listitem">
@@ -1422,12 +1470,21 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
       if (outcome.ok || outcome.replayed) {
         forgetQueuedRun(threadRef, queued.runId);
         bumpSessionActivity(threadRef);
-        if (agent === ctx.chat.state.agent && threadRef === ctx.chat.state.threadRef) {
+        if (outcome.ok)
+          steeringRuns.set(threadRef, [
+            ...(steeringRuns.get(threadRef) ?? []).filter((run) => run.runId !== queued.runId),
+            { ...queued, ts: `queued-steer:${threadRef}:${queued.runId}` },
+          ]);
+        if (
+          !outcome.ok &&
+          outcome.replayed &&
+          agent === ctx.chat.state.agent &&
+          threadRef === ctx.chat.state.threadRef
+        ) {
           agent.state.messages.push({
             role: "user",
             content: queued.text,
             timestamp: Date.now(),
-            ...(outcome.ok ? { steered: true } : {}),
           } as unknown as AgentMessage);
         }
       } else if (outcome.reason === "queued_changed") {
@@ -1903,6 +1960,7 @@ export function createComposerSurface(ctx: ConvCtx, options: ComposerOptions = {
 
   function dispose(): void {
     window.removeEventListener("model-account-changed", refreshAccount);
+    document.removeEventListener("visibilitychange", revalidateRuntime);
     modelPicker.dispose();
     unsubscribeRuntime?.();
     ++runtimeRequest;

@@ -19,7 +19,7 @@ export interface PorterSandboxLike {
   readonly id: string;
   readonly phase: string | null;
   readonly tags: Record<string, string> | null;
-  refresh(): Promise<{ name: string; host?: string }>;
+  refresh(): Promise<{ name: string; host?: string; internal_address?: string }>;
   terminate(): Promise<void>;
 }
 
@@ -31,7 +31,11 @@ export interface PorterSandboxSpec {
   env?: Record<string, string>;
   volume_mounts?: Record<string, string>;
   egress?: { allowed_destinations: string[] };
-  networking?: Array<{ port: number; domains?: Array<{ domain?: string; visibility?: "public" | "private" }> }>;
+  networking?: Array<{
+    port: number;
+    internal?: boolean;
+    domains?: Array<{ domain?: string; visibility?: "public" | "private" }>;
+  }>;
   ttl_seconds?: number;
 }
 

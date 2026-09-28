@@ -122,6 +122,23 @@ test("explicit public visibility opts the domain out of the private default", as
   ]);
 });
 
+test("without an apps domain the app defaults to its cluster-internal address", async () => {
+  const bare = createPorterDeployProvider({
+    namePrefix: "qmt",
+    appPort,
+    readyWindowSec: 10,
+    client: fake.client,
+    store,
+  });
+  const d = deployment("dep-1c", "hidden");
+  const endpoint = await bare.apply(d, version({ "server.js": SERVER }, "node server.js"));
+  assert.deepEqual(endpoint, { host: "127.0.0.1", port: appPort });
+  assert.deepEqual(fake.bodies()[0]!.networking, [{ port: appPort, internal: true }]);
+  assert.equal(fake.bodies()[0]!.host, "");
+  assert.deepEqual(await bare.resolveEndpoint!(d, version({}, "true")), endpoint);
+  assert.match(await (await fetch(`http://${endpoint.host}:${endpoint.port}/`)).text(), /^hello from .*-app v\?$/);
+});
+
 test("redeploy keeps the domain and the /data volume and retires the old body", async () => {
   const d = deployment("dep-2", "keeper");
   await provider.apply(d, version({ "server.js": SERVER }, "node server.js", { env: { APP_VERSION: "1" } }));
@@ -249,8 +266,9 @@ test("a body that vanished between list and terminate does not break destroy or 
   assert.match(await fetchText("/"), /^hello from/);
 });
 
-test("without an apps domain the cluster names the host itself", async () => {
+test("without an apps domain a private app gets the host the cluster names", async () => {
   const bare = createPorterDeployProvider({
+    visibility: "private",
     namePrefix: "qmt",
     appPort,
     readyWindowSec: 10,
@@ -269,6 +287,7 @@ test("a cluster that names no host fails the deploy and leaves no body behind", 
   fake.cleanup();
   fake = installFakePorter({ assignHost: false });
   const bare = createPorterDeployProvider({
+    visibility: "private",
     namePrefix: "qmt",
     appPort,
     readyWindowSec: 10,
