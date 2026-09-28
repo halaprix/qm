@@ -187,7 +187,6 @@ if (built.backgroundOwnership) {
     },
     fence: stopPeriodic,
     async relinquish() {
-      void stopDiscord();
       await Promise.all([
         built.runtime.stopBackgroundClaims(),
         built.scheduler.stopClaims(),
