@@ -473,8 +473,16 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
         return [...children, ...siblings].find((c) => c.title?.trim().toLowerCase() === trimmed.toLowerCase()) ?? null;
       }
 
-      function peerRefusal(target: Session): string | null {
+      function sidebarRefusal(): string | null {
         if (binding.request.surface !== "web") return WEB_ONLY;
+        if (binding.request.swarm || binding.session.parentSessionId || isSubagentThreadRef(binding.session.threadRef))
+          return "sessions belong to the person's sidebar; a subagent reports to its parent instead.";
+        return null;
+      }
+
+      function peerRefusal(target: Session): string | null {
+        const refusal = sidebarRefusal();
+        if (refusal) return refusal;
         if (target.parentSessionId || isSubagentThreadRef(target.threadRef) || target.threadRef.startsWith("swarm:"))
           return `"${target.title?.trim() || target.id}" is a subagent, not a session — use the subagents tool for it.`;
         return null;
@@ -885,7 +893,8 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
           await currentCaller();
           const conversations = deps.conversations;
           if (!conversations) return { ok: false, message: "sessions aren't available on this deployment." };
-          if (binding.request.surface !== "web") return { ok: false, message: WEB_ONLY };
+          const refusal = sidebarRefusal();
+          if (refusal) return { ok: false, message: refusal };
           const audience = binding.request.conversation.audience.length
             ? binding.request.conversation.audience
             : [binding.request.actor];
@@ -925,7 +934,8 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
           }
           const conversations = deps.conversations;
           if (!conversations) return { ok: false, message: "sessions aren't available on this deployment." };
-          if (binding.request.surface !== "web") return { ok: false, message: WEB_ONLY };
+          const refusal = sidebarRefusal();
+          if (refusal) return { ok: false, message: refusal };
           const verb = input.fork ? "fork" : "new";
           if (binding.liveTurn !== true)
             return {
@@ -933,8 +943,6 @@ export function createSessionSyscalls(deps: SessionSyscallDeps): SessionSyscalls
               message: `${verb} needs a person attending this turn — not a cron, trigger, subagent, or other automation.`,
             };
           if (binding.request.readOnly) return { ok: false, message: "a read-only turn cannot create sessions." };
-          if (binding.request.swarm || isSubagentThreadRef(binding.session.threadRef))
-            return { ok: false, message: "only a user-visible session can create sessions." };
           const text = input.text?.trim();
           if (!input.fork && !text)
             return { ok: false, message: "new requires `text`: the new session's first message." };

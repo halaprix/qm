@@ -1793,6 +1793,18 @@ test("sessions list shows only sidebar sessions the whole audience can see and c
       ok: false,
       message: '"worker" is a subagent, not a session — use the subagents tool for it.',
     });
+  const fromChild = factory.forTurn({
+    session: child,
+    scopeId: scope,
+    liveTurn: true,
+    request: {
+      surface: "web",
+      conversation: { kind: "dm", threadRef: child.threadRef, audience: [actor] },
+      actor,
+      origin: { kind: "human" },
+    } as Parameters<typeof factory.forTurn>[0]["request"],
+  });
+  for (const out of [await fromChild.list!(), await fromChild.start!({ fork: true })]) assert.equal(out.ok, false);
   const slack = forTurn(true, { surface: "slack" });
   for (const out of [
     await slack.list!(),
