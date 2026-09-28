@@ -6,7 +6,6 @@ import { createDiscordGate, type DiscordPluginConfig } from "./config.ts";
 import { conversationFor, routeMessage, type DiscordInbound } from "./events.ts";
 import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
 
-const DISCORD_STOP_DRAIN_MS = 30_000;
 export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
 const DISCORD_LOGIN_RETRY_MAX_MS = 300_000;
 
@@ -17,7 +16,7 @@ export interface DiscordPlugin {
 
 export interface DiscordPluginOptions {
   clientFactory?: () => Client;
-  drainTimeoutMs?: number;
+  drainTimeoutMs: number;
 }
 
 function toInbound(message: Message): DiscordInbound {
@@ -47,7 +46,7 @@ function replyChannel(ch: { send(options: MessageCreateOptions): Promise<StatusM
 export function createDiscordPlugin(
   cfg: DiscordPluginConfig,
   core: SurfaceCoreClient,
-  opts: DiscordPluginOptions = {},
+  opts: DiscordPluginOptions,
 ): DiscordPlugin {
   const gate = createDiscordGate(cfg);
   const clientFactory =
@@ -58,7 +57,7 @@ export function createDiscordPlugin(
         partials: [Partials.Channel],
         allowedMentions: { parse: [], repliedUser: false },
       }));
-  const drainTimeoutMs = opts.drainTimeoutMs ?? DISCORD_STOP_DRAIN_MS;
+  const drainTimeoutMs = opts.drainTimeoutMs;
 
   let client: Client | null = null;
   let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
@@ -117,12 +116,13 @@ export function createDiscordPlugin(
     } catch (err) {
       reportFailureAs("discord plugin login", undefined)(err);
       await c.destroy().catch(swallowAs("discord client cleanup", undefined));
-      if (client === c) {
+      const isCurrent = client === c;
+      if (isCurrent) {
         client = null;
         detachClient = null;
       }
       accepting = false;
-      if (!stopped && !retryTimer) {
+      if (!stopped && !retryTimer && isCurrent) {
         const delay = retryDelay;
         retryDelay = Math.min(retryDelay * 2, DISCORD_LOGIN_RETRY_MAX_MS);
         retryTimer = setTimeout(() => {
@@ -167,7 +167,13 @@ export function createDiscordPlugin(
       let drainPromise: Promise<void> | null = null;
       drainPromise = (async () => {
         try {
-          await (previousStop ? Promise.all([previousStop, drainCurrent()]) : drainCurrent());
+          if (previousStop) {
+            const [prevResult, currentResult] = await Promise.allSettled([previousStop, drainCurrent()]);
+            if (prevResult.status === "rejected") throw prevResult.reason;
+            if (currentResult.status === "rejected") throw currentResult.reason;
+          } else {
+            await drainCurrent();
+          }
         } finally {
           if (stopPromise === drainPromise) {
             stopPromise = null;

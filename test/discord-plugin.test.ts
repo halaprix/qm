@@ -101,7 +101,7 @@ test("plugin is restartable and creates a new client on each start", async () =>
     }) as never;
   };
 
-  const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory });
+  const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory, drainTimeoutMs: 5000 });
   await plugin.start();
   assert.equal(clientCount, 1);
   await plugin.stop();
@@ -265,6 +265,93 @@ test("a second stop while draining waits for the same drain", async () => {
   assert.deepEqual(events, ["handle.start", "handle.finish", "client.destroy"]);
 });
 
+test("second stop does not settle before second client drain even if previous destroy rejects", async () => {
+  let finishTurn1: () => void;
+  const turn1Promise = new Promise<void>((r) => {
+    finishTurn1 = r;
+  });
+  let finishTurn2: () => void;
+  const turn2Promise = new Promise<void>((r) => {
+    finishTurn2 = r;
+  });
+
+  let clientSeq = 0;
+  const emitters: EventEmitter[] = [];
+  const factory = () => {
+    const id = ++clientSeq;
+    const emitter = new EventEmitter();
+    emitters.push(emitter);
+    return Object.assign(emitter, {
+      user: { id: `bot-${id}`, tag: `bot#000${id}` },
+      login: async () => "ok",
+      destroy: async () => {
+        if (id === 1) {
+          throw new Error("first client destroy failed");
+        }
+      },
+    }) as never;
+  };
+
+  const core = {
+    ...fakeCore(),
+    submitTurn: async (req: { text: string }) => {
+      if (req.text === "turn 1") await turn1Promise;
+      if (req.text === "turn 2") await turn2Promise;
+      return { status: "ok", reply: "done" };
+    },
+  } as unknown as SurfaceCoreClient;
+
+  const plugin = createDiscordPlugin(cfg, core, {
+    clientFactory: factory,
+    drainTimeoutMs: 5000,
+  });
+
+  await plugin.start();
+
+  const fakeMessage = (text: string) => ({
+    id: `m-${text}`,
+    channelId: "c1",
+    guildId: null,
+    author: { id: "111", username: "user", bot: false },
+    content: text,
+    attachments: new Map(),
+    channel: {
+      send: async () => ({
+        edit: async () => {},
+        delete: async () => {},
+      }),
+    },
+  });
+
+  emitters[0]!.emit("messageCreate", fakeMessage("turn 1"));
+  await new Promise((r) => setTimeout(r, 10));
+
+  const stop1 = plugin.stop();
+  stop1.catch(() => {});
+  const start2 = plugin.start();
+  await start2;
+
+  emitters[1]!.emit("messageCreate", fakeMessage("turn 2"));
+  await new Promise((r) => setTimeout(r, 10));
+
+  let secondStopSettled = false;
+  const stop2 = plugin.stop();
+  stop2
+    .catch(() => {})
+    .finally(() => {
+      secondStopSettled = true;
+    });
+
+  finishTurn1!();
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(secondStopSettled, false);
+
+  finishTurn2!();
+  await assert.rejects(stop2, /first client destroy failed/);
+  assert.equal(secondStopSettled, true);
+});
+
 test("a failed login retries with a new client", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {
@@ -291,7 +378,7 @@ test("a failed login retries with a new client", async () => {
       }) as never;
     };
 
-    const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory });
+    const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory, drainTimeoutMs: 5000 });
     await plugin.start();
 
     assert.equal(createdClients.length, 1);
@@ -334,7 +421,7 @@ test("stop cancels a pending login retry so a restart connects at once", async (
       }) as never;
     };
 
-    const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory });
+    const plugin = createDiscordPlugin(cfg, fakeCore(), { clientFactory: factory, drainTimeoutMs: 5000 });
     await plugin.start();
 
     assert.equal(createdClients.length, 1);
@@ -348,6 +435,62 @@ test("stop cancels a pending login retry so a restart connects at once", async (
 
     assert.equal(createdClients.length, 2);
   } finally {
+    mock.timers.reset();
+  }
+});
+
+test("c1 login rejection after stop and start does not schedule a retry or create a new client", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let clientSeq = 0;
+    let rejectLogin1: (err: Error) => void;
+    const login1Promise = new Promise<string>((_, reject) => {
+      rejectLogin1 = reject;
+    });
+
+    const factory = () => {
+      const id = ++clientSeq;
+      const emitter = new EventEmitter();
+      return Object.assign(emitter, {
+        user: { id: `bot-${id}`, tag: `bot#000${id}` },
+        login: async () => {
+          if (id === 1) return await login1Promise;
+          return "ok";
+        },
+        destroy: async () => {},
+      }) as never;
+    };
+
+    const plugin = createDiscordPlugin(cfg, fakeCore(), {
+      clientFactory: factory,
+      drainTimeoutMs: 5000,
+    });
+
+    const start1 = plugin.start();
+    await Promise.resolve();
+    assert.equal(clientSeq, 1);
+
+    await plugin.stop();
+
+    const start2 = plugin.start();
+    await start2;
+    assert.equal(clientSeq, 2);
+
+    const setTimeoutSpy = mock.method(globalThis, "setTimeout");
+    rejectLogin1!(new Error("c1 login failed"));
+    await start1.catch(() => {});
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    assert.equal(setTimeoutSpy.mock.calls.length, 0);
+
+    mock.timers.tick(DISCORD_LOGIN_RETRY_BASE_MS * 2);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    assert.equal(clientSeq, 2);
+
+    await plugin.stop();
+  } finally {
+    mock.restoreAll();
     mock.timers.reset();
   }
 });

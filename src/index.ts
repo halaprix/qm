@@ -31,7 +31,9 @@ await migrateRegisteredPgSchemas(config.databaseUrl);
 await built.sandboxResources.initialize();
 const backfilledFires = await built.crons.backfillFires();
 if (backfilledFires > 0) console.log(`[qm] backfilled ${backfilledFires} cron fire log entries into cron_fires`);
-const discordPlugin = discordConfig ? createDiscordPlugin(discordConfig, built.discordCore) : null;
+const discordPlugin = discordConfig
+  ? createDiscordPlugin(discordConfig, built.discordCore, { drainTimeoutMs: config.shutdownDrainMs })
+  : null;
 const stopDiscord = (): Promise<void> =>
   discordPlugin
     ? discordPlugin.stop().catch((e: unknown) => console.error("[qm] discord plugin stop failed:", errMessage(e)))
@@ -185,11 +187,11 @@ if (built.backgroundOwnership) {
     },
     fence: stopPeriodic,
     async relinquish() {
+      void stopDiscord();
       await Promise.all([
         built.runtime.stopBackgroundClaims(),
         built.scheduler.stopClaims(),
         ...[slackRuntime, ...slackAccountRuntimes].map((runtime) => runtime.stop()),
-        stopDiscord(),
       ]);
     },
     async drained() {
