@@ -68,11 +68,15 @@ async function runIsolated(file, index) {
   }
 }
 
-async function cleanup() {
-  for (const child of children) child.kill("SIGKILL");
-  if (!admin) return;
-  await Promise.allSettled([...created].map(dropDatabase));
-  await admin.end();
+let cleaning = null;
+function cleanup() {
+  cleaning ??= (async () => {
+    for (const child of children) child.kill("SIGKILL");
+    if (!admin) return;
+    await Promise.allSettled([...created].map(dropDatabase));
+    await admin.end();
+  })();
+  return cleaning;
 }
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
