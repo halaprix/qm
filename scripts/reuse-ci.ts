@@ -105,7 +105,7 @@ export async function reusableCi(
       return;
   }
   const receiptJob = jobs.jobs.find((job: any) => job.name === "Certify tested tree");
-  for (const name of ["Checkout tested commit", "Record the immutable tested tree"]) {
+  for (const name of ["Validate receipt eligibility", "Checkout tested commit", "Record the immutable tested tree"]) {
     const steps = receiptJob.steps.filter((step: any) => step.name === name);
     if (steps.length !== 1 || !success(steps[0])) return;
   }

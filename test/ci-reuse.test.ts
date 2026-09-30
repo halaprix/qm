@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { CI_JOBS, readReceipt, reusableCi, reusePathsAllowed } from "../scripts/reuse-ci.ts";
@@ -41,7 +42,9 @@ function fixture() {
     run_id: run.id,
     run_attempt: run.run_attempt,
     head_sha: head,
-    steps: ["Checkout tested commit", "Record the immutable tested tree"].map((name) => ({ ...success, name })),
+    steps: ["Validate receipt eligibility", "Checkout tested commit", "Record the immutable tested tree"].map(
+      (name) => ({ ...success, name }),
+    ),
   }));
   const receipt = { sha: tested, tree, runId: run.id, attempt: run.run_attempt, pr: pull.number };
   const data: Record<string, any> = {
@@ -293,20 +296,62 @@ test("all quality jobs keep successful names and missing proof runs full checks"
 test("receipt is an isolated immutable checkout with no secrets, artifacts, caches or repository scripts", () => {
   const job = jobs.certify!;
   assert.ok(job.includes("continue-on-error: true"));
-  assert.ok(job.includes("github.event.pull_request.head.repo.full_name == github.repository"));
+  assert.ok(job.includes("github.event_name == 'pull_request'"));
+  assert.ok(job.includes("PR_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}"));
+  assert.ok(job.includes('test "$PR_REPOSITORY_ID" = "$GITHUB_REPOSITORY_ID"'));
+  assert.ok(job.includes('if (checks[id]?.result !== "success") throw new Error'));
   assert.ok(job.includes("always() && !cancelled()"));
-  for (const result of ["failure", "cancelled", "skipped"])
-    assert.ok(job.includes(`!contains(needs.*.result, '${result}')`));
   assert.ok(job.includes("permissions:\n      contents: read"));
   assert.ok(
     job.includes(
       "needs: [core, cli, lint, core-postgres, admin-plugin, web-ui-plugin, auth-plugin, portal-plugin, coauthor-trailers]",
     ),
   );
-  assert.equal([...job.matchAll(/^ {6}- /gm)].length, 2);
+  assert.equal([...job.matchAll(/^ {6}- /gm)].length, 3);
   assert.ok(job.includes("ref: ${{ github.sha }}\n          persist-credentials: false"));
   assert.match(job, /uses: actions\/checkout@[a-f0-9]{40}/);
   assert.ok(job.includes('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'));
   assert.ok(job.includes("QM_CI_TREE="));
   assert.doesNotMatch(job, /secrets\.|npm |scripts\/|artifact|cache|id-token/);
+});
+
+test("inline receipt eligibility rejects missing or failed prerequisites, not an unrelated skipped resolver", () => {
+  const script = jobs
+    .certify!.split("      - name: Validate receipt eligibility")[1]!
+    .split("      - name: Checkout tested commit")[0]!
+    .split("        run: |\n")[1]!
+    .replace(/^ {10}/gm, "");
+  const ids = [
+    "core",
+    "cli",
+    "lint",
+    "core-postgres",
+    "admin-plugin",
+    "web-ui-plugin",
+    "auth-plugin",
+    "portal-plugin",
+    "coauthor-trailers",
+  ];
+  const checks = Object.fromEntries(ids.map((id) => [id, { result: "success" }]));
+  checks.reuse = { result: "skipped" };
+  const execute = (source = "123", target = "123") =>
+    spawnSync("bash", ["-eo", "pipefail", "-c", script], {
+      env: { ...process.env, PR_REPOSITORY_ID: source, GITHUB_REPOSITORY_ID: target, CHECKS: JSON.stringify(checks) },
+      encoding: "utf8",
+    });
+  assert.equal(execute().status, 0);
+  for (const [source, target] of [
+    ["123", "456"],
+    ["", "123"],
+    ["", ""],
+    ["123", ""],
+  ])
+    assert.notEqual(execute(source, target).status, 0, `${source}/${target}`);
+  for (const id of ids) {
+    checks[id] = { result: "failure" };
+    assert.notEqual(execute().status, 0, id);
+    delete checks[id];
+    assert.notEqual(execute().status, 0, id);
+    checks[id] = { result: "success" };
+  }
 });

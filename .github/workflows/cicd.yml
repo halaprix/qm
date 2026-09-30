@@ -435,15 +435,20 @@ jobs:
     name: Certify tested tree
     timeout-minutes: 3
     continue-on-error: true
-    if: >-
-      always() && !cancelled() && github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped')
+    if: always() && !cancelled() && github.event_name == 'pull_request'
     needs: [core, cli, lint, core-postgres, admin-plugin, web-ui-plugin, auth-plugin, portal-plugin, coauthor-trailers]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
+      - name: Validate receipt eligibility
+        env:
+          PR_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
+          CHECKS: ${{ toJSON(needs) }}
+        run: |
+          test -n "$PR_REPOSITORY_ID"
+          test "$PR_REPOSITORY_ID" = "$GITHUB_REPOSITORY_ID"
+          node -e 'const checks = JSON.parse(process.env.CHECKS); for (const id of ["core", "cli", "lint", "core-postgres", "admin-plugin", "web-ui-plugin", "auth-plugin", "portal-plugin", "coauthor-trailers"]) { if (checks[id]?.result !== "success") throw new Error(`${id} did not pass`); }'
       - name: Checkout tested commit
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
