@@ -941,7 +941,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               status: "pending_approval",
               detail: JSON.stringify({ cause: "strict-verdict", reason: flaggedScreenedInput.reason, source: sources }),
             });
-          } else if (enforceScreen && (unscreenableCause || verdict?.unscreened)) {
+          } else if (unscreenableCause || verdict?.unscreened) {
             inputUnscreened = true;
             deps.auditLog.record({
               at: Date.now(),

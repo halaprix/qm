@@ -156,6 +156,7 @@ export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassi
       const requestId = context.requestId ?? randomUUID();
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
+      if (observe) timer.unref();
       const timedOut = new Promise<undefined>((resolve) =>
         abort.signal.addEventListener("abort", () => resolve(undefined), { once: true }),
       );

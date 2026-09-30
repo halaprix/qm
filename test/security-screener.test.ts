@@ -367,7 +367,8 @@ test("observed screening returns immediately, queues bounded work, and records o
     ["skipped_capacity", "skipped_capacity"],
   );
   release();
-  while (events.length < 70) await new Promise((resolve) => setTimeout(resolve, 1));
+  const deadline = Date.now() + 2_000;
+  while (events.length < 70 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 1));
   assert.equal(peak, 4);
   assert.equal(events.filter((event) => event.status === "would_block").length, 68);
   const detail = JSON.parse(events.at(-1)!.detail!) as Record<string, unknown>;

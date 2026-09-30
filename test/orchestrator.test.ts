@@ -4434,6 +4434,21 @@ async function screenEvent(built: ReturnType<typeof freshApp>, status: string) {
   assert.fail(`no ${status} screen verdict`);
 }
 
+test("observe screening never waits on a hung classifier", async () => {
+  const built = freshApp(
+    { securityPosture: "auto", securityScreen: "observe" },
+    { provider: "fixture-screen", classify: () => new Promise(() => {}) },
+  );
+  const started = Date.now();
+  const inbound = await built.app.turn(
+    dm("summarize the event", { surface: "webhook", triggered: true, securityScreenData: "ordinary fixture data" }),
+  );
+  const tool = await built.app.turn(dm("!screened-run printf observe-ok"));
+  assert.equal(inbound.status, "ok");
+  assert.equal(tool.reply, "observe-ok");
+  assert.ok(Date.now() - started < 5_000);
+});
+
 for (const [securityPosture, securityScreen] of [
   ["dangerous", "observe"],
   ["auto", "observe"],
