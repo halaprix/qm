@@ -8,8 +8,25 @@ import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
 import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
-import type { OutgoingAttachment, TurnRequest, TurnResult } from "../types.ts";
+import type {
+  ActorAssertion,
+  Delivery,
+  OutgoingAttachment,
+  PendingApproval,
+  ScopeId,
+  SurfaceContextRequest,
+  SurfaceContextResult,
+  TurnRequest,
+  TurnResult,
+} from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
+import type { IdentityService } from "../identity/identity-service.ts";
+import type { DeliveryStore } from "../delivery/delivery-store.ts";
+import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
+import type { ErrorLog } from "../admin/error-log.ts";
+import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
+import type { IngestEvent } from "../surface-cache/surface-cache.ts";
+import { decideDeploymentAccess } from "../deploy/access-decision.ts";
 
 interface SurfaceRunHooks {
   onFirstBlock?(text: string): void;
@@ -19,6 +36,12 @@ interface SurfaceRunHooks {
 }
 
 export type CoreTurnBody = Omit<TurnRequest, "surface">;
+
+export interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
+  createdAt?: number;
+  reason?: string;
+  request?: Record<string, unknown>;
+}
 
 export interface SurfaceCoreClient {
   submitTurn(body: CoreTurnBody): Promise<TurnResult>;
@@ -30,6 +53,21 @@ export interface SurfaceCoreClient {
   stageBlob(bytes: Uint8Array): Promise<{ blobId: string; sizeBytes: number }>;
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
+  ingestSurfaceEvents(events: IngestEvent[], self?: { name?: string; mentionId?: string }): Promise<void>;
+  ackRunDelivery(runId: string): Promise<void>;
+  reportRunEditRef(runId: string, editRef: string): Promise<void>;
+  claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
+  getDelivery(id: string): Promise<Delivery | null>;
+  ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
+  reportDeliveryUndeliverable(id: string, reason: string): Promise<void>;
+  onDeliveryEnqueued(listener: () => void): () => void;
+  holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
+  pendingContextRequests(): Promise<SurfaceContextRequest[]>;
+  onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
+  fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
+  getApproval(requestId: string): Promise<StoredApprovalView | null>;
+  decideDeploymentAccess(value: string, actor: ActorAssertion, approve: boolean): Promise<string>;
+  keychainApprovals?: KeychainApprovals;
 }
 
 export async function readOutgoingAttachment(
@@ -50,12 +88,18 @@ export interface SurfaceCoreClientDeps {
   turnStream: TurnStream;
   tasks: TaskStore;
   blobTransfer: BlobTransferStore;
+  identity: IdentityService;
+  deliveries: DeliveryStore;
+  leaderLease?: LeaderLease;
+  errors?: ErrorLog;
+  keychainApprovals?: KeychainApprovals;
 }
 
 const RUN_FALLBACK_POLL_MS = 1_000;
 const RUN_STALL_BUDGET_MS = 300_000;
 
 export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: string): SurfaceCoreClient {
+  const lease = deps.leaderLease ?? createNoopLeaderLease();
   const terminalWaiters = new Map<string, Set<() => void>>();
   deps.runs.onTerminal((run) => {
     for (const wake of terminalWaiters.get(run.id) ?? []) wake();
@@ -198,6 +242,90 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
     async signalRunAbort(runId) {
       const outcome = await deps.app.signalRun(runId, { kind: "abort" });
       if (!outcome.accepted) throw new Error(`signal abort not accepted: ${outcome.reason ?? "unknown"}`);
+    },
+
+    decideDeploymentAccess: (value, actor, approve) =>
+      decideDeploymentAccess(deps.app, deps.identity, value, actor, approve),
+    ...(deps.keychainApprovals ? { keychainApprovals: deps.keychainApprovals } : {}),
+
+    async ingestSurfaceEvents(events, self) {
+      if (!events.length) return;
+      await deps.app.ingestSurfaceEvents(events, surface, self);
+    },
+
+    async ackRunDelivery(runId) {
+      await deps.app.ackDeliveryByKey(`run:${runId}`);
+    },
+
+    async reportRunEditRef(runId, editRef) {
+      const found = await deps.app.setRunDeliveryState(runId, { editRef });
+      if (!found) throw new Error(`run ${runId} not found`);
+    },
+
+    async getApproval(requestId) {
+      const record = await deps.app.getApproval(requestId);
+      if (!record) return null;
+      return {
+        requestId: record.requestId,
+        ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
+        command: record.command,
+        ...(record.reason !== undefined ? { reason: record.reason } : {}),
+        ...(record.purpose !== undefined ? { purpose: record.purpose } : {}),
+        ...(record.summary !== undefined ? { summary: record.summary } : {}),
+        ...(record.summaryDetail !== undefined ? { summaryDetail: record.summaryDetail } : {}),
+        ...(record.grantModes !== undefined ? { grantModes: record.grantModes } : {}),
+        ...(record.kind !== undefined ? { kind: record.kind } : {}),
+        ...(record.request !== undefined ? { request: record.request as unknown as Record<string, unknown> } : {}),
+      };
+    },
+
+    claimDeliveries(type, claimMs) {
+      return deps.app.pendingDeliveries(type, claimMs);
+    },
+
+    getDelivery(id) {
+      return deps.deliveries.get(id);
+    },
+
+    holdDeliveryDispatch(fn) {
+      return lease.hold(`${surface}:delivery-dispatch`, fn);
+    },
+
+    async ackDelivery(id, body) {
+      if (body?.recipientThreadRef) await deps.app.recordPrincipalDelivery(id, body.recipientThreadRef);
+      await deps.app.ackDelivery(id, body?.slackApiMs);
+    },
+
+    async reportDeliveryUndeliverable(id, reason) {
+      deps.errors?.record({
+        category: "delivery",
+        code: "delivery_undeliverable",
+        message: `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
+        scopeLabel: `${surface}:deliveries` as ScopeId,
+      });
+    },
+
+    onDeliveryEnqueued(listener) {
+      return deps.deliveries.onEnqueue(listener);
+    },
+
+    pendingContextRequests() {
+      return deps.app.pendingContextRequests(surface);
+    },
+
+    onContextRequest(listener) {
+      return deps.app.onContextRequestCreated((request) => {
+        if (request.source === surface) listener(request);
+      });
+    },
+
+    async fulfillContextRequest(id, outcome) {
+      await deps.app
+        .fulfillContextRequest(id, outcome)
+        .then((ok) => {
+          if (!ok) return;
+        })
+        .catch(swallowAs("surface-core-client: fulfill context request", undefined));
     },
   };
 }

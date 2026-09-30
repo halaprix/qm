@@ -1,6 +1,4 @@
-import { decideDeploymentAccess } from "../slack/deploy-access.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
-import type { ActorAssertion } from "../types.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { createTaskAcknowledgements, type TaskAckState, type TaskAcknowledgements } from "../slack/task-ack.ts";
 import { orgId as configOrgId } from "../config.ts";
@@ -9,7 +7,7 @@ import { resolveBranding } from "../resolution/branding.ts";
 import type { App } from "./app.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
 import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
-import type { Delivery, PendingApproval, ScopeId, SurfaceContextRequest, SurfaceContextResult } from "../types.ts";
+import type { Delivery, ScopeId, SurfaceContextRequest } from "../types.ts";
 import { scopeId } from "../types.ts";
 import type { CachedMessage, ReadMessagesOpts, SurfaceCache, IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
@@ -49,12 +47,6 @@ export interface SlackAgentRequestContext {
   approvalRequestIds?: string[];
 }
 
-interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
-  createdAt?: number;
-  reason?: string;
-  request?: Record<string, unknown>;
-}
-
 interface DirectoryPush {
   members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string }>;
   channels?: Array<{ channelId: string; name: string; isPrivate?: boolean; isExternal?: boolean }>;
@@ -70,10 +62,13 @@ interface DirectoryPush {
   groupsSyncedAt?: number;
 }
 
-export interface SlackCoreClient extends Omit<SurfaceCoreClient, "streamSnapshot"> {
+export interface SlackCoreClient extends Omit<
+  SurfaceCoreClient,
+  "streamSnapshot" | "getDelivery" | "reportDeliveryUndeliverable"
+> {
   streamSnapshot?(runId: string): string | null;
-  decideDeploymentAccess(value: string, actor: ActorAssertion, approve: boolean): Promise<string>;
-  keychainApprovals?: KeychainApprovals;
+  getDelivery?(id: string): Promise<Delivery | null>;
+  reportDeliveryUndeliverable?(id: string, reason: string): Promise<void>;
   taskAcknowledgements?: TaskAcknowledgements;
   externalSlackParticipants(): Promise<boolean>;
   internalMemberOverrides(): Promise<string[]>;
@@ -85,29 +80,16 @@ export interface SlackCoreClient extends Omit<SurfaceCoreClient, "streamSnapshot
   onChannelHeaderPinChanged(listener: (scope: ScopeId) => void): void;
   rememberSurfaceHistory?(events: IngestEvent[]): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
-  ingestSurfaceEvents(events: IngestEvent[], self?: { name?: string; mentionId?: string }): Promise<void>;
-  ackRunDelivery(runId: string): Promise<void>;
   reportTurnMetrics(runId: string, patch: { deliverMs?: number; slackInflightMs?: number }): Promise<void>;
-  reportRunEditRef(runId: string, editRef: string): Promise<void>;
-  getApproval(requestId: string): Promise<StoredApprovalView | null>;
   putAgentRequest(requestId: string, record: SlackAgentRequestContext): Promise<void>;
   getAgentRequest(requestId: string): Promise<SlackAgentRequestContext | null>;
   takeAgentRequest(requestId: string): Promise<SlackAgentRequestContext | null>;
   agentRequestForApproval(approvalRequestId: string): Promise<SlackAgentRequestContext | null>;
   pushDirectory(body: DirectoryPush): Promise<boolean>;
-  claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
-  ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
-  reportDeliveryUndeliverable?(id: string, reason: string): Promise<void>;
-
-  holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   holdEnvelopeReplay<T>(account: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
   holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
-  onDeliveryEnqueued(listener: () => void): () => void;
-  pendingContextRequests(): Promise<SurfaceContextRequest[]>;
-  onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
-  fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
   pickAckEmoji(text: string, candidates: readonly string[]): Promise<string | undefined>;
   recordAckPick(pick: AckPickInput): Promise<void>;
   inboxSlackMessage(msg: {
@@ -205,9 +187,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
   return {
     ...createSurfaceCoreClient(deps, "slack"),
-    decideDeploymentAccess: (value, actor, approve) =>
-      decideDeploymentAccess(deps.app, deps.identity, value, actor, approve),
-    ...(deps.keychainApprovals ? { keychainApprovals: deps.keychainApprovals } : {}),
     ...(deps.taskAcknowledgements
       ? { taskAcknowledgements: createTaskAcknowledgements(deps.taskAcknowledgements, lease, deps) }
       : {}),
@@ -258,39 +237,8 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       return deps.app.readSurfaceMessages(container, { ...opts, noFallback: true });
     },
 
-    async ingestSurfaceEvents(events, self) {
-      if (!events.length) return;
-      await deps.app.ingestSurfaceEvents(events, "slack", self);
-    },
-
-    async ackRunDelivery(runId) {
-      await deps.app.ackDeliveryByKey(`run:${runId}`);
-    },
-
     async reportTurnMetrics(runId, patch) {
       await deps.metrics.updateByRunId(runId, patch);
-    },
-
-    async reportRunEditRef(runId, editRef) {
-      const found = await deps.app.setRunDeliveryState(runId, { editRef });
-      if (!found) throw new Error(`run ${runId} not found`);
-    },
-
-    async getApproval(requestId) {
-      const record = await deps.app.getApproval(requestId);
-      if (!record) return null;
-      return {
-        requestId: record.requestId,
-        ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
-        command: record.command,
-        ...(record.reason !== undefined ? { reason: record.reason } : {}),
-        ...(record.purpose !== undefined ? { purpose: record.purpose } : {}),
-        ...(record.summary !== undefined ? { summary: record.summary } : {}),
-        ...(record.summaryDetail !== undefined ? { summaryDetail: record.summaryDetail } : {}),
-        ...(record.grantModes !== undefined ? { grantModes: record.grantModes } : {}),
-        ...(record.kind !== undefined ? { kind: record.kind } : {}),
-        ...(record.request !== undefined ? { request: record.request as unknown as Record<string, unknown> } : {}),
-      };
     },
 
     ...createAgentRequestStore(deps.agentRequests),
@@ -317,12 +265,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       return applied;
     },
 
-    claimDeliveries(type, claimMs) {
-      return deps.app.pendingDeliveries(type, claimMs);
-    },
-    holdDeliveryDispatch(fn) {
-      return lease.hold("slack:delivery-dispatch", fn);
-    },
     holdDirectorySync(fn) {
       return lease.hold("slack:directory-sync", fn);
     },
@@ -331,40 +273,12 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
     },
     stagedEnvelopes: deps.stagedEnvelopes,
 
-    async ackDelivery(id, body) {
-      if (body?.recipientThreadRef) await deps.app.recordPrincipalDelivery(id, body.recipientThreadRef);
-      await deps.app.ackDelivery(id, body?.slackApiMs);
-    },
-
-    async reportDeliveryUndeliverable(id, reason) {
-      deps.errors?.record({
-        category: "delivery",
-        code: "delivery_undeliverable",
-        message: `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
-        scopeLabel: "slack:deliveries" as ScopeId,
-      });
-    },
-
     async reportSlowDeliveryDrain(info) {
       deps.errors?.record({
         category: "delivery",
         code: "delivery_drain_slow",
         message: `drain cycle took ${Math.round(info.durationMs / 1000)}s for ${info.rows} rows`,
         scopeLabel: "slack:deliveries" as ScopeId,
-      });
-    },
-
-    onDeliveryEnqueued(listener) {
-      return deps.deliveries.onEnqueue(listener);
-    },
-
-    pendingContextRequests() {
-      return deps.app.pendingContextRequests("slack");
-    },
-
-    onContextRequest(listener) {
-      return deps.app.onContextRequestCreated((request) => {
-        if (request.source === "slack") listener(request);
       });
     },
 
@@ -401,15 +315,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
           createdAt: Date.now(),
         })
         .catch(() => {});
-    },
-
-    async fulfillContextRequest(id, outcome) {
-      await deps.app
-        .fulfillContextRequest(id, outcome)
-        .then((ok) => {
-          if (!ok) return;
-        })
-        .catch(swallowAs("slack-core-client: fulfill context request", undefined));
     },
   };
 }

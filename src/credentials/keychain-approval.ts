@@ -89,7 +89,11 @@ export function createKeychainApprovals(deps: {
       let grant: KeychainGrant | undefined;
       try {
         if (decision === "deny")
-          resolved = await keychain.declineAsk({ askId: id, ownerId: actor.id, note: "Denied in Slack" });
+          resolved = await keychain.declineAsk({
+            askId: id,
+            ownerId: actor.id,
+            note: "Denied by the credential owner",
+          });
         else
           ({ ask: resolved, grant } = await keychain.approveAsk({
             askId: id,

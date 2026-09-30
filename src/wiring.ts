@@ -2151,20 +2151,19 @@ export function buildApp(
     items: loopItems,
     requestFire: (loopId) => void loopFire.fire(loopId, `loop:${loopId}:slack-event:${Date.now()}`).catch(() => {}),
   });
+  const keychainApprovals = keychain
+    ? createKeychainApprovals({
+        keychain,
+        app,
+        identity,
+        sessions,
+        audit: auditLog,
+        resume: (ask, grant) => askResolution!(ask, grant),
+      })
+    : undefined;
   const slackCore = createSlackCoreClient({
     identity,
-    ...(keychain
-      ? {
-          keychainApprovals: createKeychainApprovals({
-            keychain,
-            app,
-            identity,
-            sessions,
-            audit: auditLog,
-            resume: (ask, grant) => askResolution!(ask, grant),
-          }),
-        }
-      : {}),
+    ...(keychainApprovals ? { keychainApprovals } : {}),
     surfaceCache,
     taskAcknowledgements: artifactMap<TaskAckState>("slack_task_acknowledgements"),
     inboxEvent: (event) => inboxRealtime.onConversationEvent(event),
@@ -2186,7 +2185,21 @@ export function buildApp(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
-  const discordCore = createSurfaceCoreClient({ app, runs, turnStream, tasks, blobTransfer }, DISCORD_SURFACE);
+  const discordCore = createSurfaceCoreClient(
+    {
+      app,
+      runs,
+      turnStream,
+      tasks,
+      blobTransfer,
+      identity,
+      deliveries,
+      leaderLease,
+      errors,
+      ...(keychainApprovals ? { keychainApprovals } : {}),
+    },
+    DISCORD_SURFACE,
+  );
   runs.onTerminal((run) => {
     void runs
       .activeForThread(run.sessionId)
