@@ -5,7 +5,7 @@ import { ingestAttachments } from "./attachments.ts";
 import type { DiscordPluginConfig } from "./config.ts";
 import { classifyMember } from "./members.ts";
 import { conversationFor, routeMessage, type DiscordInbound } from "./events.ts";
-import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
+import { runDiscordTurn, type ReplyChannel } from "./turn-flow.ts";
 
 export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
 const DISCORD_LOGIN_RETRY_MAX_MS = 300_000;
@@ -42,9 +42,26 @@ function toInbound(message: Message): DiscordInbound {
   };
 }
 
-function replyChannel(ch: { send(options: MessageCreateOptions): Promise<StatusMessage> }): ReplyChannel {
+function replyChannel(ch: {
+  send(options: MessageCreateOptions): Promise<{
+    id?: string;
+    edit(content: string): Promise<unknown>;
+    delete(): Promise<unknown>;
+  }>;
+  sendTyping?(): Promise<void>;
+}): ReplyChannel {
   return {
-    send: (content, files) => ch.send({ content: content || undefined, ...(files?.length ? { files } : {}) }),
+    send: async (content, files) => {
+      const sent = await ch.send({ content: content || undefined, ...(files?.length ? { files } : {}) });
+      return {
+        id: sent.id ?? "",
+        edit: (c) => sent.edit(c),
+        delete: () => sent.delete(),
+      };
+    },
+    typing: async () => {
+      if (typeof ch.sendTyping === "function") await ch.sendTyping();
+    },
   };
 }
 
@@ -53,6 +70,7 @@ export function createDiscordPlugin(
   core: DiscordCoreClient,
   opts: DiscordPluginOptions,
 ): DiscordPlugin {
+  const inFlightRuns = new Set<string>();
   const clientFactory =
     opts.clientFactory ??
     (() =>
@@ -102,6 +120,8 @@ export function createDiscordPlugin(
         ...(attachments.length ? { attachments } : {}),
         ...(notes.length ? { inboundNotes: notes } : {}),
       },
+      mode: "stream",
+      inFlightRuns,
     });
   }
 

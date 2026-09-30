@@ -19,6 +19,8 @@ function fakeCore(): DiscordCoreClient {
     streamSnapshot: () => null,
     linkedInternal: async () => false,
     discordUserIdsFor: () => [],
+    reportRunEditRef: async () => {},
+    ackRunDelivery: async () => {},
   } as unknown as DiscordCoreClient;
 }
 
