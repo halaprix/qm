@@ -15,15 +15,18 @@ const { values, positionals: files } = parseArgs({
 });
 
 const jobs = Number(values.jobs);
-const timeoutMs = Number(values.timeout) * 1000;
+const timeoutSeconds = Number(values.timeout);
 if (!Number.isInteger(jobs) || jobs < 1) throw new Error(`--jobs must be a positive integer, got ${values.jobs}`);
+if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+  throw new Error(`--timeout must be a positive number of seconds, got ${values.timeout}`);
+}
 if (files.length === 0) throw new Error("Pass the Postgres test files to run");
 
 const baseUrl = process.env.DATABASE_URL;
 const runId = `qmt_${process.pid}_${randomBytes(4).toString("hex")}`;
-const created = new Set();
 const children = new Set();
 const admin = baseUrl ? new pg.Pool({ connectionString: baseUrl, max: jobs }) : null;
+let stopping = false;
 
 function databaseUrl(name) {
   const url = new URL(baseUrl);
@@ -32,82 +35,93 @@ function databaseUrl(name) {
 }
 
 async function dropDatabase(name) {
-  await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-  created.delete(name);
+  const { rows } = await admin.query(
+    "SELECT datname FROM pg_database WHERE datname = $1 OR starts_with(datname, $1 || '_') ORDER BY datname DESC",
+    [name],
+  );
+  for (const { datname } of rows) await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
 }
 
 function runFile(file, env) {
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(process.execPath, ["--test", file], { env: { ...process.env, ...env } });
-    children.add(child);
     let output = "";
-    child.stdout.on("data", (chunk) => (output += chunk));
-    child.stderr.on("data", (chunk) => (output += chunk));
-    const timer = setTimeout(() => {
-      output += `\n${file} exceeded ${values.timeout}s and was killed\n`;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-    child.on("close", (code, signal) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       children.delete(child);
-      resolve({ file, ok: code === 0 && !signal, ms: Date.now() - started, output });
+      resolve({ file, ok, ms: Date.now() - started, output });
+    };
+    const child = spawn(process.execPath, ["--test", file], { env: { ...process.env, ...env } });
+    children.add(child);
+    child.stdout?.on("data", (chunk) => (output += chunk));
+    child.stderr?.on("data", (chunk) => (output += chunk));
+    const timer = setTimeout(() => {
+      output += `\n${file} exceeded ${timeoutSeconds}s and was killed\n`;
+      child.kill("SIGKILL");
+    }, timeoutSeconds * 1000);
+    child.on("error", (error) => {
+      output += `\n${file} could not run: ${error.message || error.code || error}\n`;
+      finish(false);
     });
+    child.on("close", (code, signal) => finish(code === 0 && !signal));
   });
 }
 
 async function runIsolated(file, index) {
   if (!admin) return runFile(file, {});
   const name = `${runId}_${index}`;
-  await admin.query(`CREATE DATABASE ${name}`);
-  created.add(name);
   try {
+    await admin.query(`CREATE DATABASE ${name}`);
+    if (stopping) return { file, ok: false, ms: 0, output: "" };
     return await runFile(file, { DATABASE_URL: databaseUrl(name) });
   } finally {
     await dropDatabase(name);
   }
 }
 
-let cleaning = null;
-function cleanup() {
-  cleaning ??= (async () => {
-    for (const child of children) child.kill("SIGKILL");
-    if (!admin) return;
-    await Promise.allSettled([...created].map(dropDatabase));
-    await admin.end();
-  })();
-  return cleaning;
-}
-
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
-    void cleanup().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
-  });
-}
-
 const started = Date.now();
 const results = [];
 let next = 0;
-try {
-  await Promise.all(
-    Array.from({ length: Math.min(jobs, files.length) }, async () => {
-      while (next < files.length) {
-        const index = next++;
-        const result = await runIsolated(files[index], index);
-        results.push(result);
-        process.stdout.write(`\n# ${result.ok ? "ok" : "FAIL"} ${result.file} (${(result.ms / 1000).toFixed(1)}s)\n`);
-        process.stdout.write(result.output);
-      }
-    }),
-  );
-} finally {
-  await cleanup();
+const work = Promise.all(
+  Array.from({ length: Math.min(jobs, files.length) }, async () => {
+    while (!stopping && next < files.length) {
+      const index = next++;
+      const result = await runIsolated(files[index], index).catch((error) => ({
+        file: files[index],
+        ok: false,
+        ms: 0,
+        output: `\n${files[index]} could not run: ${error.message || error.code || error}\n`,
+      }));
+      if (stopping) return;
+      results.push(result);
+      process.stdout.write(`\n# ${result.ok ? "ok" : "FAIL"} ${result.file} (${(result.ms / 1000).toFixed(1)}s)\n`);
+      process.stdout.write(result.output);
+    }
+  }),
+);
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    stopping = true;
+    for (const child of children) child.kill("SIGKILL");
+    void work.then(async () => {
+      await admin?.end();
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  });
 }
 
+await work;
+if (stopping) await new Promise(() => {});
+await admin?.end();
+
 const failed = results.filter((result) => !result.ok);
-const serialMs = results.reduce((sum, result) => sum + result.ms, 0);
+const summedMs = results.reduce((sum, result) => sum + result.ms, 0);
 process.stdout.write(
-  `\n# ${results.length - failed.length}/${results.length} files passed with ${jobs} jobs in ${((Date.now() - started) / 1000).toFixed(1)}s (${(serialMs / 1000).toFixed(1)}s summed)\n`,
+  `\n# ${results.length - failed.length}/${results.length} files passed with ${jobs} jobs in ${((Date.now() - started) / 1000).toFixed(1)}s (${(summedMs / 1000).toFixed(1)}s summed)\n`,
 );
 for (const result of failed) process.stdout.write(`# FAIL ${result.file}\n`);
 process.exitCode = failed.length > 0 ? 1 : 0;
