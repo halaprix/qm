@@ -1,4 +1,5 @@
 export const DISCORD_SURFACE = "discord";
+export const DISCORD_DM_DELIVERY_TYPE = "discord-dm";
 const EXTERNAL_PREFIX = `${DISCORD_SURFACE}:`;
 
 export interface DiscordPluginConfig {

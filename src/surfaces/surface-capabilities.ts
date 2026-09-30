@@ -1,5 +1,5 @@
 import { orgId } from "../config.ts";
-import { DISCORD_SURFACE } from "../discord/config.ts";
+import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE } from "../discord/config.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { scopeId } from "../types.ts";
 
@@ -25,7 +25,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
   },
   [DISCORD_SURFACE]: {
     label: "Discord",
-    deliveryTypes: [DISCORD_SURFACE],
+    deliveryTypes: [DISCORD_SURFACE, DISCORD_DM_DELIVERY_TYPE],
     coreAmbient: false,
     approvalCardType: null,
     mentionHint:

@@ -35,6 +35,7 @@ test("delivery types map back to their surface", () => {
   assert.equal(surfaceForDeliveryType("principal"), "slack");
   assert.equal(surfaceForDeliveryType("group"), "slack");
   assert.equal(surfaceForDeliveryType("discord"), "discord");
+  assert.equal(surfaceForDeliveryType("discord-dm"), "discord");
   assert.equal(surfaceForDeliveryType("web"), undefined);
   assert.equal(surfaceCapabilities("discord")?.coreAmbient, false);
   assert.equal(surfaceCapabilities("slack")?.coreAmbient, true);
