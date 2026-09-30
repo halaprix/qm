@@ -353,6 +353,16 @@ export interface LoopGovernorConfig {
   staleFireMs?: number;
 }
 
+interface LoopTriageSetting {
+  enabled: boolean;
+  instructions?: string;
+}
+
+export interface LoopTriageConfig {
+  prioritize?: LoopTriageSetting;
+  consolidate?: LoopTriageSetting;
+}
+
 interface LoopPlaybookRevision {
   version: number;
   at: number;
@@ -375,6 +385,7 @@ export interface Loop extends TriggerBase {
   shipActions: ShipActionPolicy[];
   caps?: LoopCaps;
   governor?: LoopGovernorConfig;
+  triage?: LoopTriageConfig;
   state: LoopState;
   health: LoopHealth;
   healthReason?: string;
@@ -406,8 +417,19 @@ export interface LoopThreadMessage {
   actorId?: string;
 }
 
+export type LoopItemPriority = "urgent" | "high" | "normal" | "low";
+
+export interface LoopItemTriage {
+  at: number;
+  priority?: LoopItemPriority;
+  reason?: string;
+  groupId?: string;
+  pinned?: Array<"priority" | "group">;
+}
+
 export interface LoopItem {
   previousLoopId?: string;
+  triage?: LoopItemTriage;
   inboxPreview?: LoopSourcePayload;
   id: string;
   loopId: string;

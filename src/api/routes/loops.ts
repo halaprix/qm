@@ -2,7 +2,7 @@ import { LOOP_ICON_ERROR, validLoopIcon } from "../../loops/loop-store.ts";
 import { boundLoopCron } from "../../loops/authority.ts";
 import { unattendedGrantRefusal } from "../../cron/authority.ts";
 import type { AdvisoryLock } from "../../persistence/advisory-lock.ts";
-import type { Loop, LoopState } from "../../types.ts";
+import type { Loop, LoopState, LoopTriageConfig } from "../../types.ts";
 import { scopeId, type ScopeId } from "../../types.ts";
 import type { CapabilityClaims } from "../../auth/capability-token.ts";
 import type { LoopStore, CreateLoopInput, LoopPatch } from "../../loops/loop-store.ts";
@@ -12,6 +12,8 @@ import type { ShipGrantStore } from "../../loops/ship-grant-store.ts";
 import type { LoopFireService } from "../../loops/loop-fire.ts";
 import { collectVitals } from "../../loops/governor.ts";
 import { buildShipGrant } from "../../loops/ship-gate.ts";
+import { sortLedgerItems } from "../../loops/ledger-view.ts";
+import { settleGroup } from "../../loops/triage.ts";
 import type { CronStore } from "../../cron/cron-store.ts";
 import { DEFAULT_CRON_TIMEZONE, userScheduleFromBody, validateUserSchedule } from "../../cron/schedule.ts";
 import type { ScopedConfigStore } from "../../resolution/config-store.ts";
@@ -176,6 +178,24 @@ function capsFromBody(value: unknown): NumericBody<Loop["caps"]> {
   return { value: caps };
 }
 
+const TRIAGE_INSTRUCTIONS_MAX = 4000;
+
+function triageFromBody(value: unknown): LoopTriageConfig | null | undefined {
+  if (value === undefined) return undefined;
+  if (!isObj(value)) return null;
+  const config: LoopTriageConfig = {};
+  for (const key of ["prioritize", "consolidate"] as const) {
+    const raw = value[key];
+    if (raw === undefined) continue;
+    if (!isObj(raw) || typeof raw.enabled !== "boolean") return null;
+    if (raw.instructions !== undefined && typeof raw.instructions !== "string") return null;
+    const instructions = typeof raw.instructions === "string" ? raw.instructions.trim() : "";
+    if (instructions.length > TRIAGE_INSTRUCTIONS_MAX) return null;
+    config[key] = { enabled: raw.enabled, ...(instructions ? { instructions } : {}) };
+  }
+  return config;
+}
+
 async function createLoop(ctx: ApiCtx): Promise<void> {
   const deps = loopDeps(ctx);
   if (!deps) return sendJson(ctx.res, 404, { error: "not_found", message: "loops are not wired on this deployment" });
@@ -327,7 +347,7 @@ async function getLoop(ctx: ApiCtx): Promise<void> {
     deps.grants.byLoop(loop.id),
     collectVitals(loop, { items: deps.items, outputs: deps.outputs }, Date.now()),
   ]);
-  return sendJson(ctx.res, 200, { loop, items, outputs, grants, vitals });
+  return sendJson(ctx.res, 200, { loop, items: sortLedgerItems(items, loop), outputs, grants, vitals });
 }
 
 const STATES = new Set<LoopState>(["enabled", "paused", "quarantined", "archived"]);
@@ -410,6 +430,13 @@ async function patchLoop(ctx: ApiCtx): Promise<void> {
     });
   const caps = capsResult.value;
   if (caps !== undefined) patch.caps = caps;
+  const triage = triageFromBody(b.triage);
+  if (triage === null)
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: `triage must be {prioritize?, consolidate?: {enabled: boolean, instructions?: string up to ${TRIAGE_INSTRUCTIONS_MAX} chars}}`,
+    });
+  if (triage !== undefined) patch.triage = triage;
   if (b.destinationKey !== undefined) {
     if (b.destinationKey !== null && typeof b.destinationKey !== "string")
       return sendJson(ctx.res, 400, { error: "bad_request", message: "destinationKey must be a string or null" });
@@ -497,6 +524,8 @@ async function decideOutputLocked(ctx: ApiCtx): Promise<void> {
     try {
       const shipped = await deps.fire.shipOutput(loop.id, outputId, acting.actorId, note);
       if (!shipped) return decisionMissing();
+      const item = await deps.items.get(shipped.itemId);
+      if (item) await settleGroup(deps.items, item);
       return sendJson(ctx.res, 200, { output: shipped });
     } catch (e) {
       return sendJson(ctx.res, 502, { error: "ship_failed", message: errMessage(e) });

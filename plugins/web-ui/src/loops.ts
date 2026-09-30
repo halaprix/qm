@@ -1,11 +1,12 @@
 import { LOOP_ICONS, loopIcon, readLoopIcon } from "./loop-icon";
 import { html, nothing, render, type TemplateResult } from "lit";
-import { CheckCircle2, CornerUpLeft, Pause, Play, Zap } from "lucide";
+import { CheckCircle2, ChevronDown, ChevronRight, CornerUpLeft, Pause, Play, Zap } from "lucide";
 import { api } from "./core-bridge";
 import { errMessage } from "../../chassis/src/errors";
 import { fieldSelect, icon } from "./ui";
 import { listBackLink, listPageTpl } from "./list-page";
 import { appState, can } from "./shell";
+import { tip } from "./tooltip";
 
 interface LoopView {
   id: string;
@@ -24,7 +25,10 @@ interface LoopView {
   sources?: string[];
   lastFiredAt?: number;
   consecutiveFailedFires?: number;
+  triage?: Partial<Record<TriageKind, { enabled: boolean; instructions?: string }>>;
 }
+
+type TriageKind = "prioritize" | "consolidate";
 
 interface LoopItemView {
   id: string;
@@ -35,6 +39,7 @@ interface LoopItemView {
   parkedReason?: string;
   guidance?: string;
   updatedAt: number;
+  triage?: { priority?: string; reason?: string; groupId?: string; pinned?: string[] };
 }
 
 interface LoopOutputView {
@@ -85,6 +90,8 @@ let loopBusy = false;
 let iconPickerOpen = false;
 let playbookDraft: string | null = null;
 let returnDrafts = new Map<string, string>();
+let triageDrafts = new Map<TriageKind, string>();
+const expandedGroups = new Set<string>();
 
 export function resetActiveLoop(): void {
   activeLoopId = null;
@@ -96,6 +103,8 @@ export function resetActiveLoop(): void {
   activeDetail = null;
   playbookDraft = null;
   returnDrafts = new Map();
+  triageDrafts = new Map();
+  expandedGroups.clear();
 }
 
 function healthBadge(loop: LoopView): TemplateResult {
@@ -265,9 +274,140 @@ function reviewRow(loop: LoopView, output: LoopOutputView, shipLabel = "Ship"): 
   `;
 }
 
-function itemRow(item: LoopItemView): TemplateResult {
+const TRIAGE_COPY: Record<TriageKind, { label: string; sublabel: string; placeholder: string }> = {
+  prioritize: {
+    label: "Prioritize",
+    sublabel: "Sort new items by urgency, with a reason on each",
+    placeholder: "e.g. Production incidents and possible outages first, then customer friction.",
+  },
+  consolidate: {
+    label: "Consolidate",
+    sublabel: "Group items that one piece of work would resolve",
+    placeholder: "e.g. Group Sentry errors that share a root cause.",
+  },
+};
+
+function saveTriage(loop: LoopView, kind: TriageKind, enabled: boolean): void {
+  const instructions = triageDrafts.get(kind) ?? loop.triage?.[kind]?.instructions ?? "";
+  void mutate(async () => {
+    await api(`/api/loops/${encodeURIComponent(loop.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ triage: { [kind]: { enabled, instructions } } }),
+    });
+    triageDrafts.delete(kind);
+  });
+}
+
+function triageTpl(loop: LoopView): TemplateResult {
+  return html`<h2 class="loop-section-title">Triage</h2>
+    <div class="loop-triage">
+      ${(Object.keys(TRIAGE_COPY) as TriageKind[]).map((kind) => {
+        const setting = loop.triage?.[kind];
+        const enabled = setting?.enabled === true;
+        const saved = setting?.instructions ?? "";
+        const draft = triageDrafts.get(kind);
+        const copy = TRIAGE_COPY[kind];
+        return html`<div class="loop-triage-setting">
+          <button
+            class="loop-autopilot ${enabled ? "on" : ""}"
+            type="button"
+            role="switch"
+            aria-checked=${enabled ? "true" : "false"}
+            ?disabled=${loopBusy}
+            @click=${() => saveTriage(loop, kind, !enabled)}
+          >
+            <span class="loop-autopilot-copy">
+              <span class="loop-autopilot-label">${copy.label}</span>
+              <span class="loop-autopilot-sublabel">${copy.sublabel}</span>
+            </span>
+            <span class="loop-autopilot-switch"><span></span></span>
+          </button>
+          ${
+            enabled
+              ? html`<textarea
+                    class="loop-playbook loop-triage-instructions"
+                    rows="3"
+                    aria-label=${`${copy.label} instructions`}
+                    placeholder=${copy.placeholder}
+                    .value=${draft ?? saved}
+                    @input=${(e: Event) => {
+                      triageDrafts.set(kind, (e.target as HTMLTextAreaElement).value);
+                      paint();
+                    }}
+                  ></textarea>
+                  <div class="loop-playbook-actions">
+                    <span class="loop-success-condition">Leave blank to use the default.</span>
+                    ${
+                      draft !== undefined && draft !== saved
+                        ? html`<button
+                            class="btn primary"
+                            type="button"
+                            ?disabled=${loopBusy}
+                            @click=${() => saveTriage(loop, kind, true)}
+                          >
+                            Save
+                          </button>`
+                        : nothing
+                    }
+                  </div>`
+              : nothing
+          }
+        </div>`;
+      })}
+    </div>`;
+}
+
+function ledgerRows(loop: LoopView, items: LoopItemView[]): TemplateResult[] {
+  const members = new Map<string, LoopItemView[]>();
+  const grouped = loop.triage?.consolidate?.enabled === true;
+  for (const item of items)
+    if (grouped && item.triage?.groupId)
+      members.set(item.triage.groupId, [...(members.get(item.triage.groupId) ?? []), item]);
+  const rows: TemplateResult[] = [];
+  for (const item of items) {
+    const groupId = item.triage?.groupId;
+    const group = groupId ? (members.get(groupId) ?? []) : [];
+    if (!groupId || group.length < 2) {
+      rows.push(itemRow(loop, item));
+      continue;
+    }
+    if (group[0] !== item) continue;
+    const open = expandedGroups.has(groupId);
+    const head = group.find((member) => member.id === groupId) ?? item;
+    rows.push(
+      html`<button
+        class="loop-item loop-item-group"
+        type="button"
+        aria-expanded=${String(open)}
+        @click=${() => {
+          if (open) expandedGroups.delete(groupId);
+          else expandedGroups.add(groupId);
+          paint();
+        }}
+      >
+        ${icon(open ? ChevronDown : ChevronRight, 13)}
+        <span class="loop-item-key">${group.length} similar ·</span>
+        <span class="loop-item-summary">${head.sourceSummary ?? head.sourceKey}</span>
+        ${priorityTpl(loop, head)}
+      </button>`,
+    );
+    if (open) rows.push(...group.map((member) => itemRow(loop, member, true)));
+  }
+  return rows;
+}
+
+function priorityTpl(loop: LoopView, item: LoopItemView): TemplateResult | typeof nothing {
+  const priority = item.triage?.priority;
+  if (loop.triage?.prioritize?.enabled !== true || !priority || priority === "normal") return nothing;
+  const reason = item.triage?.pinned?.includes("priority") ? "Set by you" : item.triage?.reason;
+  return html`<span class="inbox-priority inbox-priority-${priority}" ${reason ? tip(reason) : nothing}
+    >${priority[0]!.toUpperCase()}${priority.slice(1)}</span
+  >`;
+}
+
+function itemRow(loop: LoopView, item: LoopItemView, member = false): TemplateResult {
   return html`
-    <div class="loop-item">
+    <div class="loop-item ${member ? "loop-item-member" : ""}">
       <span class="loop-item-status loop-item-${item.status}">${item.status}</span>
       <span class="loop-item-key">${item.sourceKey}</span>
       <span class="loop-item-summary">${item.sourceSummary ?? ""}</span>
@@ -275,6 +415,7 @@ function itemRow(item: LoopItemView): TemplateResult {
         ${item.attempts > 0 ? `${item.attempts} attempt${item.attempts === 1 ? "" : "s"}` : ""}
         ${item.parkedReason ? html` · <span title=${item.parkedReason}>parked</span>` : nothing}
       </span>
+      ${priorityTpl(loop, item)}
     </div>
   `;
 }
@@ -534,7 +675,7 @@ function detailTpl(detail: LoopDetail): TemplateResult {
         ? unconfirmed.map((o) => reviewRow(loop, o, "Confirm shipped"))
         : html`<p class="list-empty">Nothing needs confirmation.</p>`
     }
-    ${ingestionTpl(loop)}
+    ${ingestionTpl(loop)} ${triageTpl(loop)}
     <h2 class="loop-section-title">Playbook <span class="loop-count">v${loop.playbookVersion}</span></h2>
     <textarea
       class="loop-playbook"
@@ -556,7 +697,7 @@ function detailTpl(detail: LoopDetail): TemplateResult {
     </div>
 
     <h2 class="loop-section-title">Work ledger</h2>
-    ${items.length ? items.map(itemRow) : html`<p class="list-empty">No items yet. Fire the loop.</p>`}
+    ${items.length ? ledgerRows(loop, items) : html`<p class="list-empty">No items yet. Fire the loop.</p>`}
     ${
       decided.length
         ? html`<h2 class="loop-section-title">Decided</h2>

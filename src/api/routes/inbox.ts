@@ -1,7 +1,14 @@
 import { migrateInbox } from "../../loops/inbox-migration.ts";
 import { scopeId, type Loop } from "../../types.ts";
 import { ensureDefaultInboxLoops, findInboxLoop } from "../../loops/inbox-loop.ts";
-import { isResolved, ledgerItemView } from "../../loops/ledger-view.ts";
+import {
+  compareKeys,
+  consolidates,
+  isResolved,
+  ledgerItemView,
+  prioritizes,
+  triageKeys,
+} from "../../loops/ledger-view.ts";
 import { uiStateId } from "../../surfaces/ui-state.ts";
 import { sendJson } from "../http.ts";
 import { actingPrincipal, canAdministerLoop, loopDeps } from "./loops.ts";
@@ -69,7 +76,10 @@ async function inbox(ctx: ApiCtx): Promise<void> {
     const item = await deps.items.get(itemId);
     if (!item || !selectedIds.includes(item.loopId)) return sendJson(ctx.res, 404, { error: "not_found" });
     return sendJson(ctx.res, 200, {
-      item: ledgerItemView(item),
+      item: ledgerItemView(
+        item,
+        selected.find((loop) => loop.id === item.loopId)!,
+      ),
       outputs: (await deps.outputs.byItem(item.id)).filter((output) => output.loopId === item.loopId),
     });
   }
@@ -100,13 +110,15 @@ async function inbox(ctx: ApiCtx): Promise<void> {
         item.actionKind === "send" && item.status === "shipped" && (item.source === "gmail" || item.source === "slack"),
     );
   else if (handled) candidates = summaries.filter((item) => item.status === "shipped" || item.status === "skipped");
+  const loopsById = new Map(selected.map((loop) => [loop.id, loop]));
+  const keys = triageKeys(
+    candidates,
+    (item) => loopsById.get(item.loopId),
+    (item) => item.createdAt,
+  );
   let feed = candidates
     .filter((item) => !filter || item.loopId === filter)
-    .sort((a, b) => {
-      if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
-      if (a.id === b.id) return 0;
-      return a.id < b.id ? 1 : -1;
-    });
+    .sort((a, b) => compareKeys(keys.get(a.id)!, keys.get(b.id)!));
   const cursor = ctx.url.searchParams.get("cursor");
   if (cursor) {
     let value: unknown;
@@ -115,11 +127,10 @@ async function inbox(ctx: ApiCtx): Promise<void> {
     } catch {
       return sendJson(ctx.res, 400, { error: "invalid_cursor" });
     }
-    if (!isObj(value) || typeof value.at !== "number" || typeof value.id !== "string")
+    if (!Array.isArray(value) || value.some((part) => typeof part !== "number" && typeof part !== "string"))
       return sendJson(ctx.res, 400, { error: "invalid_cursor" });
-    const at = value.at;
-    const key = value.id;
-    feed = feed.filter((item) => item.createdAt < at || (item.createdAt === at && item.id < key));
+    const after = value as Array<number | string>;
+    feed = feed.filter((item) => compareKeys(keys.get(item.id)!, after) > 0);
   }
   const page = feed.slice(0, 40);
   const last = page.at(-1);
@@ -143,6 +154,8 @@ async function inbox(ctx: ApiCtx): Promise<void> {
         syncCron: loop.cronId ? cronSummary((await deps.crons?.get(loop.cronId)) ?? null) : null,
         ingestionActive: (await ctx.deps.loopIngress?.list(loop.id))?.some((source) => source.enabled) ?? false,
         source: loop.surface?.startsWith("inbox:") ? loop.sources?.[0] : undefined,
+        prioritize: prioritizes(loop),
+        consolidate: consolidates(loop),
       })),
     ),
     available: available.map((loop) => ({
@@ -157,18 +170,19 @@ async function inbox(ctx: ApiCtx): Promise<void> {
     filter: inboxFilter,
     total: [...counts.values()].reduce((sum, count) => sum + count, 0),
     items: page.map((item) =>
-      ledgerItemView({
-        ...item,
-        sourcePayload: item.inboxPreview ?? {
-          title: item.sourceSummary ?? "Review item",
-          snippet: item.parkedReason ?? item.sourceSummary ?? "",
+      ledgerItemView(
+        {
+          ...item,
+          sourcePayload: item.inboxPreview ?? {
+            title: item.sourceSummary ?? "Review item",
+            snippet: item.parkedReason ?? item.sourceSummary ?? "",
+          },
         },
-      }),
+        loopsById.get(item.loopId)!,
+      ),
     ),
     nextCursor:
-      feed.length > page.length && last
-        ? Buffer.from(JSON.stringify({ at: last.createdAt, id: last.id })).toString("base64url")
-        : null,
+      feed.length > page.length && last ? Buffer.from(JSON.stringify(keys.get(last.id))).toString("base64url") : null,
   });
 }
 

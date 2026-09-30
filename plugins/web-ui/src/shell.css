@@ -10033,6 +10033,42 @@ h3.ambient-field-label {
 .inbox-item-time {
   white-space: nowrap;
 }
+.inbox-priority {
+  flex: none;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+.inbox-priority-urgent {
+  color: var(--destructive);
+}
+.inbox-priority-high {
+  color: var(--warning);
+}
+.inbox-group-count {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: var(--font-12-5);
+  white-space: nowrap;
+}
+.inbox-group.expanded > .inbox-item-summary {
+  background: var(--inbox-row-hover);
+}
+.inbox-group-list {
+  margin-left: 22px;
+  border-left: 1px solid var(--border);
+}
+.inbox-triage-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  white-space: nowrap;
+}
 .inbox-item-head-copy {
   flex: 1;
   min-width: 0;
@@ -10887,6 +10923,47 @@ h3.ambient-field-label {
 .loop-item-meta {
   font-size: 12px;
   color: var(--muted-foreground, #667085);
+}
+.loop-item-group {
+  width: 100%;
+  background: none;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  color: inherit;
+  font: inherit;
+  font-size: var(--font-13);
+  text-align: left;
+  cursor: pointer;
+}
+.loop-item-group .loop-item-key {
+  white-space: nowrap;
+}
+.loop-item-member {
+  padding-left: 24px;
+}
+.loop-triage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.loop-triage .loop-autopilot {
+  margin-top: 0;
+}
+.loop-triage .loop-autopilot.on {
+  border-color: var(--border, #e4e7ec);
+  background: var(--background);
+  color: var(--foreground);
+}
+.loop-triage .loop-autopilot.on .loop-autopilot-sublabel {
+  color: var(--muted-foreground, #667085);
+}
+.loop-triage .loop-autopilot.on .loop-autopilot-switch {
+  background: var(--cta);
+}
+.loop-triage-instructions {
+  margin-top: 8px;
+  font-family: inherit;
 }
 .loop-playbook {
   width: 100%;

@@ -4,6 +4,7 @@ import type {
   LoopGovernorConfig,
   LoopHealth,
   LoopState,
+  LoopTriageConfig,
   Destination,
   RecipientConsent,
   ShipActionPolicy,
@@ -46,6 +47,7 @@ export interface LoopPatch {
   shipActions?: ShipActionPolicy[];
   caps?: LoopCaps;
   governor?: LoopGovernorConfig;
+  triage?: LoopTriageConfig;
   cronId?: string;
   runAs?: Loop["runAs"];
   state?: LoopState;
@@ -204,6 +206,7 @@ export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop
         }
         if (patch.caps !== undefined) fields.caps = patch.caps;
         if (patch.governor !== undefined) fields.governor = patch.governor;
+        if (patch.triage !== undefined) fields.triage = { ...loop.triage, ...patch.triage };
         if (patch.cronId !== undefined) fields.cronId = patch.cronId;
         if (patch.runAs !== undefined) fields.runAs = patch.runAs;
         if (patch.state !== undefined) Object.assign(fields, stateFields(patch.state));
