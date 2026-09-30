@@ -509,9 +509,9 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
   }
 
   async function triage(loop: Loop, fireKey: string, threadRef: string): Promise<void> {
-    const work = triageWork(loop, await deps.items.byLoop(loop.id));
-    if (!work) return;
     try {
+      const work = triageWork(loop, await deps.items.byLoop(loop.id));
+      if (!work) return;
       const outcome = await stageTurn(
         loop,
         `${fireKey}:triage`,

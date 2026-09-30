@@ -164,7 +164,7 @@ export async function settleGroup(ledger: LoopItemLedger, representative: LoopIt
   const title =
     typeof preview === "string" && preview ? preview : (representative.sourceSummary ?? representative.sourceKey);
   for (const member of await openMembers(ledger, representative, representative.id)) {
-    if (member.status === "in_progress") continue;
+    if (member.status === "in_progress" || (member.status === "ready" && member.outputIds.length > 0)) continue;
     await ledger.recordAction(member.id, {
       kind: "consolidated",
       outcome: "dismissed",
