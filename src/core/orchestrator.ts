@@ -27,6 +27,7 @@ import { scopeId as toScopeId, personalScope } from "../types.ts";
 import { turnOriginRequestFields } from "./turn-origin.ts";
 import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
 import { orgId } from "../config.ts";
+import { surfaceCapabilities } from "../surfaces/surface-capabilities.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
 import { deriveTurnOutcome, approvalBlocksInput } from "./turn-outcome.ts";
 import { applyPromptVars, loadProtocolFile, type PromptVars } from "../resolution/prompt-vars.ts";
@@ -652,8 +653,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       }
       if (conversation.kind !== "dm" && !deps.identity.audienceIsAllInternal(conversation.audience)) {
         const externalAllowed =
-          input.surface === "slack" &&
-          (deps.config ? await deps.config.getExternalSlackParticipantsDurable(toScopeId("org", orgId())) : false);
+          (await surfaceCapabilities(input.surface)?.externalParticipantsAllowed(deps.config)) === true;
         if (!externalAllowed) {
           return {
             status: "refused",
