@@ -21,14 +21,18 @@ export interface DiscordPluginOptions {
 }
 
 function toInbound(message: Message): DiscordInbound {
+  const isThread = typeof message.channel?.isThread === "function" && message.channel.isThread();
   return {
     id: message.id,
     channelId: message.channelId,
     guildId: message.guildId,
+    threadParentId: isThread && "parentId" in message.channel ? message.channel.parentId : null,
+    channelName: "name" in message.channel && typeof message.channel.name === "string" ? message.channel.name : null,
     authorId: message.author.id,
     authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
     authorIsBot: message.author.bot,
     content: message.content,
+    mentionedUserIds: message.mentions?.users ? [...message.mentions.users.keys()] : [],
     attachments: [...message.attachments.values()].map((a) => ({
       url: a.url,
       name: a.name,
@@ -69,10 +73,19 @@ export function createDiscordPlugin(
   async function handle(message: Message, activeClient: Client): Promise<void> {
     const botUserId = activeClient.user?.id ?? "";
     const inbound = toInbound(message);
-    const routed = await routeMessage(inbound, botUserId, (m) =>
-      classifyMember(m, cfg, (userId) => core.linkedInternal(userId)),
+    const routed = routeMessage(inbound, botUserId, cfg.guildIds);
+    if (!routed || routed.target !== "dm") return;
+    const actor = await classifyMember(
+      {
+        userId: inbound.authorId,
+        displayName: inbound.authorName,
+        roleIds: [],
+        isBot: inbound.authorIsBot,
+      },
+      cfg,
+      (userId) => core.linkedInternal(userId),
     );
-    if (!routed) return;
+    if (actor.isExternalGuest) return;
     const target = message.channel;
     if (!("send" in target)) return;
     const { attachments, notes } = await ingestAttachments(inbound.attachments, core);
@@ -80,8 +93,8 @@ export function createDiscordPlugin(
       core,
       channel: replyChannel(target),
       body: {
-        actor: routed.actor,
-        conversation: conversationFor(target.id),
+        actor,
+        conversation: conversationFor({ kind: "dm", channelId: target.id }),
         text: routed.text,
         triggerTs: message.id,
         entryTs: message.id,
