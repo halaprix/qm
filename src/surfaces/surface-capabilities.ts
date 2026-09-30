@@ -41,3 +41,12 @@ export function surfaceCapabilities(surface: string | undefined): SurfaceCapabil
 export function surfaceForDeliveryType(type: string): string | undefined {
   return Object.entries(SURFACES).find(([, caps]) => caps.deliveryTypes.includes(type))?.[0];
 }
+
+export function surfaceToolName(surface: string | undefined, automationDestinationType: string | undefined): string {
+  const owner = automationDestinationType === undefined ? undefined : surfaceForDeliveryType(automationDestinationType);
+  return owner ?? surface ?? "slack";
+}
+
+export function surfaceLabel(surface: string | undefined): string {
+  return surfaceCapabilities(surface)?.label ?? surface ?? "Slack";
+}

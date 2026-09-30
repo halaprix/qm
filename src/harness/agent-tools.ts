@@ -32,6 +32,7 @@ import {
 import { SANDBOX_CAPABILITY_TTL_MS } from "../auth/capability-token.ts";
 import { CRON_FIRE_NOTE_MAX_CHARS } from "../api/control-service.ts";
 import { utcMinute } from "../util/time.ts";
+import { surfaceCapabilities, surfaceLabel } from "../surfaces/surface-capabilities.ts";
 
 function describePublishAudience(a: PublishAudienceDescriptor | undefined): string {
   if (!a) return "Owned by you.";
@@ -3179,12 +3180,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
   }
 
   const surfaceName = opts?.surfaceName ?? "slack";
-  const surfaceLabel = surfaceName === "slack" ? "Slack" : surfaceName;
+  const surfaceLabelText = surfaceLabel(surfaceName);
   const surface = defineTool({
     name: surfaceName,
     label: surfaceName,
     description:
-      `Everything you do on ${surfaceLabel} goes through this tool — posting (the ONLY way your words ` +
+      `Everything you do on ${surfaceLabelText} goes through this tool — posting (the ONLY way your words ` +
       "reach people; end the turn without a post and you stay silent), reacting, editing/deleting your " +
       "own messages, reading threads, checking what's new, searching, listing members, fetching files. " +
       "Pick an `action`.",
@@ -3216,9 +3217,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         Type.String({
           description:
             "post/reach: the message to send. edit: the new message content. Use Markdown, including [label](url) links; the surface renders it." +
-            (surfaceName === "slack"
-              ? " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping."
-              : ""),
+            (surfaceCapabilities(surfaceName)?.mentionHint ?? ""),
         }),
       ),
       channel: Type.Optional(

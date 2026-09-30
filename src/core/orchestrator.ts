@@ -27,7 +27,11 @@ import { scopeId as toScopeId, personalScope } from "../types.ts";
 import { turnOriginRequestFields } from "./turn-origin.ts";
 import { resolveTurnFastMode, turnRuntimePurpose } from "./turn-options.ts";
 import { orgId } from "../config.ts";
-import { surfaceCapabilities } from "../surfaces/surface-capabilities.ts";
+import {
+  surfaceCapabilities,
+  surfaceLabel as labelForSurface,
+  surfaceToolName,
+} from "../surfaces/surface-capabilities.ts";
 import { renderGatewayContext } from "./gateway-context.ts";
 import { deriveTurnOutcome, approvalBlocksInput } from "./turn-outcome.ts";
 import { applyPromptVars, loadProtocolFile, type PromptVars } from "../resolution/prompt-vars.ts";
@@ -1069,7 +1073,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const recallMs = Date.now() - recallStart;
       const isWeb = input.surface === "web";
       const isSlack = input.surface === "slack";
-      const surfaceTool = input.surface ?? "slack";
+      const surfaceTool = surfaceToolName(
+        input.surface,
+        input.origin.kind === "automation" ? input.origin.destination?.type : undefined,
+      );
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
       const orgName = branding.orgName ?? "this organization";
@@ -1089,7 +1096,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           botName,
           userName: cleanBrandingLabel(actor.displayName, 80) ?? "there",
           userEmail: actor.id.includes("@") ? actor.id : undefined,
-          surfaceLabel: isWeb ? `the ${botName} web app` : "Slack",
+          surfaceLabel: isWeb ? `the ${botName} web app` : labelForSurface(input.surface),
           slack: isSlack,
         };
       }
@@ -2420,8 +2427,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         };
         const turnKey = input.runId ?? randomUUID();
         const postKeys = turnPostKeys(turnKey);
-        const surfaceName =
-          input.origin.kind === "automation" && input.origin.destination ? "slack" : (input.surface ?? "slack");
+        const surfaceName = surfaceTool;
         let spineFirstBlock = "";
         let spineFirstBlockOpen = true;
         let spineAckText: string | undefined;
@@ -3818,7 +3824,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   })
               : undefined;
             result = await runHarnessTurn(
-              "[system] You were addressed directly. Reply with the `slack` tool's `post` action, or decline explicitly with stay_silent — ending the turn without either is not allowed here.",
+              `[system] You were addressed directly. Reply with the \`${surfaceName}\` tool's \`post\` action, or decline explicitly with stay_silent — ending the turn without either is not allowed here.`,
               nudgeTape?.mode !== "serve" && inbound.images.length ? { images: inbound.images } : {},
               { history: nudgeHistory, ...(nudgeTape ? { tape: nudgeTape } : {}) },
             );
