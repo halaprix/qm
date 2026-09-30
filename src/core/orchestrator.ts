@@ -451,8 +451,30 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   return {
     async screenSecuritySteer({ payload, actor, conversation, sessionId }) {
       const resolution = await deps.resolution.resolve(conversation, actor);
-      if (resolution.securityPolicy.inboundScreening === "off") return "allow";
+      const { screening } = resolution.securityPolicy;
+      if (screening === "off") return "allow";
       const scopeLabel = deps.resolution.scopeFor(conversation, actor);
+      const bounded = securityScreenPayload({
+        surface: "external",
+        text: "",
+        triggered: true,
+        securityScreenData: payload,
+      });
+      const steerContext = {
+        hook: "user_input",
+        surface: "steer",
+        origin: "ambient",
+        thread: conversation.threadRef,
+        ...(sessionId ? { sessionId } : {}),
+      } as const;
+      if (screening === "observe") {
+        if (bounded && !bounded.truncated)
+          await classifySecurityData(bounded.content, actor.id, scopeLabel, undefined, {
+            ...steerContext,
+            mode: "observe",
+          });
+        return "allow";
+      }
       const block = (cause: string, reason?: string): "block" => {
         deps.auditLog.record({
           at: Date.now(),
@@ -469,12 +491,6 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (!(await deps.rateLimiter.check(actor.id)).allowed) return block("rate-limited");
       if (deps.budget && !(await deps.budget.check(actor.id)).allowed) return block("over-budget");
       if (securitySteersInFlight.has(conversation.threadRef)) return block("steer-in-flight");
-      const bounded = securityScreenPayload({
-        surface: "external",
-        text: "",
-        triggered: true,
-        securityScreenData: payload,
-      });
       if (!bounded || bounded.truncated) return block("oversize-input");
       securitySteersInFlight.add(conversation.threadRef);
       const verdict = await classifySecurityData(
@@ -486,7 +502,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               await deps.sessions.recordLlmRequest(sessionId, { ...rec, scopeLabel }, signal);
             }
           : undefined,
-        { hook: "user_input", surface: "steer", origin: "ambient" },
+        { ...steerContext, mode: "enforce" },
       ).finally(() => securitySteersInFlight.delete(conversation.threadRef));
       if (verdict?.decision === "auto") {
         if (!verdict.unscreened) return "allow";
@@ -746,6 +762,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         await deps.harness.turns.resetSession?.(sessionId);
       };
       const securityPolicy = resolution.securityPolicy;
+      const enforceScreen = securityPolicy.screening === "enforce";
+      const screenTrace = {
+        mode: enforceScreen ? "enforce" : "observe",
+        thread: conversation.threadRef,
+        ...(input.runId ? { runId: input.runId } : {}),
+      } as const;
       const approvalSession = input.approval ? await deps.sessions.getByThread(conversation.threadRef) : null;
       const approvalRecord = input.approval ? await pending.get(input.approval.requestId) : undefined;
       const approvalReplaysFlaggedRequest =
@@ -755,7 +777,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         JSON.stringify(approvalRecord.request.attachments ?? []) === JSON.stringify(input.attachments ?? []) &&
         (approvalRecord.request.conversationHeader ?? "") === (input.conversationHeader ?? "");
       const screenInbound =
-        securityPolicy.inboundScreening === "external" &&
+        securityPolicy.screening !== "off" &&
         !(
           approvalSession &&
           approvalRecord?.sessionId === approvalSession.id &&
@@ -873,6 +895,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           (!!deps.securityScreener || !!deps.harness.models.screenSecurity);
         const verdict = canScreenText
           ? await classifySecurityData(screenPayload!.content, actor.id, scopeId, recordScreenRequest, {
+              ...screenTrace,
               hook: "user_input",
               surface: input.surface,
               origin: input.origin.kind,
@@ -897,7 +920,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             status: "pending_approval",
             detail: JSON.stringify({ cause: "strict-verdict", reason: flaggedScreenedInput.reason, source: sources }),
           });
-        } else if (unscreenableCause || verdict?.unscreened) {
+        } else if (enforceScreen && (unscreenableCause || verdict?.unscreened)) {
           inputUnscreened = true;
           deps.auditLog.record({
             at: Date.now(),
@@ -1186,7 +1209,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const allowed: SkillResolution[] = [];
         for (const entry of resolved) {
           const skill = entry.skill;
-          if (!skill || !sharingSources.includes(skill.scopeId) || securityPolicy.inboundScreening !== "external") {
+          if (!skill || !sharingSources.includes(skill.scopeId) || securityPolicy.screening === "off") {
             allowed.push(entry);
             continue;
           }
@@ -1203,6 +1226,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 return false;
               for (const chunk of securityScreenChunks("tool_result:shared_skill", payload)) {
                 const verdict = await classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
+                  ...screenTrace,
                   hook: "tool_response",
                   request: input.text,
                   surface: "shared_skill",
@@ -1214,7 +1238,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             })();
             carriedSkillScreens.set(key, screen);
           }
-          if ((await screen) && bundles) allowed.push({ ...snapshot, screenedBundles: bundles });
+          const passed = await screen;
+          if (!enforceScreen) allowed.push(entry);
+          else if (passed && bundles) allowed.push({ ...snapshot, screenedBundles: bundles });
           else
             deps.auditLog.record({
               at: Date.now(),
@@ -2883,10 +2909,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 blobTransfer,
                 fileRegistration,
                 turnInboxDir,
-                securityPolicy.inboundScreening === "external" &&
-                  (deps.securityScreener || deps.harness.models.screenSecurity)
+                securityPolicy.screening !== "off" && (deps.securityScreener || deps.harness.models.screenSecurity)
                   ? ({ content }) =>
                       classifySecurityData(content, actor.id, scopeId, undefined, {
+                        ...screenTrace,
+                        sessionId: session.id,
                         hook: "tool_response",
                         request: input.text,
                         surface: "inbound_file",
@@ -3103,7 +3130,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           requestText: string,
         ): Promise<boolean> => {
           let documentsUnscreened = false;
-          if (securityPolicy.inboundScreening === "external") {
+          if (securityPolicy.screening !== "off") {
             for (const document of documentInputs.documents.slice()) {
               documentsUnscreened ||= !isTextDocument(document);
               if (!(deps.securityScreener || deps.harness.models.screenSecurity)) {
@@ -3122,6 +3149,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               for (const chunk of securityScreenChunks("tool_result:inbound_document", content)) {
                 turnAbort.signal.throwIfAborted();
                 const verdict = await classifySecurityData(chunk, actor.id, scopeId, undefined, {
+                  ...screenTrace,
+                  sessionId: session.id,
                   hook: "tool_response",
                   request: requestText,
                   surface: "inbound_file",
@@ -3146,7 +3175,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 documentsUnscreened = true;
             }
           }
-          return documentsUnscreened;
+          return enforceScreen && documentsUnscreened;
         };
         const documentsUnscreened = await screenDocuments(documentInputs, input.text);
         let remainingDocumentBytes =
@@ -3156,7 +3185,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const principalDelivered = await recentPrincipalDeliveryNote(deps.deliveries, session.threadRef);
         const sender = !automatedTurn && input.text.trim() ? senderNote(actor.displayName) : "";
         const unscreenedNote =
-          inputUnscreened || inbound.unscreened.length || documentsUnscreened
+          inputUnscreened || (enforceScreen && inbound.unscreened.length) || documentsUnscreened
             ? unscreenedNotice("inbound content")
             : "";
         const turnEnvironmentContents = [
@@ -3545,9 +3574,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   : undefined;
               if (refreshedInbox) {
                 let allowed = true;
-                if (securityPolicy.inboundScreening === "external") {
+                if (securityPolicy.screening !== "off") {
                   for (const chunk of securityScreenChunks("conversation-header", refreshedInbox)) {
                     const verdict = await classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
+                      ...screenTrace,
+                      sessionId: session.id,
                       hook: "user_input",
                       request: text,
                       surface: "steer",
@@ -3573,7 +3604,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     blobTransfer,
                     { ...fileRegistration, seed },
                     inboxDir,
-                    securityPolicy.inboundScreening === "external"
+                    securityPolicy.screening !== "off"
                       ? ({ content, name, mimetype }) =>
                           classifySecurityData(
                             JSON.stringify({ name, mimetype, content }),
@@ -3581,6 +3612,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                             scopeId,
                             undefined,
                             {
+                              ...screenTrace,
+                              sessionId: session.id,
                               hook: "tool_response",
                               surface: "inbound_file",
                               origin: input.origin.kind,
@@ -3615,7 +3648,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                   inboundManifest(received.metas, inboxDir, received.unstaged),
                   ...steeredDocuments.notices,
                   issues.length ? fileEventPayload("in", issues).text : "",
-                  securityPolicy.inboundScreening === "external" &&
+                  enforceScreen &&
                   (steeredUnscreened ||
                     received.unscreened.length ||
                     received.metas.some((a) => !isScreenableTextAttachment(a.mimetype)))
@@ -3683,7 +3716,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       : effectiveTurnWallClockMs,
                 }
               : {}),
-            ...(securityPolicy.inboundScreening === "external"
+            ...(securityPolicy.screening !== "off"
               ? {
                   screenToolResult: async ({
                     tool,
@@ -3696,6 +3729,22 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     if (provenance !== "external") return { outcome: "allow" };
                     const toolLabel = toolLabelOf(tool);
                     const sourceLabel = source ? `:${source.replace(/[^A-Za-z0-9_-]/g, "_")}` : "";
+                    const screenChunk = (chunk: string) =>
+                      classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
+                        ...screenTrace,
+                        sessionId: session.id,
+                        hook: "tool_response",
+                        request: input.text,
+                        surface: toolLabel,
+                        origin: input.origin.kind,
+                      });
+                    if (!enforceScreen) {
+                      if (!unscreenable)
+                        await Promise.all(
+                          securityScreenChunks(`tool_result:${toolLabel}${sourceLabel}`, result).map(screenChunk),
+                        );
+                      return { outcome: "allow" };
+                    }
                     if (authorizeCommand(quarantineReleaseKey(tool), quarantineReleaseKey(tool))) {
                       deps.auditLog.record({
                         at: Date.now(),
@@ -3714,18 +3763,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                     if (!unscreenable && chunks.length === 0) return { outcome: "allow" };
                     const verdicts: Array<SecurityScreenVerdict | undefined> = [];
                     for (let i = 0; i < chunks.length && !verdicts.some((v) => v?.decision === "strict"); i += 4) {
-                      verdicts.push(
-                        ...(await Promise.all(
-                          chunks.slice(i, i + 4).map((chunk) =>
-                            classifySecurityData(chunk, actor.id, scopeId, recordScreenRequest, {
-                              hook: "tool_response",
-                              request: input.text,
-                              surface: toolLabel,
-                              origin: input.origin.kind,
-                            }),
-                          ),
-                        )),
-                      );
+                      verdicts.push(...(await Promise.all(chunks.slice(i, i + 4).map(screenChunk))));
                     }
                     const verdict =
                       verdicts.find((v) => v?.decision === "strict") ??

@@ -798,8 +798,7 @@ export function buildApp(
     config.orgId,
     configStore,
     acl,
-    config.securityScreenBackend !== "off" || Boolean(overrides.securityScreener),
-    config.securityScreenAllPostures,
+    config.securityScreen === "off" && overrides.securityScreener ? "enforce" : config.securityScreen,
   );
 
   const workspace = createLocalWorkspaceStore(config.dataDir);
@@ -1471,11 +1470,7 @@ export function buildApp(
     );
   });
 
-  if (
-    config.securityScreenBackend !== "model" &&
-    !config.securityScreenProxy?.shadow &&
-    !overrides.securityScreener?.shadow
-  ) {
+  if (config.securityScreen === "off" || config.securityScreenClassifier !== "model") {
     delete harness.models.screenSecurity;
   }
 
@@ -1851,13 +1846,10 @@ export function buildApp(
   });
   const approvals = createApprovalStore(artifactMap<PendingApprovalRecord>("approvals"), deliveries);
   let securityScreener = overrides.securityScreener;
-  if (!securityScreener && config.securityScreenBackend === "proxy") {
+  if (!securityScreener && config.securityScreen !== "off" && config.securityScreenProxy) {
     securityScreener = createSecurityScreenProxy({
-      provider: config.securityScreenProxy!.provider,
-      endpoint: config.securityScreenProxy!.endpoint,
-      token: config.securityScreenProxy!.token,
+      ...config.securityScreenProxy,
       timeoutMs: config.securityScreenTimeoutMs,
-      shadow: config.securityScreenProxy!.shadow,
     });
   }
   const layerEnv = config.layerEnv ?? {};
