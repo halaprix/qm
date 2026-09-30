@@ -170,9 +170,14 @@ export interface QmConfig {
 
 export function securityScreenEnv(config: Pick<QmConfig, "securityScreen">): Record<string, string> {
   const screen = config.securityScreen;
-  const base = { SECURITY_SCREEN: screen?.mode ?? "off", SECURITY_SCREEN_CLASSIFIER: screen?.classifier ?? "model" };
+  const base = { SECURITY_SCREEN: screen?.mode ?? "off" };
   if (screen?.classifier !== "proxy") return base;
-  return { ...base, SECURITY_SCREEN_PROXY_PROVIDER: screen.provider, SECURITY_SCREEN_PROXY_ENDPOINT: screen.endpoint };
+  return {
+    ...base,
+    SECURITY_SCREEN_CLASSIFIER: "proxy",
+    SECURITY_SCREEN_PROXY_PROVIDER: screen.provider,
+    SECURITY_SCREEN_PROXY_ENDPOINT: screen.endpoint,
+  };
 }
 
 export function configPathInDir(dir: string): string | undefined {

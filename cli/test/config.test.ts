@@ -1433,11 +1433,11 @@ test("blank model provider overrides preserve the declared provider in runtime a
 });
 
 test("screening defaults off and the model classifier needs no proxy settings", () => {
-  assert.deepEqual(securityScreenEnv({}), { SECURITY_SCREEN: "off", SECURITY_SCREEN_CLASSIFIER: "model" });
+  assert.deepEqual(securityScreenEnv({}), { SECURITY_SCREEN: "off" });
   for (const mode of ["off", "observe", "enforce"] as const) {
     withConfig({ securityScreen: { mode } }, ({ path }) => {
       const { config } = loadConfigAt(path);
-      assert.deepEqual(securityScreenEnv(config), { SECURITY_SCREEN: mode, SECURITY_SCREEN_CLASSIFIER: "model" });
+      assert.deepEqual(securityScreenEnv(config), { SECURITY_SCREEN: mode });
     });
     withConfig({ securityScreen: { mode, provider: "example-screen" } }, ({ path }) =>
       assert.throws(() => loadConfigAt(path), /require classifier proxy/),
