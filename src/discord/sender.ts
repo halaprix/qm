@@ -1,7 +1,7 @@
 import type { Client, MessageCreateOptions } from "discord.js";
 import type { DiscordFile } from "./attachments.ts";
 
-const NO_MENTIONS = { parse: [] as [], repliedUser: false as const };
+export const NO_MENTIONS = { parse: [] as [], repliedUser: false as const };
 
 export interface OutboundMessage {
   content?: string;

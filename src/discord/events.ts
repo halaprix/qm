@@ -34,6 +34,10 @@ export type DiscordConversationTarget =
 
 const THREAD_NAME_MAX = 100;
 
+export function needsStakeLookup(msg: DiscordInbound, botUserId: string): boolean {
+  return msg.threadParentId !== null && msg.authorId !== botUserId && !msg.mentionedUserIds.includes(botUserId);
+}
+
 export function routeMessage(msg: DiscordInbound, botUserId: string, guildIds: ReadonlySet<string>): Routed | null {
   if (msg.authorIsBot || msg.authorId === botUserId) return null;
   const text = msg.content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
