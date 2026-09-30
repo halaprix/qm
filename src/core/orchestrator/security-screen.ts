@@ -17,6 +17,7 @@ import type { OrchestratorDeps } from "./types.ts";
 const DEFAULT_SECURITY_SCREEN_TIMEOUT_MS = 15_000;
 const MAX_SCREEN_REQUEST_CHARS = 2_000;
 const MAX_OBSERVED_SCREENS = 4;
+const MAX_QUEUED_OBSERVATIONS = 64;
 const MAX_AUDITED_SOURCES = 20;
 
 const unscreenedVerdict = (): SecurityScreenVerdict => ({
@@ -64,13 +65,25 @@ function screenSources(payload: string): string[] {
 
 export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassifier {
   let observing = 0;
+  const queued: Array<() => Promise<unknown>> = [];
+  const drain = (): void => {
+    while (observing < MAX_OBSERVED_SCREENS && queued.length) {
+      observing += 1;
+      void queued.shift()!()
+        .catch(swallowAs("orchestrator: observed security screen", undefined))
+        .finally(() => {
+          observing -= 1;
+          drain();
+        });
+    }
+  };
   return async function classifySecurityData(payload, actorId, scopeLabel, recordLlmRequest, context) {
     const screener = deps.securityScreener;
     const model = deps.harness.models.screenSecurity;
-    if (!screener && !model) return undefined;
+    const observe = context.mode === "observe";
+    if (!screener && !model) return observe ? { decision: "auto" } : undefined;
     const timeoutMs = deps.securityScreenTimeoutMs ?? DEFAULT_SECURITY_SCREEN_TIMEOUT_MS;
     const hook = context.hook ?? "user_input";
-    const observe = context.mode === "observe";
     let request: { origin: string; text: string; truncated: boolean } | undefined;
     if (hook === "tool_response" && context.request?.trim()) {
       request = {
@@ -80,7 +93,7 @@ export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassi
       };
     }
 
-    const audit = (status: ScreenStatus, requestId: string, result?: Screened): void => {
+    const audit = (status: ScreenStatus, requestId: string, attempts: number, result?: Screened): void => {
       deps.auditLog.record({
         at: Date.now(),
         principalId: actorId,
@@ -98,9 +111,9 @@ export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassi
           ...(context.runId ? { runId: context.runId } : {}),
           ...(context.thread ? { thread: context.thread } : {}),
           requestId,
+          attempts,
           ...(result?.score !== undefined ? { score: result.score, threshold: result.threshold } : {}),
           ...(result?.outcome ? { outcome: result.outcome } : {}),
-          ...(result?.verdict.reason ? { reason: result.verdict.reason } : {}),
         }),
       });
     };
@@ -132,14 +145,14 @@ export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassi
         signal,
         recordModelCall: (rec) => {
           deps.modelGateway.recordCall({ at: Date.now(), scopeLabel, ...rec });
-          void deps.budget?.record(actorId, estimateCostUsd(rec.inputTokens));
+          if (!observe) void deps.budget?.record(actorId, estimateCostUsd(rec.inputTokens));
         },
         ...(recordLlmRequest && !observe ? { recordLlmRequest } : {}),
       });
       return verdict ? { verdict } : undefined;
     };
 
-    const attempt = async (): Promise<SecurityScreenVerdict | undefined> => {
+    const attempt = async (): Promise<{ requestId: string; result: Screened | undefined }> => {
       const requestId = context.requestId ?? randomUUID();
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -150,38 +163,39 @@ export function createSecurityClassifier(deps: OrchestratorDeps): SecurityClassi
         const result = await Promise.race([screenOnce(requestId, abort.signal), timedOut]).catch(
           swallowAs("orchestrator: security screen", undefined),
         );
-        let status: ScreenStatus = "error";
-        if (result && !result.verdict.unscreened) {
-          if (result.verdict.decision === "strict") status = observe ? "would_block" : "block";
-          else status = "allow";
-        }
-        audit(status, requestId, result);
-        return result?.verdict;
+        return { requestId, result };
       } finally {
         clearTimeout(timer);
         abort.abort();
       }
     };
+    const settle = ({ requestId, result }: Awaited<ReturnType<typeof attempt>>, attempts: number) => {
+      let status: ScreenStatus = "error";
+      if (result && !result.verdict.unscreened) {
+        if (result.verdict.decision === "strict") status = observe ? "would_block" : "block";
+        else status = "allow";
+      }
+      audit(status, requestId, attempts, result);
+      return result?.verdict;
+    };
 
     if (observe) {
-      if (observing >= MAX_OBSERVED_SCREENS) {
-        audit("skipped_capacity", context.requestId ?? randomUUID());
-        return { decision: "auto" };
+      try {
+        if (queued.length >= MAX_QUEUED_OBSERVATIONS) audit("skipped_capacity", context.requestId ?? randomUUID(), 0);
+        else {
+          queued.push(async () => settle(await attempt(), 1));
+          drain();
+        }
+      } catch (error) {
+        swallowAs("orchestrator: observed security screen", undefined)(error);
       }
-      observing += 1;
-      void attempt()
-        .catch(swallowAs("orchestrator: observed security screen", undefined))
-        .finally(() => {
-          observing -= 1;
-        });
       return { decision: "auto" };
     }
 
     const startedAt = Date.now();
     const first = await attempt();
-    if (first) return first;
-    if (Date.now() - startedAt >= timeoutMs / 2) return unscreenedVerdict();
+    if (first.result || Date.now() - startedAt >= timeoutMs / 2) return settle(first, 1) ?? unscreenedVerdict();
     await sleep(250);
-    return (await attempt()) ?? unscreenedVerdict();
+    return settle(await attempt(), 2) ?? unscreenedVerdict();
   };
 }

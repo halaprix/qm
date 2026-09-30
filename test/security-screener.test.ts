@@ -331,17 +331,21 @@ test("the security screen proxy accepts concurrent classifications and rejects o
   await Promise.all([first, second, third]);
 });
 
-test("observed screening returns immediately and records capacity skips distinctly", async () => {
+test("observed screening returns immediately, queues bounded work, and records overflow distinctly", async () => {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
     release = resolve;
   });
+  let inFlight = 0;
+  let peak = 0;
   const events: AuditEvent[] = [];
   const classify = createSecurityClassifier({
     securityScreener: {
       provider: "example-screen",
       async classify() {
+        peak = Math.max(peak, ++inFlight);
         await pending;
+        inFlight--;
         return { verdict: { decision: "strict", reason: "example-screen:injection" }, score: 0.9, threshold: 0.5 };
       },
     },
@@ -349,7 +353,7 @@ test("observed screening returns immediately and records capacity skips distinct
     auditLog: { record: (event: AuditEvent) => events.push(event) },
   } as unknown as OrchestratorDeps);
   const verdicts = await Promise.all(
-    Array.from({ length: 6 }, (_, i) =>
+    Array.from({ length: 70 }, (_, i) =>
       classify(JSON.stringify([{ source: "webhook", content: `hostile ${i}` }]), "U1", "personal:U1", undefined, {
         mode: "observe",
         sessionId: "s1",
@@ -363,11 +367,9 @@ test("observed screening returns immediately and records capacity skips distinct
     ["skipped_capacity", "skipped_capacity"],
   );
   release();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(
-    events.map((event) => event.status),
-    ["skipped_capacity", "skipped_capacity", "would_block", "would_block", "would_block", "would_block"],
-  );
+  while (events.length < 70) await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(peak, 4);
+  assert.equal(events.filter((event) => event.status === "would_block").length, 68);
   const detail = JSON.parse(events.at(-1)!.detail!) as Record<string, unknown>;
   assert.equal(detail.sessionId, "s1");
   assert.equal(detail.runId, "r1");

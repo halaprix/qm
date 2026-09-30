@@ -199,10 +199,10 @@ An exact `--candidate` deployment consumes its digest-pinned images without chan
 
 When `securityScreen.mode` is not `off`, the classifier screens external content — inbound data, attachments and documents, shared skills, steering context, and external tool output — under every security posture. Posture only caps enforcement: Dangerous scopes observe, and Auto and Strict follow the deployment mode. Scope posture changes cannot turn screening off; they keep their own tool approvals and private-network policy.
 
-- `observe` classifies in the background and never delays a turn, quarantines, prompts, or adds untrusted-content markers. At most four observations run at once per core instance; extra work is skipped and audited rather than queued.
+- `observe` classifies in the background and never delays a turn, quarantines, prompts, or adds untrusted-content markers. Each core instance runs at most four observations at once and queues up to 64 more; beyond that, work is skipped and audited as `skipped_capacity`. Observed model screens are not charged to the user's budget.
 - `enforce` waits for the verdict. Flagged content is quarantined pending release approval. Outages, timeouts, and unscreenable content fail open with an untrusted-content marker and an audit record.
 
-Every classification writes one `security_screen.classify` audit record with status `allow`, `block`, `would_block`, `skipped_capacity`, or `error`. Its detail carries the hook, source labels, surface, origin, session, run and thread identifiers, request ID, and any score, threshold, outcome, or reason — enough to find the transcript behind a would-block. It never includes the screened text.
+Every classification writes one `security_screen.classify` audit record with status `allow`, `block`, `would_block`, `skipped_capacity`, or `error`. Its detail carries the hook, source labels, surface, origin, session, run and thread identifiers, request ID, attempt count, and any score, threshold, or outcome — enough to find the transcript behind a would-block. It never includes the screened text.
 
 `SECURITY_SCREEN_BACKEND`, `SECURITY_SCREEN_ALL_POSTURES`, and `SECURITY_SCREEN_PROXY_ROLLOUT` (and the `backend`, `allPostures`, and `rollout` config keys) are retired; core and the CLI refuse to start with them set.
 
