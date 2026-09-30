@@ -101,7 +101,7 @@ export interface LoopItemLedger {
   returnToWork(id: string, guidance: string, claimToken?: string): Promise<LoopItem | null>;
   park(id: string, reason: string, claimToken?: string): Promise<LoopItem | null>;
   skip(id: string, reason: string): Promise<LoopItem | null>;
-  stats(loopId: string, now: number): Promise<LoopQueueStats>;
+  stats(loopId: string, now: number, held?: ReadonlySet<string>): Promise<LoopQueueStats>;
   deleteByLoop(loopId: string): Promise<void>;
 }
 
@@ -444,7 +444,7 @@ export function createLoopItemLedger(
         return {
           ...item,
           triage: {
-            at: patch.at ?? current.at,
+            at: patch.at ?? (by === "human" ? Math.max(current.at, item.sourceAt ?? item.createdAt) : current.at),
             ...(priority ? { priority } : {}),
             ...(priority && reason ? { reason } : {}),
             ...(groupId ? { groupId } : {}),
@@ -662,8 +662,8 @@ export function createLoopItemLedger(
         undefined,
         "skipped",
       ),
-    async stats(loopId, now) {
-      const items = await forLoop(loopId);
+    async stats(loopId, now, held) {
+      const items = (await forLoop(loopId)).filter((item) => !held?.has(item.id));
       const queued = items.filter((item) => item.status === "queued");
       const oldest = queued.reduce<number | undefined>(
         (acc, item) => (acc === undefined || item.createdAt < acc ? item.createdAt : acc),

@@ -321,7 +321,7 @@ async function actOnItem(ctx: ApiCtx): Promise<void> {
   if (kind === "dismiss") {
     const next = await deps.items.recordAction(item.id, { kind, outcome: "dismissed" });
     if (!next) return sendJson(ctx.res, 409, { error: "conflict", message: "this item is already actioned" });
-    if (!ctx.capability) await settleGroup(deps.items, next);
+    if (args.group === true && !ctx.capability) await settleGroup(deps.items, next);
     return sendJson(ctx.res, 200, { item: ledgerItemView(next, loop) });
   }
 

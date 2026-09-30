@@ -124,6 +124,17 @@ function stateFields(state: LoopState): Pick<Loop, "state" | "enabled"> {
   return { state, enabled: state === "enabled" };
 }
 
+function mergeTriage(current: LoopTriageConfig | undefined, patch: LoopTriageConfig): LoopTriageConfig {
+  const next: LoopTriageConfig = { ...current };
+  for (const key of ["prioritize", "consolidate"] as const) {
+    const change = patch[key];
+    if (!change) continue;
+    const { instructions, ...setting } = { ...current?.[key], ...change };
+    next[key] = { ...setting, ...(instructions ? { instructions } : {}) };
+  }
+  return next;
+}
+
 export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop>()): LoopStore {
   if (!backing.update) throw new Error("loops need atomic durable updates");
   const atomicUpdate = backing.update.bind(backing);
@@ -206,7 +217,7 @@ export function createLoopStore(backing: DurableMap<Loop> = createMemoryMap<Loop
         }
         if (patch.caps !== undefined) fields.caps = patch.caps;
         if (patch.governor !== undefined) fields.governor = patch.governor;
-        if (patch.triage !== undefined) fields.triage = { ...loop.triage, ...patch.triage };
+        if (patch.triage !== undefined) fields.triage = mergeTriage(loop.triage, patch.triage);
         if (patch.cronId !== undefined) fields.cronId = patch.cronId;
         if (patch.runAs !== undefined) fields.runAs = patch.runAs;
         if (patch.state !== undefined) Object.assign(fields, stateFields(patch.state));

@@ -367,7 +367,7 @@ export function itemsFor(viewId: string, status: "open" | "handled"): InboxItem[
       if (inboxState.filter === "human") return true;
       if (item.probablyResolved) return false;
     }
-    return item.attention !== false;
+    return item.attention !== false || (item.groupId !== undefined && loopTriage(item).consolidate);
   });
 }
 
@@ -686,7 +686,9 @@ function usesOutputReview(item: InboxItem): boolean {
 function reviewTpl(item: InboxItem): TemplateResult {
   if (!item.detailLoaded) return html`<div class="empty compact">Loading review…</div>`;
   const outputs = item.outputs ?? [];
+  const controls = triageControlsTpl(item);
   return html`<div class="inbox-generic-review">
+    ${controls === nothing ? nothing : html`<div class="inbox-item-detail-actions">${controls}</div>`}
     <div class="inbox-draft-head"><span>${inboxViewName(item.loopId)}</span><span>${item.reviewState}</span></div>
     <p>${item.snippet}</p>
     ${!outputs.length && item.proposalData ? html`<pre class="inbox-proposal-data">${JSON.stringify(item.proposalData, null, 2)}</pre>` : nothing}
@@ -973,7 +975,6 @@ export async function setItemStatus(item: InboxItem, status: "open" | "dismissed
   try {
     upsertItem(await postAction(item, status === "dismissed" ? "dismiss" : "reopen"));
     if (status === "dismissed") showArchiveToast(item);
-    if (item.groupId) void refreshInbox({ silent: true });
     return true;
   } catch (e) {
     notify(`Couldn't update the item: ${e instanceof Error ? e.message : e}`);
@@ -1528,6 +1529,22 @@ function triageControlsTpl(item: InboxItem): TemplateResult | typeof nothing {
 
 const expandedGroups = new Set<string>();
 
+async function archiveGroup(head: InboxItem): Promise<void> {
+  if (acting.has(head.id)) return;
+  acting.add(head.id);
+  drawAll();
+  try {
+    upsertItem(await postAction(head, "dismiss", { group: true }));
+    showArchiveToast(head);
+    await refreshInbox({ silent: true });
+  } catch (e) {
+    notify(`Couldn't archive the group: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    acting.delete(head.id);
+    drawAll();
+  }
+}
+
 function groupedRowsTpl(surface: InboxSurface, items: InboxItem[]): TemplateResult[] {
   const members = new Map<string, InboxItem[]>();
   for (const item of items) {
@@ -1538,7 +1555,7 @@ function groupedRowsTpl(surface: InboxSurface, items: InboxItem[]): TemplateResu
   const drawn = new Set<string>();
   for (const item of items) {
     const group = item.groupId ? members.get(item.groupId) : undefined;
-    if (!group || group.length < 2) {
+    if (!group || group.length < 2 || !group.some((member) => member.id === item.groupId)) {
       rows.push(itemRowTpl(surface, item));
       continue;
     }
@@ -1550,10 +1567,11 @@ function groupedRowsTpl(surface: InboxSurface, items: InboxItem[]): TemplateResu
 }
 
 function groupRowTpl(surface: InboxSurface, groupId: string, group: InboxItem[]): TemplateResult {
-  const head = group.find((item) => item.id === groupId) ?? group[0]!;
+  const head = group.find((item) => item.id === groupId)!;
   const open = expandedGroups.has(groupId);
   const gmail = head.source === "gmail";
   const heading = gmail ? head.from || head.title : (head.slack?.channelLabel ?? head.title);
+  const sub = gmail ? head.title : head.from || inboxViewName(head.loopId);
   return html`<div class="inbox-group ${open ? "expanded" : ""} src-${head.source}">
     <div class="inbox-item-summary">
       <button
@@ -1571,6 +1589,7 @@ function groupRowTpl(surface: InboxSurface, groupId: string, group: InboxItem[])
           <span class="inbox-item-top">
             <span class="inbox-group-count">${group.length} similar ·</span>
             <span class="inbox-item-heading">${heading}</span>
+            <span class="inbox-item-sub">${sub}</span>
           </span>
           <span class="inbox-item-snippet">${slackTextTpl(head, head.snippet, { links: false })}</span>
         </span>
@@ -1586,7 +1605,7 @@ function groupRowTpl(surface: InboxSurface, groupId: string, group: InboxItem[])
         aria-label=${`Archive ${group.length} similar`}
         ${tip(`Archive all ${group.length}`)}
         ?disabled=${acting.has(head.id)}
-        @click=${() => void setItemStatus(head, "dismissed")}
+        @click=${() => void archiveGroup(head)}
       >
         ${icon(Archive, 13.5)}
       </button>

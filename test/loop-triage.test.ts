@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createLoopItemLedger } from "../src/loops/item-ledger.ts";
 import { sortLedgerItems } from "../src/loops/ledger-view.ts";
-import { planTriage, removeFromGroup, settleGroup, triageWork } from "../src/loops/triage.ts";
-import { scopeId, type Loop } from "../src/types.ts";
+import { planTriage, removeFromGroup, settleGroup, triageWork, workOrder } from "../src/loops/triage.ts";
+import { scopeId, type Loop, type LoopItem } from "../src/types.ts";
 import { createLoopStore } from "../src/loops/loop-store.ts";
+import { sleep } from "../src/util/async.ts";
 
 const LOOP = "loop-1";
 
@@ -25,14 +26,10 @@ async function flood() {
     id: LOOP,
     triage: { prioritize: { enabled: true }, consolidate: { enabled: true } },
   };
-  await ledger.ingest(
-    ["a", "b", "c", "d"].map((key, index) => ({
-      loopId: LOOP,
-      dedupeKey: key,
-      sourcePayload: { title: key },
-      sourceAt: 100 + index,
-    })),
-  );
+  for (const [index, key] of ["a", "b", "c", "d"].entries()) {
+    await ledger.ingest([{ loopId: LOOP, dedupeKey: key, sourcePayload: { title: key }, sourceAt: 100 + index }]);
+    await sleep(2);
+  }
   const ids = Object.fromEntries((await ledger.byLoop(LOOP)).map((item) => [item.sourceKey, item.id]));
   return { ledger, loop: triaged, ids };
 }
@@ -55,10 +52,10 @@ test("triage groups into one representative, sorts by priority, and leaves triag
   ]);
   const items = await s.ledger.byLoop(LOOP);
   const groups = new Set(items.map((item) => item.triage?.groupId));
-  assert.deepEqual([...groups].sort(), [c, undefined].sort());
+  assert.deepEqual([...groups].sort(), [b, undefined].sort());
   assert.deepEqual(
     sortLedgerItems(items, s.loop).map((item) => item.sourceKey),
-    ["c", "b", "d", "a"],
+    ["b", "c", "d", "a"],
   );
   assert.deepEqual(
     sortLedgerItems(items, {}).map((item) => item.sourceKey),
@@ -105,4 +102,55 @@ test("resolving a representative resolves its open members without touching thei
     assert.deepEqual(member.sourcePayload, { title: member.sourceKey });
   }
   assert.equal((await s.ledger.get(s.ids.d!))!.status, "queued");
+});
+
+test("members of a representative resolved elsewhere are released for work and fresh triage", async () => {
+  const s = await flood();
+  const { a, b, c } = s.ids as Record<string, string>;
+  await triage(s, [
+    { id: b!, groupWith: a! },
+    { id: c!, groupWith: a! },
+  ]);
+  assert.deepEqual(
+    workOrder(s.loop, await s.ledger.queued(LOOP), await s.ledger.byLoop(LOOP)).map((item) => item.sourceKey),
+    ["a", "d"],
+  );
+  await s.ledger.recordAction(a!, { kind: "replied", outcome: "dismissed" });
+  const items = await s.ledger.byLoop(LOOP);
+  assert.deepEqual(
+    workOrder(s.loop, await s.ledger.queued(LOOP), items).map((item) => item.sourceKey),
+    ["b", "c", "d"],
+  );
+  assert.deepEqual(
+    triageWork(s.loop, items)
+      ?.pending.map((item) => item.sourceKey)
+      .sort(),
+    ["b", "c"],
+  );
+  await triage(s, [{ id: c!, groupWith: b! }]);
+  assert.equal((await s.ledger.get(c!))!.triage?.groupId, b);
+});
+
+test("regrouping moves only the item and hands its old group to the oldest remaining member", () => {
+  const item = (id: string, createdAt: number, groupId?: string): LoopItem => ({
+    id,
+    loopId: LOOP,
+    sourceKey: id,
+    status: "queued",
+    attempts: 0,
+    runIds: [],
+    outputIds: [],
+    createdAt,
+    updatedAt: createdAt,
+    triage: { at: createdAt, ...(groupId ? { groupId } : {}) },
+  });
+  const open = [item("a", 1, "a"), item("b", 2, "a"), item("c", 3, "a"), item("d", 4)];
+  const loop = { triage: { consolidate: { enabled: true } } };
+  const plan = planTriage(loop, open, [open[0]!], [{ id: "a", groupWith: "d" }]);
+  assert.deepEqual(
+    Object.fromEntries(
+      ["a", "b", "c", "d"].map((id) => [id, plan.get(id)?.groupId ?? open.find((i) => i.id === id)!.triage!.groupId]),
+    ),
+    { a: "a", b: "b", c: "b", d: "a" },
+  );
 });

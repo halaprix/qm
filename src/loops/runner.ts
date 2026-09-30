@@ -6,7 +6,7 @@ import { isRunnable } from "./loop-store.ts";
 import { decideShip, outputCandidate, undeclaredShipActions } from "./ship-gate.ts";
 import type { SuccessVerdict } from "./success-evaluation.ts";
 import type { ShipGrant } from "../types.ts";
-import { groupMemberHeld } from "./triage.ts";
+import { workOrder } from "./triage.ts";
 
 export interface IntakeCandidate {
   sourceKey: string;
@@ -100,15 +100,12 @@ export async function runLoopFire(
     summary.failures.push(`intake: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  try {
-    await effects.triage?.(loop);
-  } catch (error) {
-    summary.failures.push(`triage: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  await effects.triage?.(loop);
 
-  const queued = (await stores.items.queued(loop.id))
-    .filter((item) => !groupMemberHeld(loop, item))
-    .slice(0, loop.caps?.maxItemsPerFire);
+  const queued = workOrder(loop, await stores.items.queued(loop.id), await stores.items.byLoop(loop.id)).slice(
+    0,
+    loop.caps?.maxItemsPerFire,
+  );
   const batch = loop.throttle ? queued.slice(0, Math.max(1, Math.floor(queued.length / 2))) : queued;
   for (const queued of batch) {
     const item = await stores.items.claim(queued.id, undefined, loop.id);

@@ -189,9 +189,9 @@ function triageFromBody(value: unknown): LoopTriageConfig | null | undefined {
     if (raw === undefined) continue;
     if (!isObj(raw) || typeof raw.enabled !== "boolean") return null;
     if (raw.instructions !== undefined && typeof raw.instructions !== "string") return null;
-    const instructions = typeof raw.instructions === "string" ? raw.instructions.trim() : "";
-    if (instructions.length > TRIAGE_INSTRUCTIONS_MAX) return null;
-    config[key] = { enabled: raw.enabled, ...(instructions ? { instructions } : {}) };
+    const instructions = typeof raw.instructions === "string" ? raw.instructions.trim() : undefined;
+    if (instructions !== undefined && instructions.length > TRIAGE_INSTRUCTIONS_MAX) return null;
+    config[key] = { enabled: raw.enabled, ...(instructions !== undefined ? { instructions } : {}) };
   }
   return config;
 }
@@ -436,7 +436,10 @@ async function patchLoop(ctx: ApiCtx): Promise<void> {
       error: "bad_request",
       message: `triage must be {prioritize?, consolidate?: {enabled: boolean, instructions?: string up to ${TRIAGE_INSTRUCTIONS_MAX} chars}}`,
     });
-  if (triage !== undefined) patch.triage = triage;
+  if (triage !== undefined) {
+    if (!requireLiveHuman(ctx, acting)) return;
+    patch.triage = triage;
+  }
   if (b.destinationKey !== undefined) {
     if (b.destinationKey !== null && typeof b.destinationKey !== "string")
       return sendJson(ctx.res, 400, { error: "bad_request", message: "destinationKey must be a string or null" });

@@ -367,13 +367,13 @@ function ledgerRows(loop: LoopView, items: LoopItemView[]): TemplateResult[] {
   for (const item of items) {
     const groupId = item.triage?.groupId;
     const group = groupId ? (members.get(groupId) ?? []) : [];
-    if (!groupId || group.length < 2) {
+    const head = group.find((member) => member.id === groupId);
+    if (!groupId || group.length < 2 || !head || head.status === "shipped" || head.status === "skipped") {
       rows.push(itemRow(loop, item));
       continue;
     }
     if (group[0] !== item) continue;
     const open = expandedGroups.has(groupId);
-    const head = group.find((member) => member.id === groupId) ?? item;
     rows.push(
       html`<button
         class="loop-item loop-item-group"

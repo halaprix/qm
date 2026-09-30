@@ -102,7 +102,7 @@ export function ledgerItemView(item: LoopItem, loop: Pick<Loop, "triage">): Ledg
   };
 }
 
-const PRIORITY_RANK: Record<LoopItemPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+export const PRIORITY_RANK: Record<LoopItemPriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
 
 type TriageKey = [number, number, number, string, number, number, number, number, string];
 

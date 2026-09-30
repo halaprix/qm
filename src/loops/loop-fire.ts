@@ -28,10 +28,11 @@ import { collectVitals, evaluateGovernor, healthWorsened } from "./governor.ts";
 import { unresolvedOutput } from "./output-store.ts";
 import { decideShip, outputCandidate } from "./ship-gate.ts";
 import { evaluateSuccess, type SuccessCheckResult, type SuccessVerdict } from "./success-evaluation.ts";
-import { consolidates, isResolved, ledgerState, prioritizes } from "./ledger-view.ts";
+import { consolidates, ledgerState, prioritizes } from "./ledger-view.ts";
 import {
   DEFAULT_CONSOLIDATE_INSTRUCTIONS,
   DEFAULT_PRIORITIZE_INSTRUCTIONS,
+  heldMembers,
   parseTriageDecisions,
   planTriage,
   triageWork,
@@ -510,20 +511,24 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
   async function triage(loop: Loop, fireKey: string, threadRef: string): Promise<void> {
     const work = triageWork(loop, await deps.items.byLoop(loop.id));
     if (!work) return;
-    const outcome = await stageTurn(
-      loop,
-      `${fireKey}:triage`,
-      threadRef,
-      triagePrompt(loop, work.open, work.pending),
-      undefined,
-      { readOnly: true },
-    );
-    const failure = stageFailure("triage", outcome);
-    if (failure) throw failure.error;
-    const parsed = fencedJson(outcome.reply ?? "");
-    if (parsed === undefined) throw new Error("triage: reply was not parseable");
-    const patches = planTriage(loop, work.open, work.pending, parseTriageDecisions(listField(parsed, "items")));
-    for (const [id, patch] of patches) await deps.items.setTriage(id, patch, "agent");
+    try {
+      const outcome = await stageTurn(
+        loop,
+        `${fireKey}:triage`,
+        threadRef,
+        triagePrompt(loop, work.context, work.pending),
+        undefined,
+        { readOnly: true },
+      );
+      const failure = stageFailure("triage", outcome);
+      if (failure) throw failure.error;
+      const parsed = fencedJson(outcome.reply ?? "");
+      if (parsed === undefined) throw new Error("triage: reply was not parseable");
+      const patches = planTriage(loop, work.open, work.pending, parseTriageDecisions(listField(parsed, "items")));
+      for (const [id, patch] of patches) await deps.items.setTriage(id, patch, "agent");
+    } catch (error) {
+      console.error("%s", `[loops] triage for ${loop.id} failed:`, errMessage(error));
+    }
   }
 
   function stageFailure(stage: string, outcome: TriggerOutcome): { error: Error; userMessage: string } | null {
@@ -644,6 +649,8 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
     const maxAttempts = loop.caps?.maxItemAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const grants = await deps.grants.byLoop(loopId);
     const workReplies = new Map<string, string>();
+    let members: LoopItem[] | undefined;
+    let held: Set<string> | undefined;
 
     let summary: FireSummary;
     try {
@@ -661,11 +668,9 @@ export function createLoopFireService(deps: LoopFireDeps): LoopFireService {
           },
           triage: () => triage(loop, fireKey, threadRef),
           work: async ({ item, guidance }) => {
-            const similar = consolidates(loop)
-              ? (await deps.items.byLoop(loop.id)).filter(
-                  (member) => member.id !== item.id && member.triage?.groupId === item.id && !isResolved(member),
-                )
-              : [];
+            members ??= consolidates(loop) ? await deps.items.byLoop(loop.id) : [];
+            const heldIds = (held ??= heldMembers(loop, members));
+            const similar = members.filter((member) => heldIds.has(member.id) && member.triage?.groupId === item.id);
             const outcome = await stageTurn(
               loop,
               `${fireKey}:work:${item.id}:${item.attempts}`,

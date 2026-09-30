@@ -101,16 +101,22 @@ async function inbox(ctx: ApiCtx): Promise<void> {
     }
     return item.status === "ready" || (item.status === "failed" && Boolean(item.parkedReason));
   });
+  const loopsById = new Map(selected.map((loop) => [loop.id, loop]));
+  const attentionIds = new Set(attention.map((item) => item.id));
+  const members = open.filter((item) => {
+    const groupId = item.triage?.groupId;
+    const loop = loopsById.get(item.loopId);
+    return !attentionIds.has(item.id) && groupId && attentionIds.has(groupId) && loop && consolidates(loop);
+  });
   const counts = new Map<string, number>();
   for (const item of open) counts.set(item.loopId, (counts.get(item.loopId) ?? 0) + 1);
-  let candidates = attention;
+  let candidates = [...attention, ...members];
   if (sent)
     candidates = summaries.filter(
       (item) =>
         item.actionKind === "send" && item.status === "shipped" && (item.source === "gmail" || item.source === "slack"),
     );
   else if (handled) candidates = summaries.filter((item) => item.status === "shipped" || item.status === "skipped");
-  const loopsById = new Map(selected.map((loop) => [loop.id, loop]));
   const keys = triageKeys(
     candidates,
     (item) => loopsById.get(item.loopId),
