@@ -12667,6 +12667,23 @@ body.app-edit-embed .custom-chat-shell.app-edit-chat > .chat-bottom-dock {
   left: auto;
   right: 0;
 }
+.general-access-control .menu-button {
+  margin-left: -8px;
+  font-size: var(--font-13);
+  font-weight: 500;
+}
+.general-access-control .menu-popover {
+  width: 220px;
+  left: 0;
+  right: auto;
+}
+.menu-option[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.menu-option[aria-disabled="true"]:hover {
+  background: transparent;
+}
 .permission-control .menu-option {
   font-size: 12px;
 }
