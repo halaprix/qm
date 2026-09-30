@@ -30,7 +30,7 @@ test("general access is one menu: restricted, the org, or (admin permitting) any
   assert.match(source, /\{ value: "restricted", label: "Restricted" \}/);
   assert.match(source, /\{ value: "org", label: orgName\(\) \}/);
   assert.match(source, /disabledHint: "An org admin must turn on external app sharing first\."/);
-  assert.match(source, /next === "public" && !externalSharing\) return/);
+  assert.match(source.replace(/\s+/g, " "), /next === "public" && !externalSharing\) ?\)? return/);
   // The org level is the ordinary org-wide grant, not a new kind of access.
   assert.match(source, /post\(\{ scope: "org", access: "view" \}\)/);
   assert.match(source, /post\(\{ scope: grant\.scope, access: "none" \}\)/);

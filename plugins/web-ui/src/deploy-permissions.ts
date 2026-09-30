@@ -338,7 +338,9 @@ export async function openDeploymentPermissions(id: string, title: string, owner
                     {
                       value: "public",
                       label: "Anyone with the link",
-                      ...(externalSharing ? {} : { disabledHint: "An org admin must turn on external app sharing first." }),
+                      ...(externalSharing
+                        ? {}
+                        : { disabledHint: "An org admin must turn on external app sharing first." }),
                     },
                   ],
                   onSelect: (next) => {
@@ -351,8 +353,10 @@ export async function openDeploymentPermissions(id: string, title: string, owner
             ${(() => {
               const grant = generalAccess() === "org" ? orgGrant() : undefined;
               return grant
-                ? permissionMenu(grant.permission === "write" ? "manage" : "view", `Access for ${orgName()}`, (value) =>
-                    void change(grant.scope, value),
+                ? permissionMenu(
+                    grant.permission === "write" ? "manage" : "view",
+                    `Access for ${orgName()}`,
+                    (value) => void change(grant.scope, value),
                   )
                 : nothing;
             })()}
