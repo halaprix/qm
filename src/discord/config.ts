@@ -1,11 +1,12 @@
 export const DISCORD_SURFACE = "discord";
+const EXTERNAL_PREFIX = `${DISCORD_SURFACE}:`;
 
 export interface DiscordPluginConfig {
   botToken: string;
   allowUserIds: ReadonlySet<string>;
+  guildIds: ReadonlySet<string>;
+  internalRoleIds: ReadonlySet<string>;
 }
-
-export type DiscordGate = (userId: string) => boolean;
 
 function idList(raw: string | undefined): Set<string> {
   return new Set(
@@ -19,19 +20,18 @@ function idList(raw: string | undefined): Set<string> {
 export function discordPluginConfigFromEnv(env: Record<string, string | undefined>): DiscordPluginConfig | null {
   const botToken = env.DISCORD_BOT_TOKEN?.trim();
   if (!botToken) return null;
-  const allowUserIds = idList(env.DISCORD_ALLOW_USER_IDS);
-  if (allowUserIds.size === 0) {
-    throw new Error(
-      "DISCORD_BOT_TOKEN is set but DISCORD_ALLOW_USER_IDS is empty; refusing to start an open Discord bot",
-    );
-  }
-  return { botToken, allowUserIds };
-}
-
-export function createDiscordGate(cfg: DiscordPluginConfig): DiscordGate {
-  return (userId) => cfg.allowUserIds.has(userId);
+  return {
+    botToken,
+    allowUserIds: idList(env.DISCORD_ALLOW_USER_IDS),
+    guildIds: idList(env.DISCORD_GUILD_IDS),
+    internalRoleIds: idList(env.DISCORD_INTERNAL_ROLE_IDS),
+  };
 }
 
 export function discordExternalId(userId: string): string {
-  return `${DISCORD_SURFACE}:${userId}`;
+  return `${EXTERNAL_PREFIX}${userId}`;
+}
+
+export function discordUserIdOf(externalId: string): string | null {
+  return externalId.startsWith(EXTERNAL_PREFIX) ? externalId.slice(EXTERNAL_PREFIX.length) : null;
 }

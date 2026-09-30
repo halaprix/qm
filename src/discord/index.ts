@@ -1,8 +1,9 @@
 import { Client, Events, GatewayIntentBits, Partials, type Message, type MessageCreateOptions } from "discord.js";
-import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
+import type { DiscordCoreClient } from "../api/discord-core-client.ts";
 import { reportFailureAs, swallowAs } from "../util/errors.ts";
 import { ingestAttachments } from "./attachments.ts";
-import { createDiscordGate, type DiscordPluginConfig } from "./config.ts";
+import type { DiscordPluginConfig } from "./config.ts";
+import { classifyMember } from "./members.ts";
 import { conversationFor, routeMessage, type DiscordInbound } from "./events.ts";
 import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "./turn-flow.ts";
 
@@ -45,10 +46,9 @@ function replyChannel(ch: { send(options: MessageCreateOptions): Promise<StatusM
 
 export function createDiscordPlugin(
   cfg: DiscordPluginConfig,
-  core: SurfaceCoreClient,
+  core: DiscordCoreClient,
   opts: DiscordPluginOptions,
 ): DiscordPlugin {
-  const gate = createDiscordGate(cfg);
   const clientFactory =
     opts.clientFactory ??
     (() =>
@@ -69,7 +69,9 @@ export function createDiscordPlugin(
   async function handle(message: Message, activeClient: Client): Promise<void> {
     const botUserId = activeClient.user?.id ?? "";
     const inbound = toInbound(message);
-    const routed = routeMessage(inbound, botUserId, gate);
+    const routed = await routeMessage(inbound, botUserId, (m) =>
+      classifyMember(m, cfg, (userId) => core.linkedInternal(userId)),
+    );
     if (!routed) return;
     const target = message.channel;
     if (!("send" in target)) return;

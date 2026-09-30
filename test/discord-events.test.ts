@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDiscordGate, discordPluginConfigFromEnv } from "../src/discord/config.ts";
+import { classifyMember, type DiscordMemberFacts } from "../src/discord/members.ts";
 import { conversationFor, routeMessage, type DiscordInbound } from "../src/discord/events.ts";
 
 const BOT = "999";
-const gate = createDiscordGate(discordPluginConfigFromEnv({ DISCORD_BOT_TOKEN: "t", DISCORD_ALLOW_USER_IDS: "111" })!);
+const cfg = { allowUserIds: new Set(["111"]), internalRoleIds: new Set<string>() };
+const classify = (m: DiscordMemberFacts) => classifyMember(m, cfg, async () => false);
 
 function msg(over: Partial<DiscordInbound>): DiscordInbound {
   return {
@@ -20,29 +21,29 @@ function msg(over: Partial<DiscordInbound>): DiscordInbound {
   };
 }
 
-test("DM from an allowlisted user routes to the DM session", () => {
-  const r = routeMessage(msg({}), BOT, gate)!;
+test("DM from an allowlisted user routes to the DM session", async () => {
+  const r = (await routeMessage(msg({}), BOT, classify))!;
   assert.equal(r.target, "dm");
   assert.equal(r.actor.externalId, "discord:111");
   assert.equal(r.actor.displayName, "Ana");
 });
 
-test("a message from an allowlisted user in a guild (guildId 900) routes to null", () => {
-  assert.equal(routeMessage(msg({ authorId: "111", guildId: "900", content: "hi" }), BOT, gate), null);
+test("a message from an allowlisted user in a guild (guildId 900) routes to null", async () => {
+  assert.equal(await routeMessage(msg({ authorId: "111", guildId: "900", content: "hi" }), BOT, classify), null);
 });
 
-test("users not on the allowlist are ignored everywhere", () => {
-  assert.equal(routeMessage(msg({ authorId: "222" }), BOT, gate), null);
-  assert.equal(routeMessage(msg({ authorId: "222", guildId: "900" }), BOT, gate), null);
+test("users not on the allowlist are ignored everywhere", async () => {
+  assert.equal(await routeMessage(msg({ authorId: "222" }), BOT, classify), null);
+  assert.equal(await routeMessage(msg({ authorId: "222", guildId: "900" }), BOT, classify), null);
 });
 
-test("bots, including this bot, are ignored", () => {
-  assert.equal(routeMessage(msg({ authorIsBot: true }), BOT, gate), null);
-  assert.equal(routeMessage(msg({ authorId: BOT }), BOT, gate), null);
+test("bots, including this bot, are ignored", async () => {
+  assert.equal(await routeMessage(msg({ authorIsBot: true }), BOT, classify), null);
+  assert.equal(await routeMessage(msg({ authorId: BOT }), BOT, classify), null);
 });
 
-test("a message with no text and no files is ignored", () => {
-  assert.equal(routeMessage(msg({ content: "   " }), BOT, gate), null);
+test("a message with no text and no files is ignored", async () => {
+  assert.equal(await routeMessage(msg({ content: "   " }), BOT, classify), null);
 });
 
 test("conversation keys are stable per DM channel", () => {

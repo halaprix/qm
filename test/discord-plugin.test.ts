@@ -3,19 +3,23 @@ import { mock, test } from "node:test";
 import { EventEmitter } from "node:events";
 import { createDiscordPlugin, DISCORD_LOGIN_RETRY_BASE_MS } from "../src/discord/index.ts";
 import type { DiscordPluginConfig } from "../src/discord/config.ts";
-import type { SurfaceCoreClient } from "../src/api/surface-core-client.ts";
+import type { DiscordCoreClient } from "../src/api/discord-core-client.ts";
 
 const cfg: DiscordPluginConfig = {
   botToken: "fake-token",
   allowUserIds: new Set(["111"]),
+  guildIds: new Set(),
+  internalRoleIds: new Set(),
 };
 
-function fakeCore(): SurfaceCoreClient {
+function fakeCore(): DiscordCoreClient {
   return {
     submitTurn: async () => ({ status: "queued", runId: "r1" }),
     waitRun: async () => ({ status: "ok", reply: "done" }),
     streamSnapshot: () => null,
-  } as unknown as SurfaceCoreClient;
+    linkedInternal: async () => false,
+    discordUserIdsFor: () => [],
+  } as unknown as DiscordCoreClient;
 }
 
 test("stop drains in-flight handle before calling client.destroy", async () => {
@@ -42,7 +46,7 @@ test("stop drains in-flight handle before calling client.destroy", async () => {
       events.push("handle.finish");
       return { status: "ok", reply: "done" };
     },
-  } as unknown as SurfaceCoreClient;
+  } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, slowCore, {
     clientFactory: () => fakeClient as never,
@@ -155,7 +159,7 @@ test("start during stop drain immediately creates a new client that survives the
       events.push("turn:finish");
       return { status: "ok", reply: "done" };
     },
-  } as unknown as SurfaceCoreClient;
+  } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, slowCore, {
     clientFactory,
@@ -221,7 +225,7 @@ test("a second stop while draining waits for the same drain", async () => {
       events.push("handle.finish");
       return { status: "ok", reply: "done" };
     },
-  } as unknown as SurfaceCoreClient;
+  } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, slowCore, {
     clientFactory: () => fakeClient as never,
@@ -299,7 +303,7 @@ test("second stop does not settle before second client drain even if previous de
       if (req.text === "turn 2") await turn2Promise;
       return { status: "ok", reply: "done" };
     },
-  } as unknown as SurfaceCoreClient;
+  } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, core, {
     clientFactory: factory,

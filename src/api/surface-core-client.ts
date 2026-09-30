@@ -37,7 +37,7 @@ interface SurfaceRunHooks {
 
 export type CoreTurnBody = Omit<TurnRequest, "surface">;
 
-export interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
+interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
   createdAt?: number;
   reason?: string;
   request?: Record<string, unknown>;

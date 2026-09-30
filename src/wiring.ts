@@ -357,8 +357,7 @@ import { createApp, type App } from "./api/app.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackAgentRequestContext, type SlackCoreClient } from "./api/slack-core-client.ts";
-import { createSurfaceCoreClient, type SurfaceCoreClient } from "./api/surface-core-client.ts";
-import { DISCORD_SURFACE } from "./discord/config.ts";
+import { createDiscordCoreClient, type DiscordCoreClient } from "./api/discord-core-client.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -552,7 +551,7 @@ export interface BuiltApp {
   sessionShareBytes: DurableByteStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
-  discordCore: SurfaceCoreClient;
+  discordCore: DiscordCoreClient;
 }
 
 const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
@@ -2185,21 +2184,18 @@ export function buildApp(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
-  const discordCore = createSurfaceCoreClient(
-    {
-      app,
-      runs,
-      turnStream,
-      tasks,
-      blobTransfer,
-      identity,
-      deliveries,
-      leaderLease,
-      errors,
-      ...(keychainApprovals ? { keychainApprovals } : {}),
-    },
-    DISCORD_SURFACE,
-  );
+  const discordCore = createDiscordCoreClient({
+    app,
+    runs,
+    turnStream,
+    tasks,
+    blobTransfer,
+    identity,
+    deliveries,
+    leaderLease,
+    errors,
+    ...(keychainApprovals ? { keychainApprovals } : {}),
+  });
   runs.onTerminal((run) => {
     void runs
       .activeForThread(run.sessionId)

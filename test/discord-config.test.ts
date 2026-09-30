@@ -1,31 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDiscordGate, discordExternalId, discordPluginConfigFromEnv } from "../src/discord/config.ts";
+import { discordPluginConfigFromEnv, discordUserIdOf } from "../src/discord/config.ts";
 
-test("no token means no Discord surface", () => {
+test("no token means no Discord", () => {
   assert.equal(discordPluginConfigFromEnv({}), null);
 });
 
-test("a token without an allowlist is startup-fatal", () => {
-  assert.throws(() => discordPluginConfigFromEnv({ DISCORD_BOT_TOKEN: "t" }), /DISCORD_ALLOW_USER_IDS/);
+test("a token with no allowlist boots: unknown users are guests, not a startup error", () => {
+  const cfg = discordPluginConfigFromEnv({ DISCORD_BOT_TOKEN: "t" })!;
+  assert.equal(cfg.allowUserIds.size, 0);
 });
 
-test("parses comma/space separated ids", () => {
+test("lists parse from comma or space separated env", () => {
   const cfg = discordPluginConfigFromEnv({
     DISCORD_BOT_TOKEN: "t",
-    DISCORD_ALLOW_USER_IDS: "111, 222\n333",
+    DISCORD_ALLOW_USER_IDS: "1, 2",
+    DISCORD_GUILD_IDS: "900 901",
+    DISCORD_INTERNAL_ROLE_IDS: "r1",
   })!;
-  assert.deepEqual([...cfg.allowUserIds], ["111", "222", "333"]);
+  assert.deepEqual([...cfg.allowUserIds], ["1", "2"]);
+  assert.deepEqual([...cfg.guildIds], ["900", "901"]);
+  assert.deepEqual([...cfg.internalRoleIds], ["r1"]);
 });
 
-test("gate admits only listed users", () => {
-  const gate = createDiscordGate(
-    discordPluginConfigFromEnv({ DISCORD_BOT_TOKEN: "t", DISCORD_ALLOW_USER_IDS: "111" })!,
-  );
-  assert.equal(gate("111"), true);
-  assert.equal(gate("222"), false);
-});
-
-test("external ids are namespaced so they never collide with Slack ids or emails", () => {
-  assert.equal(discordExternalId("111"), "discord:111");
+test("discordUserIdOf only strips the discord prefix", () => {
+  assert.equal(discordUserIdOf("discord:42"), "42");
+  assert.equal(discordUserIdOf("U42"), null);
 });
