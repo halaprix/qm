@@ -27,6 +27,21 @@ const runId = `qmt_${process.pid}_${randomBytes(4).toString("hex")}`;
 const children = new Set();
 const admin = baseUrl ? new pg.Pool({ connectionString: baseUrl, max: jobs }) : null;
 let stopping = false;
+let ended = null;
+
+function endPool() {
+  ended ??= admin?.end();
+  return ended;
+}
+
+function killGroup(child) {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
 
 function databaseUrl(name) {
   const url = new URL(baseUrl);
@@ -39,7 +54,9 @@ async function dropDatabase(name) {
     "SELECT datname FROM pg_database WHERE datname = $1 OR starts_with(datname, $1 || '_') ORDER BY datname DESC",
     [name],
   );
-  for (const { datname } of rows) await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
+  for (const { datname } of rows) {
+    await admin.query(`DROP DATABASE IF EXISTS "${datname.replaceAll('"', '""')}" WITH (FORCE)`);
+  }
 }
 
 function runFile(file, env) {
@@ -54,18 +71,19 @@ function runFile(file, env) {
       children.delete(child);
       resolve({ file, ok, ms: Date.now() - started, output });
     };
-    const child = spawn(process.execPath, ["--test", file], { env: { ...process.env, ...env } });
+    const child = spawn(process.execPath, ["--test", file], { detached: true, env: { ...process.env, ...env } });
     children.add(child);
     child.stdout?.on("data", (chunk) => (output += chunk));
     child.stderr?.on("data", (chunk) => (output += chunk));
     const timer = setTimeout(() => {
       output += `\n${file} exceeded ${timeoutSeconds}s and was killed\n`;
-      child.kill("SIGKILL");
+      killGroup(child);
     }, timeoutSeconds * 1000);
     child.on("error", (error) => {
       output += `\n${file} could not run: ${error.message || error.code || error}\n`;
       finish(false);
     });
+    child.on("exit", () => killGroup(child));
     child.on("close", (code, signal) => finish(code === 0 && !signal));
   });
 }
@@ -104,11 +122,12 @@ const work = Promise.all(
 );
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
+  process.on(signal, () => {
+    if (stopping) return;
     stopping = true;
-    for (const child of children) child.kill("SIGKILL");
+    for (const child of children) killGroup(child);
     void work.then(async () => {
-      await admin?.end();
+      await endPool();
       process.exit(signal === "SIGINT" ? 130 : 143);
     });
   });
@@ -116,7 +135,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 await work;
 if (stopping) await new Promise(() => {});
-await admin?.end();
+await endPool();
 
 const failed = results.filter((result) => !result.ok);
 const summedMs = results.reduce((sum, result) => sum + result.ms, 0);

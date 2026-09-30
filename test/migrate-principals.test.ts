@@ -13,7 +13,8 @@ const skip = BASE_URL ? false : "set DATABASE_URL (a Postgres) to run the migrat
 const MAPPING = { U9MIGA: "alice@x.com", U9MIGB: "bob@x.com" };
 const silent = () => {};
 
-const database = BASE_URL ? `${new URL(BASE_URL).pathname.slice(1)}_migtest_${randomBytes(4).toString("hex")}` : "";
+const parentDatabase = BASE_URL ? new URL(BASE_URL).pathname.slice(1) : "";
+const database = `${/^qmt_\w+$/.test(parentDatabase) ? parentDatabase : "qm"}_migtest_${randomBytes(4).toString("hex")}`;
 let testUrl = "";
 let pool: Pool | null = null;
 
