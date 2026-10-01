@@ -74,6 +74,7 @@ import type { ConnectorTokenSource, SlackUserClient } from "../loops/sources/ada
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces/slack-installation.ts";
+import type { DiscordInstallationStore } from "../surfaces/discord-installation.ts";
 
 import type { SlackAccountLink, ComposioReturn } from "./routes/composio.ts";
 
@@ -101,6 +102,9 @@ export interface ServerDeps {
   slackEnvironmentState?: "absent" | "configured" | "partial";
   slackEventsPort?: number;
   slackEnvBotToken?: string;
+  discordInstallation?: DiscordInstallationStore;
+  discordInstallationFetch?: typeof fetch;
+  discordEnvironmentConfigured?: boolean;
   oauthStateSecret?: string;
   oauthFetch?: FetchLike;
   oauthEnv?: NodeJS.ProcessEnv;

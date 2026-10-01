@@ -416,6 +416,7 @@ import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, swallowAs } from "./util/errors.ts";
 import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
+import { createDiscordInstallationStore, type DiscordInstallationStore } from "./surfaces/discord-installation.ts";
 
 export interface Runtime {
   start(): void;
@@ -483,6 +484,7 @@ export interface BuiltApp {
   config: ScopedConfigStore;
   connectorTokens: ConnectorTokenStore;
   slackInstallation: SlackInstallationStore;
+  discordInstallation: DiscordInstallationStore;
   resolveClient: OAuthClientResolver;
   consentLinks: ConsentLinkStore;
   oauthFlows: OAuthFlowStore;
@@ -703,6 +705,11 @@ export function buildApp(
   const slackInstallation = createSlackInstallationStore(
     config.orgId,
     artifactMap("slack_installation"),
+    config.connectorSecretKey ?? randomBytes(32),
+  );
+  const discordInstallation = createDiscordInstallationStore(
+    config.orgId,
+    artifactMap("discord_installation"),
     config.connectorSecretKey ?? randomBytes(32),
   );
   const deploymentLayer = config.deploymentLayerDir
@@ -2748,6 +2755,7 @@ export function buildApp(
     config: configStore,
     connectorTokens,
     slackInstallation,
+    discordInstallation,
     resolveClient,
     consentLinks,
     oauthFlows,
@@ -2837,6 +2845,7 @@ export function serverDeps(
   built: BuiltApp,
   slackEnvironmentState: "absent" | "configured" | "partial" = "absent",
   slackEnvBotToken?: string,
+  discordEnvironmentConfigured = false,
 ): Omit<ServerDeps, "control"> {
   const configuredModel = configuredModelForHarness(config, config.harness);
   const carriedModelAuth = harnessCarriedModelAuth(config);
@@ -2877,6 +2886,8 @@ export function serverDeps(
     connectorTokens: built.connectorTokens,
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
+    discordInstallation: built.discordInstallation,
+    discordEnvironmentConfigured,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
     ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
     resolveClient: built.resolveClient,
