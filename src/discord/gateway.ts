@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import type { ActorAssertion } from "../types.ts";
 import type { DiscordPluginConfig } from "./config.ts";
+import type { DiscordHistoryReader, HistoryMessage } from "./context.ts";
 import type { ChannelKind } from "./deliveries.ts";
 import type { DiscordInbound } from "./events.ts";
 import type { MemberHydrator } from "./member-hydrator.ts";
@@ -109,5 +110,66 @@ export function toInbound(message: Message): DiscordInbound {
       contentType: a.contentType,
       size: a.size,
     })),
+  };
+}
+
+export function createDiscordHistoryReader(deps: {
+  client: Client;
+  guildIds: ReadonlySet<string>;
+  hydrator: Pick<MemberHydrator, "ready">;
+}): DiscordHistoryReader {
+  return {
+    async recent(channelId: string, opts: { count: number; before?: string }): Promise<HistoryMessage[]> {
+      const cached = deps.client.channels.cache.get(channelId);
+      const ch = cached ?? (await deps.client.channels.fetch(channelId));
+      if (!ch || !ch.isTextBased()) return [];
+      const fetched = await ch.messages.fetch({
+        limit: opts.count,
+        ...(opts.before ? { before: opts.before } : {}),
+      });
+      const isThread = ch.isThread();
+      return [...fetched.values()]
+        .sort((a, b) => {
+          const diff = BigInt(a.id) - BigInt(b.id);
+          if (diff < 0n) return -1;
+          if (diff > 0n) return 1;
+          return 0;
+        })
+        .map((m) => {
+          const authorName = m.member ? m.member.displayName : (m.author.globalName ?? m.author.username);
+          return {
+            id: m.id,
+            authorId: m.author.id,
+            authorName,
+            text: m.content,
+            ...(isThread ? { threadTs: ch.id } : {}),
+          };
+        });
+    },
+
+    async canView(channelId: string, userId: string): Promise<boolean> {
+      try {
+        const ch = deps.client.channels.cache.get(channelId);
+        if (!ch) return false;
+        if (ch.type === ChannelType.DM) {
+          return ch.recipientId === userId;
+        }
+        const base = cachedBase(deps.client, channelId);
+        if (!base) return false;
+        if (!deps.guildIds.has(base.guild.id)) return false;
+        if (!deps.hydrator.ready(base.guild.id)) return false;
+        const member = base.guild.members.cache.get(userId);
+        if (!member) return false;
+        const perms = base.permissionsFor(member);
+        if (!perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])) return false;
+        if (ch.type === ChannelType.PrivateThread) {
+          const inMembers = ch.members.cache.has(userId);
+          return inMembers || perms.has(PermissionFlagsBits.ManageThreads);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }

@@ -10,7 +10,7 @@ import {
   type MessageCreateOptions,
 } from "discord.js";
 import type { DiscordCoreClient } from "../api/discord-core-client.ts";
-import type { ActorAssertion } from "../types.ts";
+import type { ActorAssertion, SurfaceContextRequest } from "../types.ts";
 import { reportFailureAs, swallowAs } from "../util/errors.ts";
 import { ingestAttachments } from "./attachments.ts";
 import { createCardRenderer } from "./approval-cards.ts";
@@ -18,9 +18,11 @@ import { DISCORD_SURFACE, discordUserIdOf, type DiscordPluginConfig } from "./co
 import { createDeliveryGuard, createDiscordDispatcher, type DiscordDispatcher } from "./deliveries.ts";
 import { conversationFor, deliveryTargetFor, needsStakeLookup, routeMessage, threadName } from "./events.ts";
 import { createInteractionHandler, type ButtonClick } from "./interactions.ts";
+import { createContextFulfiller } from "./context.ts";
 import {
   cachedViewers,
   createChannelKind,
+  createDiscordHistoryReader,
   createMergedClassify,
   createStakeHistory,
   createUserClassifier,
@@ -34,7 +36,6 @@ import { createStakeTracker, type StakeTracker } from "./thread-stake.ts";
 import { runDiscordTurn, type ReplyChannel } from "./turn-flow.ts";
 
 type StreamGate = () => Promise<boolean>;
-// A DM's only reader is the internal actor.
 const allowDmStream: StreamGate = async () => true;
 
 export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
@@ -288,6 +289,17 @@ export function createDiscordPlugin(
       },
     });
 
+    const historyReader = createDiscordHistoryReader({
+      client: c,
+      guildIds: cfg.guildIds,
+      hydrator,
+    });
+    const fulfill = createContextFulfiller({
+      core,
+      reader: historyReader,
+      botUserId: () => c.user?.id ?? "",
+    });
+
     const scope: ConnectionScope = {
       inFlightRuns,
       hydrator,
@@ -299,14 +311,17 @@ export function createDiscordPlugin(
     };
 
     let unsubscribeDeliveries: (() => void) | null = null;
+    let unsubscribeContext: (() => void) | null = null;
     let pollTimer: NodeJS.Timeout | null = null;
     const drain = () => void scope.dispatcher.drain().catch(swallowAs("discord: delivery drain", undefined));
     const stopDeliverySubscription = () => unsubscribeDeliveries?.();
+    const stopContextSubscription = () => unsubscribeContext?.();
 
     detachClient = () => {
       accepting = false;
       scope.hydrator.stop();
       stopDeliverySubscription();
+      stopContextSubscription();
       if (pollTimer) clearInterval(pollTimer);
       return { client: c, inFlight };
     };
@@ -322,6 +337,27 @@ export function createDiscordPlugin(
       unsubscribeDeliveries = core.onDeliveryEnqueued(drain);
       pollTimer = setInterval(drain, DISCORD_DELIVERY_POLL_MS);
       drain();
+      const contextRequestsInFlight = new Set<string>();
+      const serviceContextRequest = (r: SurfaceContextRequest): void => {
+        if (contextRequestsInFlight.has(r.id)) return;
+        contextRequestsInFlight.add(r.id);
+        const p = fulfill(r)
+          .catch(swallowAs("discord: context request", undefined))
+          .finally(() => {
+            contextRequestsInFlight.delete(r.id);
+            inFlight.delete(p);
+          });
+        inFlight.add(p);
+      };
+
+      unsubscribeContext = core.onContextRequest(serviceContextRequest);
+      void core
+        .pendingContextRequests()
+        .then((pending) => {
+          if (!accepting) return;
+          for (const r of pending) serviceContextRequest(r);
+        })
+        .catch(swallowAs("discord: context request drain", undefined));
     });
 
     c.on(Events.InteractionCreate, (interaction) => {
@@ -357,6 +393,7 @@ export function createDiscordPlugin(
       reportFailureAs("discord plugin login", undefined)(err);
       scope.hydrator.stop();
       stopDeliverySubscription();
+      stopContextSubscription();
       if (pollTimer) clearInterval(pollTimer);
       await c.destroy().catch(swallowAs("discord client cleanup", undefined));
       const isCurrent = client === c;

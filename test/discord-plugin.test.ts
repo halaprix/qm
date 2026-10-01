@@ -1602,3 +1602,199 @@ test("interaction button for guild-thread continuation allows streaming when all
 
   assert.equal(h.threadEdits.at(-1), "deploying now");
 });
+
+test("context requests lifecycle wires to ClientReady and unsubscribes on stop", async () => {
+  let contextSubscriptions = 0;
+  let contextUnsubscribed = 0;
+  let pendingDrained = 0;
+  const fulfilled: Array<{ id: string; outcome: unknown }> = [];
+
+  const pendingRequest = {
+    id: "cr-pending-1",
+    source: "discord",
+    createdAt: 0,
+    status: "pending",
+    query: { conversationTarget: "dm1", viewer: "user@example.com" },
+  };
+
+  let listener: ((request: unknown) => void) | null = null;
+
+  const core = {
+    ...fakeCore(),
+    onDeliveryEnqueued: () => () => {},
+    discordUserIdsFor: () => ["u1"],
+    onContextRequest: (fn: (request: unknown) => void) => {
+      contextSubscriptions += 1;
+      listener = fn;
+      return () => {
+        contextUnsubscribed += 1;
+      };
+    },
+    pendingContextRequests: async () => {
+      pendingDrained += 1;
+      return [pendingRequest];
+    },
+    fulfillContextRequest: async (id: string, outcome: unknown) => {
+      fulfilled.push({ id, outcome });
+    },
+  } as unknown as DiscordCoreClient;
+
+  const emitter = new EventEmitter();
+  const dmChannel = {
+    id: "dm1",
+    type: ChannelType.DM,
+    recipientId: "u1",
+    isThread: () => false,
+    isTextBased: () => true,
+    messages: {
+      fetch: async () =>
+        new Map([
+          [
+            "1300000000000000001",
+            {
+              id: "1300000000000000001",
+              content: "hello from dm",
+              author: { id: "u1", globalName: null, username: "user" },
+            },
+          ],
+        ]),
+    },
+  };
+  const fakeClient = Object.assign(emitter, {
+    user: { id: "999", tag: "bot#1" },
+    channels: {
+      cache: new Map([["dm1", dmChannel]]),
+      fetch: async () => dmChannel,
+    },
+    guilds: {
+      cache: new Map(),
+      fetch: async () => ({ members: { cache: new Map(), fetch: async () => new Map() } }),
+    },
+    login: async () => {
+      queueMicrotask(() => emitter.emit(Events.ClientReady, fakeClient));
+      return "ok";
+    },
+    destroy: async () => {},
+  });
+
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  await plugin.start();
+  await new Promise((r) => setTimeout(r, 40));
+
+  assert.equal(contextSubscriptions, 1);
+  assert.equal(pendingDrained, 1);
+  assert.equal(fulfilled.length, 1);
+  assert.equal(fulfilled[0]!.id, "cr-pending-1");
+
+  listener!({
+    id: "cr-live-1",
+    source: "discord",
+    createdAt: 0,
+    status: "pending",
+    query: { conversationTarget: "dm1", viewer: "user@example.com" },
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(fulfilled.length, 2);
+  assert.equal(fulfilled[1]!.id, "cr-live-1");
+
+  await plugin.stop();
+  assert.equal(contextUnsubscribed, 1);
+});
+
+test("the same context request delivered by drain and live event fulfills only once", async () => {
+  const fulfilled: string[] = [];
+  const duplicateRequest = {
+    id: "cr-dup-1",
+    source: "discord",
+    createdAt: 0,
+    status: "pending",
+    query: { conversationTarget: "dm1", viewer: "user@example.com" },
+  };
+
+  let listener: ((request: unknown) => void) | null = null;
+  const core = {
+    ...fakeCore(),
+    onDeliveryEnqueued: () => () => {},
+    discordUserIdsFor: () => ["u1"],
+    onContextRequest: (fn: (request: unknown) => void) => {
+      listener = fn;
+      return () => {};
+    },
+    pendingContextRequests: async () => [duplicateRequest],
+    fulfillContextRequest: async (id: string) => {
+      fulfilled.push(id);
+    },
+  } as unknown as DiscordCoreClient;
+
+  const emitter = new EventEmitter();
+  const dmChannel = {
+    id: "dm1",
+    type: ChannelType.DM,
+    recipientId: "u1",
+    isThread: () => false,
+    isTextBased: () => true,
+    messages: {
+      fetch: async () => new Map(),
+    },
+  };
+  const fakeClient = Object.assign(emitter, {
+    user: { id: "999", tag: "bot#1" },
+    channels: {
+      cache: new Map([["dm1", dmChannel]]),
+      fetch: async () => dmChannel,
+    },
+    guilds: {
+      cache: new Map(),
+      fetch: async () => ({ members: { cache: new Map(), fetch: async () => new Map() } }),
+    },
+    login: async () => {
+      queueMicrotask(() => {
+        emitter.emit(Events.ClientReady, fakeClient);
+        listener?.(duplicateRequest);
+      });
+      return "ok";
+    },
+    destroy: async () => {},
+  });
+
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  await plugin.start();
+  await new Promise((r) => setTimeout(r, 50));
+  await plugin.stop();
+
+  assert.deepEqual(fulfilled, ["cr-dup-1"]);
+});
+
+test("a ClientReady that fires after detach starts no context subscription or drain", async () => {
+  let subscriptions = 0;
+  let drained = 0;
+  const core = {
+    ...fakeCore(),
+    onDeliveryEnqueued: () => () => {},
+    onContextRequest: () => {
+      subscriptions += 1;
+      return () => {};
+    },
+    pendingContextRequests: async () => {
+      drained += 1;
+      return [];
+    },
+  } as unknown as DiscordCoreClient;
+  const emitter = new EventEmitter();
+  let fireReady: (() => void) | null = null;
+  const fakeClient = Object.assign(emitter, {
+    user: { id: "999", tag: "bot#1" },
+    login: async () => {
+      fireReady = () => emitter.emit("clientReady", fakeClient);
+      return "ok";
+    },
+    destroy: async () => {},
+  });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  await plugin.start();
+  await plugin.stop();
+  fireReady!();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(subscriptions, 0);
+  assert.equal(drained, 0);
+});
