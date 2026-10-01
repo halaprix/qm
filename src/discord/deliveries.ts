@@ -1,8 +1,9 @@
+import { RESTJSONErrorCodes } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
 import type { ActorAssertion, Delivery } from "../types.ts";
 import { errMessage } from "../util/errors.ts";
 import { toDiscordFiles } from "./attachments.ts";
-import { DISCORD_SURFACE } from "./config.ts";
+import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE } from "./config.ts";
 import { chunkMessage } from "./format.ts";
 import type { ReaderResult } from "./readers.ts";
 import type { DiscordSender, OutboundMessage } from "./sender.ts";
@@ -11,6 +12,7 @@ export const DISCORD_DELIVERY_CLAIM_MS = 15_000;
 export const DISCORD_RUN_RECOVERY_GRACE_MS = 15_000;
 const UNICODE_EMOJI = /^\p{Extended_Pictographic}/u;
 const EMPTY_TEXT = "(no response)";
+const DM_CLOSED_CODE = RESTJSONErrorCodes.CannotSendMessagesToThisUser;
 
 export type PostVerdict = { ok: true } | { ok: false; retry: boolean; reason: string };
 export interface DeliveryGuard {
@@ -68,6 +70,7 @@ export function createDiscordDispatcher(deps: {
   guard: DeliveryGuard;
   inFlightRuns: ReadonlySet<string>;
   renderCard?: (d: Delivery) => Promise<OutboundMessage | null>;
+  recipientFor: (target: string) => string | null;
   now?: () => number;
 }): DiscordDispatcher {
   const now = deps.now ?? Date.now;
@@ -76,6 +79,11 @@ export function createDiscordDispatcher(deps: {
     if (!d.idempotencyKey.startsWith("run:")) return false;
     const runId = d.idempotencyKey.slice("run:".length);
     return deps.inFlightRuns.has(runId) || now() - d.createdAt < DISCORD_RUN_RECOVERY_GRACE_MS;
+  }
+
+  async function drop(d: Delivery, reason: string): Promise<void> {
+    await deps.core.reportDeliveryUndeliverable(d.id, reason);
+    await deps.core.ackDelivery(d.id);
   }
 
   async function deliverTo(channelId: string, d: Delivery, replyTo: string | undefined): Promise<void> {
@@ -108,13 +116,34 @@ export function createDiscordDispatcher(deps: {
 
   async function deliverOne(d: Delivery): Promise<void> {
     if (waitingOnRun(d)) return;
+    if (d.destination.type === DISCORD_DM_DELIVERY_TYPE) {
+      const userId = deps.recipientFor(d.destination.target);
+      if (!userId) return drop(d, "no linked Discord account");
+      let dmChannelId: string;
+      try {
+        dmChannelId = await deps.sender.openDm(userId);
+      } catch (err) {
+        if ((err as { code?: unknown }).code === DM_CLOSED_CODE)
+          return drop(d, "recipient does not accept DMs from the bot");
+        throw err;
+      }
+      const verdict = await deps.guard.mayPost(dmChannelId);
+      if (!verdict.ok) return verdict.retry ? undefined : drop(d, verdict.reason);
+      try {
+        await deliverTo(dmChannelId, d, undefined);
+      } catch (err) {
+        if ((err as { code?: unknown }).code === DM_CLOSED_CODE)
+          return drop(d, "recipient does not accept DMs from the bot");
+        throw err;
+      }
+      await deps.core.ackDelivery(d.id, { recipientThreadRef: `${DISCORD_SURFACE}:dm:${dmChannelId}` });
+      return;
+    }
     const { channelId, replyTo } = parseDiscordTarget(d.destination.target);
     const verdict = await deps.guard.mayPost(channelId);
     if (!verdict.ok) {
       if (verdict.retry) return;
-      await deps.core.reportDeliveryUndeliverable(d.id, verdict.reason);
-      await deps.core.ackDelivery(d.id);
-      return;
+      return drop(d, verdict.reason);
     }
     await deliverTo(channelId, d, replyTo);
     await deps.core.ackDelivery(d.id);
@@ -127,9 +156,12 @@ export function createDiscordDispatcher(deps: {
         void lost.then(() => {
           leaseLost = true;
         });
-        for (const d of await deps.core.claimDeliveries(DISCORD_SURFACE, DISCORD_DELIVERY_CLAIM_MS)) {
+        for (const type of [DISCORD_SURFACE, DISCORD_DM_DELIVERY_TYPE]) {
+          for (const d of await deps.core.claimDeliveries(type, DISCORD_DELIVERY_CLAIM_MS)) {
+            if (leaseLost) break;
+            await deliverOne(d).catch((err: unknown) => deps.core.reportDeliveryUndeliverable(d.id, errMessage(err)));
+          }
           if (leaseLost) break;
-          await deliverOne(d).catch((err: unknown) => deps.core.reportDeliveryUndeliverable(d.id, errMessage(err)));
         }
         return true;
       });

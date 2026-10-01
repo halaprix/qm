@@ -66,3 +66,27 @@ test("web approvals remain on their native surface", async () => {
   await approvals.deliverPending();
   assert.equal((await deliveries.pending("principal")).length, 0);
 });
+
+test("discord approvals go to the requester's discord DM", async () => {
+  const deliveries = createDeliveryStore();
+  const approvals = createApprovalStore(createMemoryMap<PendingApprovalRecord>(), deliveries);
+  await approvals.put("A2", {
+    sessionId: "s",
+    command: "rm -rf build",
+    reason: "destructive",
+    createdAt: 7,
+    request: {
+      surface: "discord",
+      actor: { externalId: "discord:111" },
+      conversation: { kind: "channel", threadRef: "discord:th:t1", channelRef: "c1" },
+      deliveryTarget: "t1",
+      text: "clean it",
+    },
+  } as PendingApprovalRecord);
+  const [row] = await deliveries.pending("discord-dm");
+  assert.equal(row!.destination.target, "discord:111");
+  assert.equal(row!.destination.commandApprovalId, "A2");
+  assert.equal(row!.idempotencyKey, "command-approval:A2:7");
+  assert.deepEqual(await deliveries.pending("principal"), []);
+  assert.deepEqual(await deliveries.pending("discord"), []);
+});

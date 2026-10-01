@@ -3,6 +3,7 @@ import type { PendingApprovalRecord } from "../types.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import { principalDestination } from "../reach/reach.ts";
+import { surfaceCapabilities } from "../surfaces/surface-capabilities.ts";
 
 export function approvalDeliveryKey(id: string, record: Pick<PendingApprovalRecord, "createdAt">): string {
   return `command-approval:${id}:${record.createdAt ?? 0}`;
@@ -13,10 +14,12 @@ export function createApprovalStore(
   deliveries: Pick<DeliveryStore, "enqueue">,
 ) {
   async function deliver(id: string, record: PendingApprovalRecord): Promise<void> {
-    if (record.request?.surface !== "slack") return;
-    const actorId = record.request.actor.externalId;
+    const request = record.request;
+    const type = request ? surfaceCapabilities(request.surface)?.approvalCardType : null;
+    if (!request || !type) return;
+    const actorId = request.actor.externalId;
     await deliveries.enqueue({
-      destination: { ...principalDestination(actorId, actorId), commandApprovalId: id },
+      destination: { ...principalDestination(actorId, actorId), type, commandApprovalId: id },
       text: `Approval needed: ${record.summary ?? record.command}`,
       idempotencyKey: approvalDeliveryKey(id, record),
     });

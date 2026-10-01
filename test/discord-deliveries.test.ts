@@ -41,9 +41,9 @@ function harness(
     openDm: async () => "dm",
   };
   const core = {
-    claimDeliveries: async (_surface: string, claimMs: number) => {
+    claimDeliveries: async (surface: string, claimMs: number) => {
       assert.equal(claimMs, DISCORD_DELIVERY_CLAIM_MS);
-      return rows;
+      return surface === "discord" ? rows : [];
     },
     ackDelivery: async (id: string) => void log.push(`ack:${id}`),
     reportDeliveryUndeliverable: async (id: string, reason: string) => void log.push(`undeliverable:${id}:${reason}`),
@@ -51,7 +51,14 @@ function harness(
     readBlob: async () => Buffer.from(""),
     readFileArtifact: async () => Buffer.from(""),
   };
-  const dispatcher = createDiscordDispatcher({ core, sender, guard, inFlightRuns: inFlight, now: () => 100_000 });
+  const dispatcher = createDiscordDispatcher({
+    core,
+    sender,
+    guard,
+    inFlightRuns: inFlight,
+    recipientFor: () => null,
+    now: () => 100_000,
+  });
   return { log, dispatcher };
 }
 
@@ -118,7 +125,7 @@ test("a send failure is reported and left unacked for retry", async () => {
   const h = harness([row({})]);
   const failing = createDiscordDispatcher({
     core: {
-      claimDeliveries: async () => [row({})],
+      claimDeliveries: async (type: string) => (type === "discord" ? [row({})] : []),
       ackDelivery: async () => void h.log.push("ack"),
       reportDeliveryUndeliverable: async (_id: string, r: string) => void h.log.push(`undeliverable:${r}`),
       holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
@@ -132,6 +139,7 @@ test("a send failure is reported and left unacked for retry", async () => {
     } as never,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
+    recipientFor: () => null,
   });
   await failing.drain();
   assert.deepEqual(h.log, ["undeliverable:503"]);
@@ -197,7 +205,8 @@ test("lease loss mid-drain stops dispatching subsequent deliveries", async () =>
     openDm: async () => "dm",
   };
   const core = {
-    claimDeliveries: async () => [row({ id: "d1" }), row({ id: "d2" }), row({ id: "d3" })],
+    claimDeliveries: async (type: string) =>
+      type === "discord" ? [row({ id: "d1" }), row({ id: "d2" }), row({ id: "d3" })] : [],
     ackDelivery: async (id: string) => void log.push(`ack:${id}`),
     reportDeliveryUndeliverable: async (id: string, reason: string) => void log.push(`undeliverable:${id}:${reason}`),
     holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(lost),
@@ -209,7 +218,65 @@ test("lease loss mid-drain stops dispatching subsequent deliveries", async () =>
     sender,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
+    recipientFor: () => null,
   });
   assert.equal(await dispatcher.drain(), true);
   assert.deepEqual(log, ["send:c1:hello:", "ack:d1"]);
+});
+
+function dmHarness(opts: { recipient: string | null; openDmFails?: boolean }) {
+  const log: string[] = [];
+  const dispatcher = createDiscordDispatcher({
+    core: {
+      claimDeliveries: async (type: string) =>
+        type === "discord-dm"
+          ? [
+              row({
+                id: "p1",
+                destination: { type: "discord-dm", target: "discord:111", commandApprovalId: "A1" },
+                text: "Approval needed: ls",
+              }),
+            ]
+          : [],
+      ackDelivery: async (id: string, body?: { recipientThreadRef?: string }) =>
+        void log.push(`ack:${id}:${body?.recipientThreadRef ?? ""}`),
+      reportDeliveryUndeliverable: async (id: string, r: string) => void log.push(`undeliverable:${id}:${r}`),
+      holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
+      readBlob: async () => Buffer.from(""),
+      readFileArtifact: async () => Buffer.from(""),
+    },
+    sender: {
+      send: async (c: string, m: { content?: string; components?: unknown[] }) => (
+        log.push(`send:${c}:${m.components?.length ?? 0}`),
+        { id: "x" }
+      ),
+      openDm: async (userId: string) => {
+        if (opts.openDmFails) throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007 });
+        return `dm-${userId}`;
+      },
+    } as never,
+    guard: { mayPost: async () => ({ ok: true }) },
+    inFlightRuns: new Set(),
+    renderCard: async () => ({ content: "card", components: [{}] as never }),
+    recipientFor: () => opts.recipient,
+  });
+  return { dispatcher, log };
+}
+
+test("a discord-dm card opens the recipient's DM and acks with the DM thread", async () => {
+  const h = dmHarness({ recipient: "111" });
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["send:dm-111:1", "ack:p1:discord:dm:dm-111"]);
+});
+
+test("a recipient with DMs closed is reported and dropped; the web link in the thread is the fallback", async () => {
+  const h = dmHarness({ recipient: "111", openDmFails: true });
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["undeliverable:p1:recipient does not accept DMs from the bot", "ack:p1:"]);
+});
+
+test("a discord-dm row with no Discord recipient is reported and dropped", async () => {
+  const h = dmHarness({ recipient: null });
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["undeliverable:p1:no linked Discord account", "ack:p1:"]);
 });

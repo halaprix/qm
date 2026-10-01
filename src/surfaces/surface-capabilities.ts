@@ -27,7 +27,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     label: "Discord",
     deliveryTypes: [DISCORD_SURFACE, DISCORD_DM_DELIVERY_TYPE],
     coreAmbient: false,
-    approvalCardType: null,
+    approvalCardType: DISCORD_DM_DELIVERY_TYPE,
     mentionHint:
       " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with a Unicode emoji character, not a :name:.",
     externalParticipantsAllowed: async () => false,

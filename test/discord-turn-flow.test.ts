@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SurfaceCoreClient } from "../src/api/surface-core-client.ts";
-import {
-  FAILURE_TEXT,
-  REFUSED_GUEST_TEXT,
-  runDiscordTurn,
-  WORKING_TEXT,
-  type ReplyChannel,
-  type StatusMessage,
-} from "../src/discord/turn-flow.ts";
+import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "../src/discord/turn-flow.ts";
 import type { TurnResult } from "../src/types.ts";
 
 interface Log {
@@ -65,11 +58,19 @@ const baseBody = {
   deliveryTarget: "c1",
 };
 const fresh = (): Log => ({ sent: [], edits: [], deleted: 0, files: [] });
+const allowAll = async () => true;
 
 test("posts a working message, then edits it into the final reply", async () => {
   const log = fresh();
-  await runDiscordTurn({ core: core({}), channel: channel(log), body, mode: "stream", inFlightRuns: new Set() });
-  assert.deepEqual(log.sent, [WORKING_TEXT]);
+  await runDiscordTurn({
+    core: core({}),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
+  assert.deepEqual(log.sent, ["⚙ Working…"]);
   assert.equal(log.edits.at(-1), "done");
 });
 
@@ -84,6 +85,7 @@ test("streams partial text into the status message while the run is live", async
     mode: "stream",
     inFlightRuns: new Set(),
     streamIntervalMs: 10,
+    mayPost: allowAll,
   });
   assert.ok(log.edits.includes("par"));
   assert.ok(log.edits.includes("partial"));
@@ -99,6 +101,7 @@ test("long replies edit the first chunk and send the rest", async () => {
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
   assert.ok(log.sent.length >= 3, `sent ${log.sent.length}`);
   for (const s of [...log.sent, ...log.edits]) assert.ok(s.length <= 2000);
@@ -116,8 +119,9 @@ test("a submit error replaces the working message with the failure text", async 
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
-  assert.equal(log.edits.at(-1), FAILURE_TEXT);
+  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
 });
 
 test("a stalled run replaces the working message with the failure text", async () => {
@@ -125,8 +129,15 @@ test("a stalled run replaces the working message with the failure text", async (
   const wait = async (): Promise<TurnResult | null> => {
     throw Object.assign(new Error("stalled"), { code: "run_stalled" });
   };
-  await runDiscordTurn({ core: core({ wait }), channel: channel(log), body, mode: "stream", inFlightRuns: new Set() });
-  assert.equal(log.edits.at(-1), FAILURE_TEXT);
+  await runDiscordTurn({
+    core: core({ wait }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
+  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
 });
 
 test("failed and null results also end in the failure text", async () => {
@@ -138,8 +149,9 @@ test("failed and null results also end in the failure text", async () => {
       body,
       mode: "stream",
       inFlightRuns: new Set(),
+      mayPost: allowAll,
     });
-    assert.equal(log.edits.at(-1), FAILURE_TEXT);
+    assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
   }
 });
 
@@ -151,6 +163,7 @@ test("silent and steered turns remove the working message", async () => {
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
   assert.equal(log1.deleted, 1);
   const log2 = fresh();
@@ -160,6 +173,7 @@ test("silent and steered turns remove the working message", async () => {
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
   assert.equal(log2.deleted, 1);
 });
@@ -172,6 +186,7 @@ test("refusals and pending approvals are explained in place", async () => {
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
   assert.match(log1.edits.at(-1)!, /internal-only/);
   const log2 = fresh();
@@ -183,6 +198,7 @@ test("refusals and pending approvals are explained in place", async () => {
     body,
     mode: "stream",
     inFlightRuns: new Set(),
+    mayPost: allowAll,
   });
   assert.match(log2.edits.at(-1)!, /https:\/\/qm\/x/);
 });
@@ -194,7 +210,14 @@ test("outbound files are sent after the text", async () => {
     reply: "here",
     attachments: [{ name: "r.csv", mimetype: "text/csv", sizeBytes: 3, blobId: "b" }],
   });
-  await runDiscordTurn({ core: core({ wait }), channel: channel(log), body, mode: "stream", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: core({ wait }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.deepEqual(log.files, ["r.csv"]);
 });
 
@@ -204,10 +227,17 @@ test("a files-only reply deletes the working message and sends the files", async
     status: "ok",
     attachments: [{ name: "r.csv", mimetype: "text/csv", sizeBytes: 3, blobId: "b" }],
   });
-  await runDiscordTurn({ core: core({ wait }), channel: channel(log), body, mode: "stream", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: core({ wait }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.equal(log.deleted, 1);
   assert.deepEqual(log.files, ["r.csv"]);
-  assert.ok(!log.edits.includes(FAILURE_TEXT));
+  assert.ok(!log.edits.includes("Something went wrong on my side and I couldn't finish that. Please try again."));
 });
 
 test("in stream mode, reportRunEditRef is called with the status message id and ackRunDelivery after delivery", async () => {
@@ -223,7 +253,14 @@ test("in stream mode, reportRunEditRef is called with the status message id and 
       return { status: "ok", reply: "done" } as TurnResult;
     },
   } as unknown as SurfaceCoreClient;
-  await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "stream", inFlightRuns: inFlight });
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "stream",
+    inFlightRuns: inFlight,
+    mayPost: allowAll,
+  });
   assert.deepEqual(calls, ["ref:r1:s1", "waiting:true", "ack:r1:true"]);
   assert.equal(inFlight.size, 0);
 });
@@ -248,7 +285,14 @@ test("the in-process reply acks its run delivery only after it was delivered", a
     reportRunEditRef: async () => {},
     ackRunDelivery: async () => void calls.push("ack"),
   } as unknown as SurfaceCoreClient;
-  await runDiscordTurn({ core: c, channel: broken, body: baseBody, mode: "stream", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: c,
+    channel: broken,
+    body: baseBody,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.deepEqual(calls, []);
 });
 
@@ -270,5 +314,427 @@ test("spine mode posts a refusal, because core has nothing to deliver", async ()
     }),
   } as unknown as SurfaceCoreClient;
   await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "spine", inFlightRuns: new Set() });
-  assert.deepEqual(log.sent, [REFUSED_GUEST_TEXT]);
+  assert.deepEqual(log.sent, [
+    "I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM.",
+  ]);
+});
+
+test("a turn waiting on an approval points to the DM buttons and keeps the web link", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const c = {
+    ...core({
+      wait: async () => ({
+        status: "pending_approval",
+        adminUrl: "https://qm/x",
+        pendingApprovals: [{ requestId: "A1", command: "ls", reason: "r" }],
+      }),
+    }),
+    reportRunEditRef: async () => {},
+    ackRunDelivery: async () => {},
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
+  assert.equal(
+    log.edits.at(-1),
+    "This needs your approval — I sent you the buttons in a direct message. If they don't arrive, approve it in the QM web app: https://qm/x",
+  );
+});
+
+test("spine mode posts the same approval pointer in the thread", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const c = {
+    ...core({
+      wait: async () => ({
+        status: "pending_approval",
+        adminUrl: "https://qm/x",
+        pendingApprovals: [{ requestId: "A1", command: "ls", reason: "r" }],
+      }),
+    }),
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "spine", inFlightRuns: new Set() });
+  assert.deepEqual(log.sent, [
+    "This needs your approval — I sent you the buttons in a direct message. If they don't arrive, approve it in the QM web app: https://qm/x",
+  ]);
+});
+
+test("onAccepted runs once core accepts the turn, and never on a refusal or a submit failure", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const calls: string[] = [];
+  const base = { reportRunEditRef: async () => {}, ackRunDelivery: async () => {} };
+  const accepted = { ...core({}), ...base } as unknown as SurfaceCoreClient;
+  const refused = {
+    ...core({ submit: async () => ({ status: "refused", reason: "nope" }) }),
+    ...base,
+  } as unknown as SurfaceCoreClient;
+  const broken = {
+    ...core({
+      submit: async () => {
+        throw new Error("down");
+      },
+    }),
+    ...base,
+  } as unknown as SurfaceCoreClient;
+  for (const [name, c] of [
+    ["accepted", accepted],
+    ["refused", refused],
+    ["broken", broken],
+  ] as const)
+    await runDiscordTurn({
+      core: c,
+      channel: channel(log),
+      body: baseBody,
+      mode: "stream",
+      inFlightRuns: new Set(),
+      mayPost: allowAll,
+      onAccepted: async () => void calls.push(name),
+    });
+  assert.deepEqual(calls, ["accepted"]);
+});
+
+test("a guest reader appearing mid-stream stops streaming and replaces status with refusal", async () => {
+  const log = fresh();
+  let calls = 0;
+  let runDeliveryAcked = false;
+  const slowWait = () =>
+    new Promise<TurnResult>((r) => setTimeout(() => r({ status: "ok", reply: "secret model output" }), 80));
+  const c = {
+    ...core({ wait: slowWait, snapshots: ["safe snapshot", "leaked after guest"] }),
+    ackRunDelivery: async () => {
+      runDeliveryAcked = true;
+    },
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 10,
+    mayPost: async () => {
+      calls += 1;
+      return calls <= 2;
+    },
+  });
+  assert.ok(log.edits.includes("safe snapshot"));
+  assert.ok(!log.edits.includes("leaked after guest"));
+  assert.ok(!log.edits.includes("secret model output"));
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+  assert.equal(runDeliveryAcked, false);
+});
+
+test("unknown readers before streaming means no model text is posted and no edit ref reported", async () => {
+  const log = fresh();
+  let reportedRef = false;
+  let runDeliveryAcked = false;
+  const c = {
+    ...core({ wait: async () => ({ status: "ok", reply: "secret answer" }) }),
+    reportRunEditRef: async () => {
+      reportedRef = true;
+    },
+    ackRunDelivery: async () => {
+      runDeliveryAcked = true;
+    },
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  } as never);
+  assert.equal(reportedRef, false);
+  assert.equal(runDeliveryAcked, false);
+  assert.ok(!log.edits.includes("secret answer"));
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+});
+
+test("a DM stream with always-allowing gate is unaffected", async () => {
+  const log = fresh();
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "ok", reply: "dm reply" }) }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => true,
+  } as never);
+  assert.equal(log.edits.at(-1), "dm reply");
+});
+
+test("a throw from onAccepted logs the failure, reports the edit ref, and continues the stream", async () => {
+  const log = fresh();
+  let reportedRef = false;
+  const c = {
+    ...core({ wait: async () => ({ status: "ok", reply: "stream completed" }) }),
+    reportRunEditRef: async () => {
+      reportedRef = true;
+    },
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => true,
+    onAccepted: async () => {
+      throw new Error("settle failed");
+    },
+  } as never);
+  assert.equal(reportedRef, true);
+  assert.equal(log.edits.at(-1), "stream completed");
+  assert.ok(!log.edits.includes("Something went wrong on my side and I couldn't finish that. Please try again."));
+});
+
+test("with overlapping ticks, where mayPost resolves true slowly for tick A and false quickly for tick B, the last edit is the refusal text and no model text follows it", async () => {
+  const log = fresh();
+  let resolveMayPostA!: (val: boolean) => void;
+  const mayPostPromiseA = new Promise<boolean>((r) => {
+    resolveMayPostA = r;
+  });
+  let resolveWait!: (result: TurnResult) => void;
+  const waitPromise = new Promise<TurnResult>((r) => {
+    resolveWait = r;
+  });
+
+  const ch: ReplyChannel = {
+    async send(content, files): Promise<StatusMessage> {
+      log.sent.push(content);
+      for (const f of files ?? []) log.files.push(f.name);
+      return {
+        id: "s1",
+        edit: async (c: string) => {
+          if (c === "") throw new Error("Cannot send an empty message");
+          log.edits.push(c);
+          if (c === "I can't post this reply here right now.") resolveWait({ status: "ok", reply: "done" });
+        },
+        delete: async () => {
+          log.deleted += 1;
+        },
+      };
+    },
+    typing: async () => {},
+  };
+
+  let mayPostCalls = 0;
+  const turnPromise = runDiscordTurn({
+    core: core({ wait: () => waitPromise, snapshots: ["snapshot a", "snapshot b"] }),
+    channel: ch,
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 5,
+    mayPost: async () => {
+      mayPostCalls++;
+      if (mayPostCalls === 1) return true;
+      if (mayPostCalls === 2) return mayPostPromiseA;
+      return false;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 25));
+  resolveMayPostA(true);
+  await turnPromise;
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+  assert.ok(
+    !log.edits.slice(log.edits.lastIndexOf("I can't post this reply here right now.") + 1).includes("snapshot a"),
+  );
+});
+
+test("a tick still in flight when waitRun resolves makes no edit after streamRun returns", async () => {
+  const log = fresh();
+  let resolveMayPost!: (val: boolean) => void;
+  const mayPostPromise = new Promise<boolean>((r) => {
+    resolveMayPost = r;
+  });
+  let resolveWait!: (result: TurnResult) => void;
+  const waitPromise = new Promise<TurnResult>((r) => {
+    resolveWait = r;
+  });
+
+  let mayPostCalls = 0;
+  const turnPromise = runDiscordTurn({
+    core: core({
+      wait: () => waitPromise,
+      snapshots: ["preview-mid-stream"],
+    }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 5,
+    mayPost: async () => {
+      mayPostCalls++;
+      if (mayPostCalls === 1) return true;
+      if (mayPostCalls === 2) return mayPostPromise;
+      return true;
+    },
+  });
+
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(mayPostCalls, 2);
+
+  resolveWait({ status: "ok", reply: "final answer" });
+  await new Promise((r) => setTimeout(r, 10));
+
+  resolveMayPost(true);
+  await turnPromise;
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(log.edits.at(-1), "final answer");
+  assert.ok(!log.edits.includes("preview-mid-stream"));
+});
+
+test("the gate allows every stream tick, then refuses at the final check", async () => {
+  const log = fresh();
+  let guestJoined = false;
+  let runDeliveryAcked = false;
+  const longReply = `secret final reply\n\n${"extra chunk ".repeat(200)}`;
+  const c = {
+    ...core({
+      wait: async () => {
+        await new Promise((r) => setTimeout(r, 15));
+        guestJoined = true;
+        return {
+          status: "ok",
+          reply: longReply,
+          attachments: [{ name: "secret.csv", mimetype: "text/csv", sizeBytes: 5, blobId: "b" }],
+        };
+      },
+      snapshots: ["preview 1"],
+    }),
+    ackRunDelivery: async () => {
+      runDeliveryAcked = true;
+    },
+  } as unknown as SurfaceCoreClient;
+
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 5,
+    mayPost: async () => !guestJoined,
+  });
+
+  assert.ok(log.edits.includes("preview 1"));
+  assert.ok(!log.edits.some((e) => e.includes("secret final reply")));
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+  assert.deepEqual(log.files, []);
+  assert.deepEqual(log.sent, ["⚙ Working…"]);
+  assert.equal(runDeliveryAcked, false);
+});
+
+test("a continuation whose queued result carries no runId with a refusing gate posts no model text", async () => {
+  const log = fresh();
+  await runDiscordTurn({
+    core: core({
+      submit: async () => ({ status: "ok", reply: "secret continuation" }),
+    }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  });
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+  assert.ok(!log.edits.includes("secret continuation"));
+});
+
+test("while one tick's mayPost is pending, further intervals do not call mayPost again", async () => {
+  const log = fresh();
+  let releaseMayPost!: () => void;
+  const mayPostDeferred = new Promise<void>((r) => (releaseMayPost = r));
+  let releaseWait!: (r: TurnResult) => void;
+  const waitDeferred = new Promise<TurnResult>((r) => (releaseWait = r));
+  let mayPostCalls = 0;
+  const snapshots = ["preview 1", "preview 2", "preview 3"];
+
+  const turn = runDiscordTurn({
+    core: core({
+      wait: () => waitDeferred,
+      snapshots,
+    }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 5,
+    mayPost: async () => {
+      mayPostCalls++;
+      if (mayPostCalls === 2) {
+        await mayPostDeferred;
+      }
+      return true;
+    },
+  });
+
+  try {
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(mayPostCalls, 2);
+  } finally {
+    releaseMayPost();
+    releaseWait({ status: "ok", reply: "done" });
+    await turn.catch(() => {});
+  }
+});
+
+test("streamRun does not resolve before an in-flight tick's edit settles", async () => {
+  const edits: string[] = [];
+  let releaseEdit!: () => void;
+  const editDeferred = new Promise<void>((r) => (releaseEdit = r));
+  let releaseWait!: (r: TurnResult) => void;
+  const waitDeferred = new Promise<TurnResult>((r) => (releaseWait = r));
+
+  const ch: ReplyChannel = {
+    async send() {
+      return {
+        id: "s1",
+        edit: async (content: string) => {
+          if (content === "preview-tick") {
+            await editDeferred;
+          }
+          edits.push(content);
+        },
+        delete: async () => {},
+      };
+    },
+    typing: async () => {},
+  };
+
+  const turn = runDiscordTurn({
+    core: core({
+      wait: () => waitDeferred,
+      snapshots: ["preview-tick"],
+    }),
+    channel: ch,
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 5,
+    mayPost: allowAll,
+  });
+
+  try {
+    await new Promise((r) => setTimeout(r, 15));
+    releaseWait({ status: "ok", reply: "final answer" });
+    await new Promise((r) => setTimeout(r, 10));
+    releaseEdit();
+    await turn;
+    assert.deepEqual(edits, ["preview-tick", "final answer"]);
+  } finally {
+    releaseEdit();
+    releaseWait({ status: "ok", reply: "final answer" });
+    await turn.catch(() => {});
+  }
 });

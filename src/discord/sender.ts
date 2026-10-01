@@ -1,4 +1,4 @@
-import type { Client, MessageCreateOptions } from "discord.js";
+import type { Client, Message, MessageCreateOptions } from "discord.js";
 import type { DiscordFile } from "./attachments.ts";
 
 export const NO_MENTIONS = { parse: [] as [], repliedUser: false as const };
@@ -22,15 +22,38 @@ export interface DiscordSender {
   openDm(userId: string): Promise<string>;
 }
 
+export type SendableChannel = {
+  isTextBased(): boolean;
+  send(options: MessageCreateOptions): Promise<Message>;
+  sendTyping?(): Promise<void>;
+  messages: {
+    fetch(id: string): Promise<Message>;
+    edit(id: string, options: MessageCreateOptions): Promise<Message>;
+    delete(id: string): Promise<unknown>;
+  };
+};
+
+function isSendableChannel(ch: unknown): ch is SendableChannel {
+  return Boolean(
+    ch &&
+    typeof ch === "object" &&
+    "isTextBased" in ch &&
+    typeof (ch as { isTextBased: unknown }).isTextBased === "function" &&
+    (ch as { isTextBased(): boolean }).isTextBased() &&
+    "send" in ch,
+  );
+}
+
+export async function sendable(client: Pick<Client, "channels">, channelId: string): Promise<SendableChannel> {
+  const ch = await client.channels.fetch(channelId);
+  if (!isSendableChannel(ch)) throw new Error(`discord channel ${channelId} is not sendable`);
+  return ch;
+}
+
 export function createDiscordSender(client: Pick<Client, "channels" | "users">): DiscordSender {
-  async function sendable(channelId: string) {
-    const ch = await client.channels.fetch(channelId);
-    if (!ch || !ch.isTextBased() || !("send" in ch)) throw new Error(`discord channel ${channelId} is not sendable`);
-    return ch;
-  }
   return {
     async send(channelId, msg) {
-      const ch = await sendable(channelId);
+      const ch = await sendable(client, channelId);
       const sent = await ch.send({
         allowedMentions: NO_MENTIONS,
         ...(msg.content ? { content: msg.content } : {}),
@@ -41,7 +64,7 @@ export function createDiscordSender(client: Pick<Client, "channels" | "users">):
       return { id: sent.id };
     },
     async edit(channelId, messageId, msg) {
-      const ch = await sendable(channelId);
+      const ch = await sendable(client, channelId);
       await ch.messages.edit(messageId, {
         content: msg.content,
         allowedMentions: NO_MENTIONS,
@@ -49,11 +72,11 @@ export function createDiscordSender(client: Pick<Client, "channels" | "users">):
       });
     },
     async react(channelId, messageId, emoji) {
-      const ch = await sendable(channelId);
+      const ch = await sendable(client, channelId);
       await (await ch.messages.fetch(messageId)).react(emoji);
     },
     async remove(channelId, messageId) {
-      const ch = await sendable(channelId);
+      const ch = await sendable(client, channelId);
       await ch.messages.delete(messageId);
     },
     async openDm(userId) {

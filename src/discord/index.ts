@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   type AnyThreadChannel,
   type Message,
@@ -12,9 +13,11 @@ import type { DiscordCoreClient } from "../api/discord-core-client.ts";
 import type { ActorAssertion } from "../types.ts";
 import { reportFailureAs, swallowAs } from "../util/errors.ts";
 import { ingestAttachments } from "./attachments.ts";
-import { DISCORD_SURFACE, type DiscordPluginConfig } from "./config.ts";
+import { createCardRenderer } from "./approval-cards.ts";
+import { DISCORD_SURFACE, discordUserIdOf, type DiscordPluginConfig } from "./config.ts";
 import { createDeliveryGuard, createDiscordDispatcher, type DiscordDispatcher } from "./deliveries.ts";
 import { conversationFor, deliveryTargetFor, needsStakeLookup, routeMessage, threadName } from "./events.ts";
+import { createInteractionHandler, type ButtonClick } from "./interactions.ts";
 import {
   cachedViewers,
   createChannelKind,
@@ -26,14 +29,18 @@ import {
 import { createMemberHydrator, type MemberHydrator } from "./member-hydrator.ts";
 import { shouldMirror, toIngestEvent } from "./mirror.ts";
 import { audienceWith, channelReaders, type ReaderResult } from "./readers.ts";
-import { createDiscordSender, NO_MENTIONS } from "./sender.ts";
+import { createDiscordSender, NO_MENTIONS, sendable } from "./sender.ts";
 import { createStakeTracker, type StakeTracker } from "./thread-stake.ts";
 import { runDiscordTurn, type ReplyChannel } from "./turn-flow.ts";
+
+type StreamGate = () => Promise<boolean>;
+// A DM's only reader is the internal actor.
+const allowDmStream: StreamGate = async () => true;
 
 export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
 const DISCORD_LOGIN_RETRY_MAX_MS = 300_000;
 export const DISCORD_DELIVERY_POLL_MS = 60_000;
-export const READERS_UNKNOWN_TEXT =
+const READERS_UNKNOWN_TEXT =
   "I can't confirm who can read this channel right now, so I won't answer here yet. Try again in a minute.";
 const UNKNOWN_READER: ActorAssertion = {
   externalId: `${DISCORD_SURFACE}:unreadable-channel`,
@@ -57,6 +64,7 @@ interface ConnectionScope {
   readersOf: (baseChannelId: string) => Promise<ReaderResult>;
   stakes: StakeTracker;
   dispatcher: DiscordDispatcher;
+  interact: (click: ButtonClick) => Promise<void>;
 }
 
 function replyChannel(ch: {
@@ -147,6 +155,7 @@ export function createDiscordPlugin(
         channel: replyChannel(message.channel),
         mode: "stream",
         inFlightRuns: run.inFlightRuns,
+        mayPost: allowDmStream,
         body: {
           ...common,
           ...(attachments.length ? { attachments } : {}),
@@ -242,6 +251,41 @@ export function createDiscordPlugin(
         classifyUser: (id) => classifyUser(id, id),
       }),
       inFlightRuns,
+      renderCard: createCardRenderer(core),
+      recipientFor: (t) => discordUserIdOf(t) ?? core.discordUserIdsFor(t)[0] ?? null,
+    });
+
+    const interact = createInteractionHandler({
+      core,
+      classifyUser: (id) => classifyUser(id, id),
+      readersOf,
+      continueTurn: async (body, onAccepted) => {
+        const target = body.deliveryTarget;
+        if (!target) return;
+        let ch;
+        try {
+          ch = await sendable(c, target);
+        } catch {
+          return;
+        }
+        const isDm = body.conversation.kind === "dm";
+        if (!isDm && !body.conversation.channelRef) return;
+        const mayPost = isDm
+          ? allowDmStream
+          : async () => {
+              const res = await readersOf(body.conversation.channelRef!);
+              return res.ok && !res.readers.some((r) => r.isExternalGuest);
+            };
+        return runDiscordTurn({
+          core,
+          channel: replyChannel(ch),
+          body,
+          mode: "stream",
+          inFlightRuns,
+          onAccepted,
+          mayPost,
+        });
+      },
     });
 
     const scope: ConnectionScope = {
@@ -251,6 +295,7 @@ export function createDiscordPlugin(
       readersOf,
       stakes,
       dispatcher,
+      interact,
     };
 
     let unsubscribeDeliveries: (() => void) | null = null;
@@ -277,6 +322,22 @@ export function createDiscordPlugin(
       unsubscribeDeliveries = core.onDeliveryEnqueued(drain);
       pollTimer = setInterval(drain, DISCORD_DELIVERY_POLL_MS);
       drain();
+    });
+
+    c.on(Events.InteractionCreate, (interaction) => {
+      if (!accepting || !interaction.isButton()) return;
+      const p = scope
+        .interact({
+          customId: interaction.customId,
+          userId: interaction.user.id,
+          defer: async () => void (await interaction.deferUpdate()),
+          refuse: async (content) => void (await interaction.followUp({ content, flags: MessageFlags.Ephemeral })),
+          settle: async (content) =>
+            void (await interaction.editReply({ content, components: [], allowedMentions: NO_MENTIONS })),
+        })
+        .catch(swallowAs("discord: interaction", undefined))
+        .finally(() => inFlight.delete(p));
+      inFlight.add(p);
     });
 
     c.on(Events.MessageCreate, (message) => {

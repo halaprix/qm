@@ -1,14 +1,8 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { EventEmitter } from "node:events";
-import { ChannelType } from "discord.js";
-import {
-  createDiscordPlugin,
-  DISCORD_DELIVERY_POLL_MS,
-  DISCORD_LOGIN_RETRY_BASE_MS,
-  READERS_UNKNOWN_TEXT,
-} from "../src/discord/index.ts";
-import { REFUSED_GUEST_TEXT } from "../src/discord/turn-flow.ts";
+import { ChannelType, Events } from "discord.js";
+import { createDiscordPlugin, DISCORD_DELIVERY_POLL_MS, DISCORD_LOGIN_RETRY_BASE_MS } from "../src/discord/index.ts";
 import type { DiscordPluginConfig } from "../src/discord/config.ts";
 import type { DiscordCoreClient } from "../src/api/discord-core-client.ts";
 
@@ -826,7 +820,9 @@ test("a staff mention in a channel a guest can read still submits, and core refu
     h.submitted[0] as { conversation: { audience: Array<{ externalId: string; isExternalGuest?: boolean }> } }
   ).conversation.audience;
   assert.ok(audience.some((a) => a.externalId === "discord:555" && a.isExternalGuest));
-  assert.deepEqual(h.threadPosts, [REFUSED_GUEST_TEXT]);
+  assert.deepEqual(h.threadPosts, [
+    "I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM.",
+  ]);
 });
 
 test("while members are not hydrated, a staff mention is refused with a clear message and nothing is submitted", async () => {
@@ -838,7 +834,9 @@ test("while members are not hydrated, a staff mention is refused with a clear me
   await h.plugin.stop();
   assert.deepEqual(h.submitted, []);
   assert.deepEqual(h.threads, []);
-  assert.deepEqual(h.channelPosts, [READERS_UNKNOWN_TEXT]);
+  assert.deepEqual(h.channelPosts, [
+    "I can't confirm who can read this channel right now, so I won't answer here yet. Try again in a minute.",
+  ]);
 });
 
 test("after ShardReconnecting readers are unknown until the session resumes", async () => {
@@ -858,7 +856,9 @@ test("after ShardReconnecting readers are unknown until the session resumes", as
   h.emitter.emit("messageCreate", h.message);
   await h.settle();
   assert.deepEqual(h.submitted, []);
-  assert.deepEqual(h.channelPosts, [READERS_UNKNOWN_TEXT]);
+  assert.deepEqual(h.channelPosts, [
+    "I can't confirm who can read this channel right now, so I won't answer here yet. Try again in a minute.",
+  ]);
   assert.deepEqual(h.acked, []);
   h.emitter.emit("shardResume", 0, 0);
   await h.settle();
@@ -1443,4 +1443,162 @@ test("a ClientReady that fires after detach starts no delivery subscription or p
   fireReady!();
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(subscriptions, 0);
+});
+
+function continuationHarness(opts: { members: Array<{ id: string; roles: string[] }> }) {
+  const member = (id: string, roles: string[]) => ({
+    id,
+    displayName: `u${id}`,
+    user: { id, bot: false, globalName: null, username: `u${id}` },
+    roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+  });
+  const membersCache = new Map(opts.members.map((m) => [m.id, member(m.id, m.roles)]));
+  const guild = {
+    id: "900",
+    members: {
+      cache: membersCache,
+      fetch: async () => membersCache,
+    },
+  };
+  const parent = {
+    id: "c1",
+    guild,
+    isThread: () => false,
+    isTextBased: () => true,
+    permissionsFor: () => ({ has: () => true }),
+  };
+  const threadEdits: string[] = [];
+  const statusMessage = {
+    id: "s1",
+    edit: async (content: string) => {
+      threadEdits.push(content);
+    },
+    delete: async () => {},
+  };
+  const thread = {
+    id: "t1",
+    parentId: "c1",
+    parent,
+    guild,
+    isThread: () => true,
+    isTextBased: () => true,
+    send: async () => statusMessage,
+    sendTyping: async () => {},
+    messages: {
+      fetch: async () => statusMessage,
+      edit: async () => statusMessage,
+      delete: async () => {},
+    },
+  };
+  const channelsMap = new Map<string, unknown>([
+    ["c1", parent],
+    ["t1", thread],
+  ]);
+  const DID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const core = {
+    ...fakeCore(),
+    getDelivery: async (id: string) =>
+      id === DID
+        ? {
+            id: DID,
+            destination: {
+              type: "discord-dm",
+              target: "discord:111",
+              commandApprovalId: "A1",
+            },
+          }
+        : null,
+    getApproval: async (id: string) =>
+      id === "A1"
+        ? {
+            requestId: "A1",
+            command: "deploy",
+            request: {
+              surface: "discord",
+              actor: { externalId: "discord:111" },
+              conversation: { kind: "channel", threadRef: "discord:th:t1", channelRef: "c1" },
+              deliveryTarget: "t1",
+              text: "deploy",
+            },
+          }
+        : null,
+    submitTurn: async () => ({ status: "queued", runId: "r1" }),
+    waitRun: async () => ({ status: "ok", reply: "deploying now" }),
+    reportRunEditRef: async () => {},
+    ackRunDelivery: async () => {},
+    onDeliveryEnqueued: () => () => {},
+    onContextRequest: () => () => {},
+    pendingContextRequests: async () => [],
+    claimDeliveries: async () => [],
+    ackDelivery: async () => {},
+    reportDeliveryUndeliverable: async () => {},
+    readBlob: async () => Buffer.from(""),
+    readFileArtifact: async () => Buffer.from(""),
+    holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
+  } as unknown as DiscordCoreClient;
+
+  const emitter = new EventEmitter();
+  const fakeClient = Object.assign(emitter, {
+    user: { id: "999", tag: "bot#1" },
+    login: async () => {
+      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
+      return "ok";
+    },
+    destroy: async () => {},
+    channels: {
+      cache: channelsMap,
+      fetch: async (id: string) => channelsMap.get(id) ?? null,
+    },
+    guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
+  });
+
+  const plugin = createDiscordPlugin(
+    { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
+    core,
+    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+  );
+
+  const settle = () => new Promise((r) => setTimeout(r, 40));
+  const click = () => {
+    emitter.emit(Events.InteractionCreate, {
+      isButton: () => true,
+      customId: `qm:cmd:once:${DID}`,
+      user: { id: "111" },
+      deferUpdate: async () => {},
+      followUp: async () => {},
+      editReply: async () => {},
+    });
+  };
+
+  return { plugin, settle, click, threadEdits };
+}
+
+test("interaction button for guild-thread continuation enforces reader gate through plugin harness", async () => {
+  const h = continuationHarness({
+    members: [
+      { id: "111", roles: ["staff"] },
+      { id: "666", roles: [] },
+    ],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.click();
+  await h.settle();
+  await h.plugin.stop();
+
+  assert.equal(h.threadEdits.at(-1), "I can't post this reply here right now.");
+  assert.ok(!h.threadEdits.includes("deploying now"));
+});
+
+test("interaction button for guild-thread continuation allows streaming when all readers are internal", async () => {
+  const h = continuationHarness({
+    members: [{ id: "111", roles: ["staff"] }],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.click();
+  await h.settle();
+  await h.plugin.stop();
+
+  assert.equal(h.threadEdits.at(-1), "deploying now");
 });

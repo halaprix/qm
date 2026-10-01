@@ -1,5 +1,6 @@
 import { clip, inlineCode } from "./util.ts";
 import { parseDeliveryTarget } from "./delivery.ts";
+import { approvalContinuation } from "../core/approval-continuation.ts";
 import type { AgentRequestActionId } from "./agent-requests.ts";
 
 export const APPROVAL_ACTION_IDS = ["hilo_allow_once", "hilo_allow_session", "hilo_allow_always", "hilo_deny"] as const;
@@ -117,27 +118,14 @@ export function recoveredApprovalContext(
   stored: Pick<StoredApproval, "command" | "reason" | "purpose" | "summary" | "kind" | "grantModes" | "request">,
   click: { channel: string; threadTs?: string },
 ): RecoveredApprovalContext | null {
-  const req = stored.request as
-    | (Record<string, unknown> & {
-        actor?: { externalId?: unknown };
-        conversation?: { kind?: unknown };
-        deliveryTarget?: unknown;
-      })
-    | undefined;
-  if (!req || typeof req.actor?.externalId !== "string" || typeof req.text !== "string") return null;
-  const kind = req.conversation?.kind;
-  if (kind !== "dm" && kind !== "channel" && kind !== "group") return null;
-  const {
-    surface: _surface,
-    async: _async,
-    idempotencyKey: _idempotencyKey,
-    redeliveryKey: _redeliveryKey,
-    approval: _approval,
-    relayInput: _relayInput,
-    intakePreambleMs: _intakePreambleMs,
-    clientSentAt: _clientSentAt,
-    ...turn
-  } = req;
+  const turn = approvalContinuation(stored.request);
+  if (!turn) return null;
+  const req = stored.request as Record<string, unknown> & {
+    actor: { externalId: string };
+    conversation: { kind: string };
+    deliveryTarget?: unknown;
+  };
+  const kind = req.conversation.kind;
   const origin =
     typeof req.deliveryTarget === "string" && req.deliveryTarget
       ? parseDeliveryTarget(req.deliveryTarget)
