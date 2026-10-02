@@ -1,6 +1,6 @@
 import { registerKeychainApprovalActions } from "./keychain-approvals.ts";
 import { registerDeployAccessActions } from "./deploy-access.ts";
-import { SlackPluginStartCleanupError } from "../surfaces/slack-runtime.ts";
+import { SurfacePluginStartCleanupError } from "../surfaces/surface-runtime.ts";
 import { createSlackRateLimitNotice } from "./rate-limit-notice.ts";
 import { createSlackHistoryReader } from "./history.ts";
 import { reportFailure, swallow, swallowAs } from "../util/errors.ts";
@@ -413,7 +413,7 @@ export async function startSlackPlugin(
     try {
       await app.stop();
     } catch (cleanupError) {
-      throw new SlackPluginStartCleanupError(err, cleanupError, async () => {
+      throw new SurfacePluginStartCleanupError(err, cleanupError, async () => {
         await app.stop();
       });
     }

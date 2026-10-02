@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { decryptSecret, deriveConnectorKey, encryptSecret } from "../connectors/connector-client-store.ts";
-import type { DiscordPluginConfig } from "../discord/config.ts";
+import { discordPluginConfigFromEnv, type DiscordPluginConfig } from "../discord/config.ts";
+import type { ReloadableSurfaceConfig } from "./surface-runtime.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -303,4 +304,18 @@ export function discordPluginConfigFromInstallation(i: DiscordInstallation): Dis
     guildIds: new Set(i.guildIds),
     internalRoleIds: new Set(i.internalRoleIds),
   };
+}
+
+export async function loadDiscordRuntimeConfig(
+  store: Pick<DiscordInstallationStore, "get" | "status">,
+  env: Record<string, string | undefined>,
+): Promise<ReloadableSurfaceConfig<DiscordPluginConfig> | null> {
+  const status = await store.status();
+  if (status.disabled) return null;
+  if (status.configured) {
+    const stored = await store.get();
+    if (stored) return { version: stored.version, config: discordPluginConfigFromInstallation(stored) };
+  }
+  const fromEnv = discordPluginConfigFromEnv(env);
+  return fromEnv ? { version: "environment", config: fromEnv } : null;
 }
