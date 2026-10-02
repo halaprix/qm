@@ -6554,6 +6554,7 @@
           <div id="view-connectors" class="hidden">
             <template data-integrations-card="card-connectors"></template>
             <template data-integrations-card="card-slack-installation"></template>
+            <template data-integrations-card="card-discord-installation"></template>
           </div>
 
           <div id="view-design" class="hidden"></div>
@@ -7473,7 +7474,10 @@
           if (view === "slack-settings") void loadSlackInstallation();
           return void loadScope();
         }
-        if (view === "connectors") return void loadConnectors();
+        if (view === "connectors") {
+          void loadDiscordInstallation();
+          return void loadConnectors();
+        }
         if (view === "design-system") return void renderDesignLibrary();
         if (view === "user") return void showUserDetail(st.principal);
         if (view === "slack") return void renderSlackMirror(st);
@@ -8576,6 +8580,9 @@
       }
       async function loadSlackInstallation() {
         return governanceUI.integrations.loadSlackInstallation();
+      }
+      async function loadDiscordInstallation() {
+        return governanceUI.integrations.loadDiscordInstallation();
       }
       function collectPolicy() {
         return governanceUI.collect("command-policy");
