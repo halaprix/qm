@@ -1253,6 +1253,47 @@ const apiRoutes: readonly WebRoute[] = [
   },
   {
     method: "GET",
+    path: "/api/discord/link",
+    handle: (c) => {
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "GET", "/v1/discord/link");
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/discord/link/authorize",
+    handle: async (c) => {
+      const body = await readJson<{ nonceHash?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "POST", "/v1/discord/link/authorize", JSON.stringify({ nonceHash: body.nonceHash }));
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/discord/link/complete",
+    handle: async (c) => {
+      const body = await readJson<{ code?: unknown; state?: unknown; nonce?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(
+        c.res,
+        "POST",
+        "/v1/discord/link/complete",
+        JSON.stringify({ code: body.code, state: body.state, nonce: body.nonce }),
+      );
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/discord/link",
+    handle: (c) => {
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "DELETE", "/v1/discord/link");
+    },
+  },
+  {
+    method: "GET",
     path: "/api/composio/toolkits",
     handle: async (c) =>
       relayCore(

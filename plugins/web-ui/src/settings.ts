@@ -1,5 +1,6 @@
 import "./onboarding-welcome";
 import "./slack-account";
+import "./discord-account";
 import { openModelConnectManager, type StatusResponse } from "./model-connect";
 import { api, withBase } from "./core-bridge";
 import { html, nothing, render, type TemplateResult } from "lit";
@@ -429,6 +430,9 @@ function settingsPane(): TemplateResult {
       ${accountRow()}
       <div class="settings-row settings-slack-account">
         <qm-slack-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-slack-account>
+      </div>
+      <div class="settings-row settings-discord-account">
+        <qm-discord-account .user=${`${appState.me?.org}:${appState.me?.user}`}></qm-discord-account>
       </div>
       <div class="settings-row">
         <qm-onboarding-welcome
