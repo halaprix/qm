@@ -11,7 +11,6 @@ import { createServer } from "./api/server.ts";
 import { dockerDaemonFailure } from "./deploy/docker-deploy-provider.ts";
 import { errMessage, reportFailureAs } from "./util/errors.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
-import { discordPluginConfigFromEnv } from "./discord/config.ts";
 import { createDiscordPlugin } from "./discord/index.ts";
 import { createSurfaceRuntimeReconciler } from "./surfaces/surface-runtime.ts";
 import { loadDiscordRuntimeConfig } from "./surfaces/discord-installation.ts";
@@ -25,7 +24,6 @@ const envSlackAttempted = Boolean(process.env.SLACK_BOT_TOKEN || process.env.SLA
 let slackEnvironmentState: "absent" | "configured" | "partial" = "absent";
 if (slackConfig) slackEnvironmentState = "configured";
 else if (envSlackAttempted) slackEnvironmentState = "partial";
-const discordEnvironmentConfigured = Boolean(discordPluginConfigFromEnv(process.env));
 
 const built = buildApp(config);
 await migrateRegisteredPgSchemas(config.databaseUrl);
@@ -43,7 +41,7 @@ const managedSlack = process.env.QM_SLACK_SERVICE_URL
     })
   : undefined;
 const server = createServer(built.app, {
-  ...serverDeps(config, built, slackEnvironmentState, envSlackConfig?.botToken, discordEnvironmentConfigured),
+  ...serverDeps(config, built, slackEnvironmentState, envSlackConfig?.botToken),
   managedSlack,
 });
 

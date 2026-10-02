@@ -87,7 +87,10 @@ export function createCardRenderer(
       const view = await core.keychainApprovals?.get(dest.keychainAskId, dest.target);
       return view ? keychainCard(d.id, view) : { content: APPROVAL_EXPIRED_TEXT };
     }
-    if (dest.deploymentAccess) return card("dep", CARD_ACTIONS.dep, d.id, d.text);
+    if (dest.deploymentAccess)
+      return dest.informational
+        ? { content: d.text.slice(0, DISCORD_MESSAGE_LIMIT) }
+        : card("dep", CARD_ACTIONS.dep, d.id, d.text);
     return null;
   };
 }

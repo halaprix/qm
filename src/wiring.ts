@@ -161,6 +161,7 @@ import { createPostgresDeliveryStore } from "./delivery/postgres-delivery-store.
 import { wireRunResultDeliveries } from "./delivery/run-result-delivery.ts";
 import { adminSessionUrl } from "./util/admin-links.ts";
 import { withWebTranscriptDeliveries } from "./delivery/web-transcript-delivery.ts";
+import { createDiscordPrincipalRoute, withPrincipalRouting } from "./delivery/principal-routing.ts";
 import { createDirectoryStore, type DirectoryStore } from "./directory/directory-store.ts";
 import { createPostgresDirectoryStore } from "./directory/postgres-directory-store.ts";
 import {
@@ -358,7 +359,7 @@ import { createApp, type App } from "./api/app.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackAgentRequestContext, type SlackCoreClient } from "./api/slack-core-client.ts";
-import { createDiscordCoreClient, type DiscordCoreClient } from "./api/discord-core-client.ts";
+import { createDiscordCoreClient, type DiscordCoreClient, linkedDiscordUserIds } from "./api/discord-core-client.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -1685,9 +1686,16 @@ export function buildApp(
   membership.managesArtifactHome = managesArtifactHome;
   const deployGitSecret = config.signingSecret;
   const deployGitBase = config.apiBaseUrl;
-  const deliveries = withWebTranscriptDeliveries(
-    config.databaseUrl ? createPostgresDeliveryStore(config.databaseUrl) : createDeliveryStore(),
-    sessions,
+  const deliveries = withPrincipalRouting(
+    withWebTranscriptDeliveries(
+      config.databaseUrl ? createPostgresDeliveryStore(config.databaseUrl) : createDeliveryStore(),
+      sessions,
+    ),
+    createDiscordPrincipalRoute({
+      installation: discordInstallation,
+      environmentConfigured: config.discordEnvironmentConfigured,
+      linkedDiscordUserIds,
+    }),
   );
   const deployService = createDeployService({
     deliveries,
@@ -2848,7 +2856,6 @@ export function serverDeps(
   built: BuiltApp,
   slackEnvironmentState: "absent" | "configured" | "partial" = "absent",
   slackEnvBotToken?: string,
-  discordEnvironmentConfigured = false,
 ): Omit<ServerDeps, "control"> {
   const configuredModel = configuredModelForHarness(config, config.harness);
   const carriedModelAuth = harnessCarriedModelAuth(config);
@@ -2890,7 +2897,7 @@ export function serverDeps(
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
     discordInstallation: built.discordInstallation,
-    discordEnvironmentConfigured,
+    discordEnvironmentConfigured: config.discordEnvironmentConfigured,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
     ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
     resolveClient: built.resolveClient,

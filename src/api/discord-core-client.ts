@@ -7,6 +7,12 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   discordUserIdsFor(principalId: string): string[];
 }
 
+export function linkedDiscordUserIds(principalId: string): string[] {
+  return personIds(principalId)
+    .map(discordUserIdOf)
+    .filter((id): id is string => id !== null);
+}
+
 export function createDiscordCoreClient(deps: SurfaceCoreClientDeps): DiscordCoreClient {
   return {
     ...createSurfaceCoreClient(deps, DISCORD_SURFACE),
@@ -17,9 +23,7 @@ export function createDiscordCoreClient(deps: SurfaceCoreClientDeps): DiscordCor
       return canonical !== alias && deps.identity.classify(canonical).type === "internal";
     },
     discordUserIdsFor(principalId) {
-      return personIds(principalId)
-        .map(discordUserIdOf)
-        .filter((id): id is string => id !== null);
+      return linkedDiscordUserIds(principalId);
     },
   };
 }

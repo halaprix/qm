@@ -324,3 +324,8 @@ function isThirdPartyRelay(destination: Destination, attributeAs: string | undef
   if (destination.type !== "principal") return false;
   return destination.onBehalfOf !== destination.target;
 }
+
+export function relaySenderAttribution(relaySender: string | undefined): string | null {
+  const sender = relaySender?.trim().replace(/^@+/, "");
+  return sender ? `Sent for @${sender}` : null;
+}

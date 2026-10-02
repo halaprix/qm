@@ -159,8 +159,13 @@ test("start while stopping restarts plugin via setImmediate when reconcile is no
 });
 
 test("serverDeps propagates discordEnvironmentConfigured", () => {
-  const config = testConfig();
-  const built = buildApp(config);
-  assert.equal(serverDeps(config, built, "absent", undefined, true).discordEnvironmentConfigured, true);
-  assert.equal(serverDeps(config, built, "absent", undefined, false).discordEnvironmentConfigured, false);
+  const built = buildApp(testConfig());
+  assert.equal(
+    serverDeps(testConfig({ discordEnvironmentConfigured: true }), built).discordEnvironmentConfigured,
+    true,
+  );
+  assert.equal(
+    serverDeps(testConfig({ discordEnvironmentConfigured: false }), built).discordEnvironmentConfigured,
+    false,
+  );
 });

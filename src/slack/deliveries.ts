@@ -31,6 +31,7 @@ import type { TurnFlow } from "./turn-flow.ts";
 import { cleanAgentReplyForSlack, stripSlackDirectives } from "./messaging.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
 import { slackErrorCode } from "./payloads.ts";
+import { relaySenderAttribution } from "../reach/reach.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 const SLOW_DRAIN_ALARM_MS = 120_000;
@@ -150,8 +151,8 @@ export function createDeliveryPoller(deps: {
   function deliveryFooter(d: Delivery): Array<Record<string, unknown>> {
     const base = deps.webUiPublicUrl?.trim().replace(/\/+$/, "");
     const id = d.provenance?.trigger === "cron" ? cronIdOf(d.provenance.sourceThreadRef) : null;
-    const sender = d.destination.relaySender?.trim().replace(/^@+/, "");
-    const attribution = sender ? [{ type: "plain_text", text: `Sent for @${sender}`, emoji: false }] : [];
+    const senderText = relaySenderAttribution(d.destination.relaySender);
+    const attribution = senderText ? [{ type: "plain_text", text: senderText, emoji: false }] : [];
     if (!base || !id) return attribution;
     const title = (d.provenance?.sourceTitle?.trim() || "Cron")
       .replaceAll("&", "&amp;")

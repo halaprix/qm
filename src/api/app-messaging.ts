@@ -7,6 +7,7 @@ import { reportFailureAs } from "../util/errors.ts";
 import { adminCronHistoryUrl } from "../util/admin-links.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
 import { randomUUID } from "node:crypto";
+import { isPersonAddressed } from "../delivery/delivery-store.ts";
 import {
   reachEnqueue,
   withSlackUnfurlOption,
@@ -553,7 +554,7 @@ export function createMessagingMethods(
     ...(deps.ambientJudge ? { ambientJudge: deps.ambientJudge } : {}),
     async recordPrincipalDelivery(deliveryId, recipientThreadRef) {
       const delivery = await deps.deliveries.get(deliveryId);
-      if (!delivery || delivery.destination.type !== "principal") return;
+      if (!delivery || !isPersonAddressed(delivery.destination)) return;
       const recipientId = delivery.destination.target;
       const recipientScope = scopeId("personal", recipientId);
       const session = await deps.sessions.getOrCreateByThread(recipientThreadRef, "dm", recipientScope);

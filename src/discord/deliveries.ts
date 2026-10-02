@@ -7,6 +7,7 @@ import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE } from "./config.ts";
 import { chunkMessage } from "./format.ts";
 import type { ReaderResult } from "./readers.ts";
 import type { DiscordSender, OutboundMessage } from "./sender.ts";
+import { relaySenderAttribution } from "../reach/reach.ts";
 
 export const DISCORD_DELIVERY_CLAIM_MS = 15_000;
 export const DISCORD_RUN_RECOVERY_GRACE_MS = 15_000;
@@ -106,7 +107,8 @@ export function createDiscordDispatcher(deps: {
       return;
     }
     const { files, notes } = await toDiscordFiles(d.attachments ?? [], deps.core);
-    const chunks = chunkMessage([d.text, ...notes].filter(Boolean).join("\n\n"));
+    const attribution = relaySenderAttribution(dest.relaySender);
+    const chunks = chunkMessage([d.text, ...notes, attribution].filter(Boolean).join("\n\n"));
     const [first, ...rest] = chunks;
     if (dest.editRef) await deps.sender.edit(channelId, dest.editRef, { content: first ?? EMPTY_TEXT });
     else if (first) await deps.sender.send(channelId, { content: first, ...(replyTo ? { replyTo } : {}) });
