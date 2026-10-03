@@ -280,3 +280,20 @@ test("a discord-dm row with no Discord recipient is reported and dropped", async
   await h.dispatcher.drain();
   assert.deepEqual(h.log, ["undeliverable:p1:no linked Discord account", "ack:p1:"]);
 });
+
+test("delivery guard refuses DM recipient who is deactivated (guest) and allows normal internal recipient", async () => {
+  const guard = createDeliveryGuard({
+    channelKind: async (id) =>
+      id === "dm-deact" ? { kind: "dm", recipientId: "u-deact" } : { kind: "dm", recipientId: "u-norm" },
+    readers: async () => ({ ok: true, guildId: "g1", readers: [] }),
+    classifyUser: async (id) =>
+      id === "u-deact"
+        ? { externalId: `discord:${id}`, displayName: id, isExternalGuest: true }
+        : { externalId: `discord:${id}`, displayName: id },
+  });
+  const deactVerdict = await guard.mayPost("dm-deact");
+  assert.deepEqual(deactVerdict, { ok: false, retry: false, reason: "DM recipient is not internal" });
+
+  const normVerdict = await guard.mayPost("dm-norm");
+  assert.deepEqual(normVerdict, { ok: true });
+});

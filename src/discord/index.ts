@@ -193,6 +193,10 @@ export function createDiscordPlugin(
       channel: replyChannel(thread),
       mode: "spine",
       inFlightRuns: run.inFlightRuns,
+      mayPost: async () => {
+        const res = await run.readersOf(parentChannelId);
+        return res.ok && !res.readers.some((r) => r.isExternalGuest);
+      },
       body: {
         ...common,
         ...(attachments.length ? { attachments } : {}),
@@ -227,12 +231,14 @@ export function createDiscordPlugin(
       client: c,
       cfg,
       linkedInternal: (userId) => core.linkedInternal(userId),
+      coreStatus: (userId) => core.coreStatus(userId),
     });
     const classifyUser = createUserClassifier({
       client: c,
       cfg,
       hydrator,
       linkedInternal: (userId) => core.linkedInternal(userId),
+      coreStatus: (userId) => core.coreStatus(userId),
     });
     const readersOf = (baseChannelId: string) =>
       channelReaders({
@@ -243,9 +249,10 @@ export function createDiscordPlugin(
         classify: (m) => mergedClassify(m.userId, m.displayName),
       });
     const stakes = createStakeTracker({ recent: createStakeHistory(c) });
+    const sender = createDiscordSender(c);
     const dispatcher = createDiscordDispatcher({
       core,
-      sender: createDiscordSender(c),
+      sender,
       guard: createDeliveryGuard({
         channelKind: createChannelKind(c),
         readers: readersOf,
@@ -260,7 +267,7 @@ export function createDiscordPlugin(
       core,
       classifyUser: (id) => classifyUser(id, id),
       readersOf,
-      continueTurn: async (body, onAccepted) => {
+      continueTurn: async (body, hooks) => {
         const target = body.deliveryTarget;
         if (!target) return;
         let ch;
@@ -283,7 +290,7 @@ export function createDiscordPlugin(
           body,
           mode: "stream",
           inFlightRuns,
-          onAccepted,
+          ...hooks,
           mayPost,
         });
       },
@@ -370,6 +377,7 @@ export function createDiscordPlugin(
           refuse: async (content) => void (await interaction.followUp({ content, flags: MessageFlags.Ephemeral })),
           settle: async (content) =>
             void (await interaction.editReply({ content, components: [], allowedMentions: NO_MENTIONS })),
+          settleFinal: (content) => sender.edit(interaction.channelId, interaction.message.id, { content }),
         })
         .catch(swallowAs("discord: interaction", undefined))
         .finally(() => inFlight.delete(p));

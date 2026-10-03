@@ -1,5 +1,9 @@
 const CONVERSATION_KINDS = new Set(["dm", "channel", "group"]);
 
+export function approvalDeniedReason(command: string): string {
+  return `approval denied for ${command}`;
+}
+
 export function approvalContinuation(request: Record<string, unknown> | undefined): Record<string, unknown> | null {
   if (!request) return null;
   const actor = request.actor as { externalId?: unknown } | undefined;

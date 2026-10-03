@@ -88,7 +88,7 @@ export function createCardRenderer(
       return view ? keychainCard(d.id, view) : { content: APPROVAL_EXPIRED_TEXT };
     }
     if (dest.deploymentAccess)
-      return dest.informational
+      return dest.copyOf
         ? { content: d.text.slice(0, DISCORD_MESSAGE_LIMIT) }
         : card("dep", CARD_ACTIONS.dep, d.id, d.text);
     return null;

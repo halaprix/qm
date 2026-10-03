@@ -5,7 +5,8 @@ import { classifyMember, type DiscordMemberFacts } from "../src/discord/members.
 
 const BOT = "999";
 const cfg = { allowUserIds: new Set(["1", "2"]), internalRoleIds: new Set<string>() };
-const classify = (m: DiscordMemberFacts) => classifyMember(m, cfg, async () => false);
+const defaultCoreStatus = async () => ({ notInternal: false, overrideInternal: false });
+const classify = (m: DiscordMemberFacts) => classifyMember(m, cfg, async () => false, defaultCoreStatus);
 const facts = (userId: string, isBot = false): DiscordMemberFacts => ({
   userId,
   displayName: userId,
@@ -13,6 +14,40 @@ const facts = (userId: string, isBot = false): DiscordMemberFacts => ({
   isBot,
 });
 const base = { guildIds: new Set(["900"]), ready: () => true, botUserId: BOT, classify };
+
+test("a deactivated user with the internal role is a guest reader", async () => {
+  const roleCfg = { allowUserIds: new Set<string>(), internalRoleIds: new Set(["staff"]) };
+  const customClassify = (m: DiscordMemberFacts) =>
+    classifyMember(
+      m,
+      roleCfg,
+      async () => false,
+      async (id) => ({
+        notInternal: id === "deactivated",
+        overrideInternal: false,
+      }),
+    );
+  const r = await channelReaders({
+    ...base,
+    classify: customClassify,
+    viewers: {
+      ok: true,
+      guildId: "900",
+      members: [
+        { userId: "deactivated", displayName: "deact", roleIds: ["staff"], isBot: false },
+        { userId: "normal", displayName: "norm", roleIds: ["staff"], isBot: false },
+      ],
+    },
+  });
+  assert.ok(r.ok);
+  assert.deepEqual(
+    r.readers.map((a) => [a.externalId, a.isExternalGuest === true]),
+    [
+      ["discord:deactivated", true],
+      ["discord:normal", false],
+    ],
+  );
+});
 
 test("a guest viewer is in the audience as a guest", async () => {
   const r = await channelReaders({ ...base, viewers: { ok: true, guildId: "900", members: [facts("1"), facts("3")] } });

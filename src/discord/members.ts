@@ -10,15 +10,21 @@ export interface DiscordMemberFacts {
 
 export type LinkedInternal = (userId: string) => Promise<boolean>;
 
+export type CoreStatusOf = (userId: string) => Promise<{ notInternal: boolean; overrideInternal: boolean }>;
+
 export async function classifyMember(
   m: DiscordMemberFacts,
   cfg: Pick<DiscordPluginConfig, "allowUserIds" | "internalRoleIds">,
   linkedInternal: LinkedInternal,
+  coreStatusOf: CoreStatusOf,
 ): Promise<ActorAssertion> {
+  const { notInternal, overrideInternal } = await coreStatusOf(m.userId);
   const internal =
-    cfg.allowUserIds.has(m.userId) ||
-    m.roleIds.some((r) => cfg.internalRoleIds.has(r)) ||
-    (await linkedInternal(m.userId));
+    !notInternal &&
+    (overrideInternal ||
+      cfg.allowUserIds.has(m.userId) ||
+      m.roleIds.some((r) => cfg.internalRoleIds.has(r)) ||
+      (await linkedInternal(m.userId)));
   return {
     externalId: discordExternalId(m.userId),
     displayName: m.displayName,

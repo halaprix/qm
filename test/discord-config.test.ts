@@ -23,6 +23,18 @@ test("lists parse from comma or space separated env", () => {
   assert.deepEqual([...cfg.internalRoleIds], ["r1"]);
 });
 
+test("env config throws when internalRoleIds contains a guild id", () => {
+  assert.throws(
+    () =>
+      discordPluginConfigFromEnv({
+        DISCORD_BOT_TOKEN: "t",
+        DISCORD_GUILD_IDS: "900",
+        DISCORD_INTERNAL_ROLE_IDS: "900",
+      }),
+    /DISCORD_INTERNAL_ROLE_IDS cannot contain guild id/,
+  );
+});
+
 test("discordUserIdOf only strips the discord prefix", () => {
   assert.equal(discordUserIdOf("discord:42"), "42");
   assert.equal(discordUserIdOf("U42"), null);

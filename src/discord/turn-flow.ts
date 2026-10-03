@@ -17,7 +17,7 @@ export interface ReplyChannel {
 
 const TYPING_REFRESH_MS = 8_000;
 const WORKING_TEXT = "⚙ Working…";
-const FAILURE_TEXT = "Something went wrong on my side and I couldn't finish that. Please try again.";
+export const FAILURE_TEXT = "Something went wrong on my side and I couldn't finish that. Please try again.";
 const REFUSED_GUEST_TEXT =
   "I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM.";
 const REFUSED_STREAM_TEXT = "I can't post this reply here right now.";
@@ -35,7 +35,7 @@ export type TurnInput =
       body: CoreTurnBody;
       mode: "spine";
       inFlightRuns: Set<string>;
-      onAccepted?: () => Promise<void>;
+      mayPost: () => Promise<boolean>;
     }
   | {
       core: SurfaceCoreClient;
@@ -45,6 +45,7 @@ export type TurnInput =
       inFlightRuns: Set<string>;
       streamIntervalMs?: number;
       onAccepted?: () => Promise<void>;
+      onSettled?: (result: TurnResult) => Promise<void>;
       mayPost: () => Promise<boolean>;
     };
 
@@ -56,7 +57,7 @@ function approvalText(result: TurnResult): string {
   return result.adminUrl ? `${APPROVAL_DM_TEXT}: ${result.adminUrl}` : `${APPROVAL_DM_TEXT}.`;
 }
 
-function refusalText(reason: string | undefined): string {
+export function refusalText(reason: string | undefined): string {
   return reason === GUEST_REFUSAL ? REFUSED_GUEST_TEXT : `I can't do that: ${reason ?? "refused"}`;
 }
 
@@ -141,13 +142,22 @@ async function deliver(
 async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise<void> {
   const { core, channel, body, inFlightRuns, mayPost, streamIntervalMs = STREAM_EDIT_INTERVAL_MS } = input;
   const status = await channel.send(WORKING_TEXT);
+  let submitted = false;
+  let settled = false;
+  const settle = async (result: TurnResult) => {
+    if (!input.onSettled || settled) return;
+    settled = true;
+    await input.onSettled(result).catch(swallowAs("discord: onSettled", undefined));
+  };
   let runId: string | undefined;
   try {
     const queued = await core.submitTurn({ async: true, ...body });
+    submitted = true;
     if (queued.status !== "refused" && queued.status !== "failed" && input.onAccepted) {
       await input.onAccepted().catch(swallowAs("discord: onAccepted", undefined));
     }
     if (queued.steered) {
+      await settle(queued);
       await status.delete();
       return;
     }
@@ -155,7 +165,8 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
     if (runId) {
       inFlightRuns.add(runId);
       if (!(await mayPost())) {
-        await status.edit(REFUSED_STREAM_TEXT);
+        await status.edit(REFUSED_STREAM_TEXT).catch(swallowAs("discord: refusal edit", undefined));
+        if (input.onSettled) await settle((await core.waitRun(runId)) ?? { status: "failed" });
         return;
       }
       await core.reportRunEditRef(runId, status.id);
@@ -163,6 +174,7 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
     const { result, stoppedByGate } = runId
       ? await streamRun(core, runId, status, streamIntervalMs, mayPost)
       : { result: queued, stoppedByGate: false };
+    await settle(result ?? { status: "failed" });
     if (stoppedByGate) return;
     if (!(await mayPost())) {
       await status.edit(REFUSED_STREAM_TEXT);
@@ -172,6 +184,7 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
     if (runId) await core.ackRunDelivery(runId);
   } catch (err) {
     swallowAs("discord: turn failed", undefined)(err);
+    if (submitted) await settle({ status: "failed" });
     await status.edit(FAILURE_TEXT).catch(swallowAs("discord: failure edit", undefined));
   } finally {
     if (runId) inFlightRuns.delete(runId);
@@ -179,22 +192,27 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
 }
 
 async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<void> {
-  const { core, channel, body } = input;
+  const { core, channel, body, mayPost } = input;
   const keepTyping = () => void channel.typing().catch(swallowAs("discord: typing", undefined));
   keepTyping();
   const timer = setInterval(keepTyping, TYPING_REFRESH_MS);
   try {
     const queued = await core.submitTurn({ async: true, ...body });
-    if (queued.status !== "refused" && queued.status !== "failed" && input.onAccepted) {
-      await input.onAccepted().catch(swallowAs("discord: onAccepted", undefined));
-    }
     if (queued.steered) return;
     const result = queued.status === "queued" && queued.runId ? await core.waitRun(queued.runId) : queued;
-    if (result?.status === "refused") await channel.send(refusalText(result.reason));
-    else if (result?.status === "pending_approval") await channel.send(approvalText(result));
+    if (result?.status === "refused") {
+      const allowed = result.reason === GUEST_REFUSAL || (await mayPost());
+      await channel.send(allowed ? refusalText(result.reason) : REFUSED_STREAM_TEXT);
+    } else if (result?.status === "pending_approval") {
+      const allowed = await mayPost();
+      await channel.send(allowed ? approvalText(result) : REFUSED_STREAM_TEXT);
+    }
   } catch (err) {
     swallowAs("discord: spine turn failed", undefined)(err);
-    await channel.send(FAILURE_TEXT).catch(swallowAs("discord: failure post", undefined));
+    const allowed = await mayPost().catch(() => false);
+    await channel
+      .send(allowed ? FAILURE_TEXT : REFUSED_STREAM_TEXT)
+      .catch(swallowAs("discord: failure post", undefined));
   } finally {
     clearInterval(timer);
   }

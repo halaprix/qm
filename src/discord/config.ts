@@ -21,11 +21,19 @@ function idList(raw: string | undefined): Set<string> {
 export function discordPluginConfigFromEnv(env: Record<string, string | undefined>): DiscordPluginConfig | null {
   const botToken = env.DISCORD_BOT_TOKEN?.trim();
   if (!botToken) return null;
+  const allowUserIds = idList(env.DISCORD_ALLOW_USER_IDS);
+  const guildIds = idList(env.DISCORD_GUILD_IDS);
+  const internalRoleIds = idList(env.DISCORD_INTERNAL_ROLE_IDS);
+  for (const roleId of internalRoleIds) {
+    if (guildIds.has(roleId)) {
+      throw new Error(`DISCORD_INTERNAL_ROLE_IDS cannot contain guild id: ${roleId}`);
+    }
+  }
   return {
     botToken,
-    allowUserIds: idList(env.DISCORD_ALLOW_USER_IDS),
-    guildIds: idList(env.DISCORD_GUILD_IDS),
-    internalRoleIds: idList(env.DISCORD_INTERNAL_ROLE_IDS),
+    allowUserIds,
+    guildIds,
+    internalRoleIds,
   };
 }
 

@@ -1,12 +1,13 @@
 import type { CoreTurnBody, SurfaceCoreClient } from "../api/surface-core-client.ts";
-import { approvalContinuation } from "../core/approval-continuation.ts";
+import { approvalContinuation, approvalDeniedReason } from "../core/approval-continuation.ts";
 import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
 import { samePerson } from "../directory/person.ts";
-import type { ActorAssertion, Delivery } from "../types.ts";
-import { errMessage } from "../util/errors.ts";
+import type { ActorAssertion, Delivery, TurnResult } from "../types.ts";
+import { errMessage, reportFailureAs } from "../util/errors.ts";
 import { APPROVAL_EXPIRED_TEXT, parseCardCustomId, type CardKind } from "./approval-cards.ts";
-import { DISCORD_SURFACE } from "./config.ts";
+import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, discordUserIdOf } from "./config.ts";
 import { audienceWith, type ReaderResult } from "./readers.ts";
+import { FAILURE_TEXT, refusalText } from "./turn-flow.ts";
 
 const ONLY_REQUESTER_TEXT = "Only the person who requested this command can approve or deny it.";
 const NOT_INTERNAL_TEXT = "Only people in the organization can decide this.";
@@ -15,6 +16,8 @@ const BUSY_TEXT = "Already working on that decision.";
 const READERS_UNKNOWN_CLICK_TEXT =
   "I can't confirm who can read that conversation right now. Try the button again in a minute.";
 const CONTINUE_FAILED_TEXT = "I couldn't continue that yet. The card is still active, so try again.";
+const RETRY_PENDING_TEXT = "The request is still pending; use the web link in the thread to retry.";
+const RETRY_GONE_TEXT = "The request is no longer pending.";
 const KEYCHAIN_DECISION = { once: "once", standing: "standing", deny: "deny" } as const;
 
 function keychainSettleText(view: KeychainApprovalView): string {
@@ -31,13 +34,19 @@ export interface ButtonClick {
   defer(): Promise<void>;
   refuse(content: string): Promise<void>;
   settle(content: string): Promise<void>;
+  settleFinal(content: string): Promise<void>;
 }
 
 export interface InteractionDeps {
-  core: Pick<SurfaceCoreClient, "getDelivery" | "getApproval" | "decideDeploymentAccess" | "keychainApprovals">;
+  core: Pick<SurfaceCoreClient, "getDelivery" | "getApproval" | "decideDeploymentAccess" | "keychainApprovals"> & {
+    discordUserIdsFor(principalId: string): string[];
+  };
   classifyUser(userId: string): Promise<ActorAssertion | null>;
   readersOf(baseChannelId: string): Promise<ReaderResult>;
-  continueTurn(body: CoreTurnBody, onAccepted: () => Promise<void>): Promise<void>;
+  continueTurn(
+    body: CoreTurnBody,
+    hooks: { onAccepted: () => Promise<void>; onSettled: (result: TurnResult) => Promise<void> },
+  ): Promise<void>;
 }
 
 function kindOf(d: Delivery): CardKind | null {
@@ -70,7 +79,20 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
       audience = audienceWith(readers.readers, actor);
     }
     const approved = action !== "deny";
+    const quoted = `\`${approval.command}\``;
     let accepted = false;
+    const finalText = async (result: TurnResult): Promise<string> => {
+      if (result.status === "failed") return FAILURE_TEXT;
+      if (result.status !== "refused") {
+        return approved ? `Approved (${action}): ${quoted}` : `Denied: ${quoted}`;
+      }
+      if (!approved && result.reason === approvalDeniedReason(approval.command)) return `Denied: ${quoted}`;
+      const pending = await deps.core.getApproval(approval.requestId).then(
+        (a) => a !== null,
+        () => true,
+      );
+      return `Not approved: ${refusalText(result.reason)} ${pending ? RETRY_PENDING_TEXT : RETRY_GONE_TEXT}`;
+    };
     await deps.continueTurn(
       {
         ...turn,
@@ -83,11 +105,17 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
           ...(approved ? { scope: action as "once" | "session" | "always" } : {}),
         },
       } as CoreTurnBody,
-      async () => {
-        accepted = true;
-        await click.settle(
-          approved ? `Approved (${action}): \`${approval.command}\`` : `Denied: \`${approval.command}\``,
-        );
+      {
+        onAccepted: async () => {
+          accepted = true;
+          await click.settle(`${approved ? "Approving" : "Denying"} ${quoted}…`);
+        },
+        onSettled: async (result) => {
+          if (!accepted) return;
+          await click
+            .settleFinal(await finalText(result))
+            .catch(reportFailureAs("discord: approval card final edit", undefined));
+        },
       },
     );
     if (!accepted) await click.refuse(CONTINUE_FAILED_TEXT);
@@ -102,6 +130,11 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
     if (actor.isExternalGuest) return click.refuse(NOT_INTERNAL_TEXT);
     const d = await deps.core.getDelivery(parsed.deliveryId);
     if (!d || kindOf(d) !== parsed.kind) return click.refuse(STALE_BUTTON_TEXT);
+    if (d.destination.type !== DISCORD_DM_DELIVERY_TYPE) return click.refuse(STALE_BUTTON_TEXT);
+    if (parsed.kind === "dep" && d.destination.copyOf) return click.refuse(STALE_BUTTON_TEXT);
+    const recipientUserId =
+      discordUserIdOf(d.destination.target) ?? deps.core.discordUserIdsFor(d.destination.target)[0] ?? null;
+    if (recipientUserId !== click.userId) return click.refuse(STALE_BUTTON_TEXT);
     const subject = `${parsed.kind}:${subjectOf(d)}`;
     if (busy.has(subject)) return click.refuse(BUSY_TEXT);
     busy.add(subject);

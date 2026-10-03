@@ -40,6 +40,21 @@ test("personal notices default to on", () => {
   assert.equal(parseDiscordSettings({ principalDeliveries: false }).principalDeliveries, false);
 });
 
+test("parseDiscordSettings rejects when internalRoleIds contains a guild id", () => {
+  assert.throws(
+    () =>
+      parseDiscordSettings({
+        guildIds: ["123456789012345678"],
+        internalRoleIds: ["123456789012345678"],
+      }),
+    (err: Error) => {
+      assert.ok(err instanceof DiscordInstallationError);
+      assert.equal(err.status, 400);
+      return true;
+    },
+  );
+});
+
 test("updating settings without a token keeps the stored token", async () => {
   const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });

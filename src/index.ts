@@ -152,6 +152,7 @@ if (built.backgroundOwnership) {
     taskArn: await backgroundTaskArn(process.env.ECS_CONTAINER_METADATA_URI_V4),
   };
   let periodicStop: Promise<void> = Promise.resolve();
+  let discordStop: Promise<void> = Promise.resolve();
   let activationEpoch = 0;
   const stopPeriodic = () => {
     activationEpoch++;
@@ -164,7 +165,7 @@ if (built.backgroundOwnership) {
       .catch((error) => console.error("[qm] background claim stop failed:", errMessage(error)));
     for (const runtime of [slackRuntime, ...slackAccountRuntimes])
       void runtime.stop().catch((error) => console.error("[qm] Slack background stop failed:", errMessage(error)));
-    void discordRuntime
+    discordStop = discordRuntime
       .stop()
       .catch((error) => console.error("[qm] Discord background stop failed:", errMessage(error)));
   };
@@ -201,7 +202,7 @@ if (built.backgroundOwnership) {
       ]);
     },
     async drained() {
-      await Promise.all([built.runtime.backgroundDrained(), built.scheduler.drained(), periodicStop]);
+      await Promise.all([built.runtime.backgroundDrained(), built.scheduler.drained(), periodicStop, discordStop]);
     },
     onError: reportFailureAs("background ownership", undefined),
   });

@@ -52,7 +52,7 @@ test("person-addressed notices keep the original principal row and enqueue a dis
   assert.equal(copy.destination.type, DISCORD_DM_DELIVERY_TYPE);
   assert.equal(copy.destination.target, "ana@acme.com");
   assert.equal(copy.destination.keychainAskId, "k1");
-  assert.equal(copy.destination.informational, true);
+  assert.equal(copy.destination.copyOf, result.id);
 
   assert.deepEqual(
     (await store.pending("slack")).map((d) => d.idempotencyKey),
@@ -189,7 +189,7 @@ test("deploy-access copy renders without components while keychain copy keeps bu
       type: DISCORD_DM_DELIVERY_TYPE,
       target: "ana@acme.com",
       deploymentAccess: { deploymentId: "dep-1", requesterId: "bob@acme.com" },
-      informational: true,
+      copyOf: "00000000-0000-0000-0000-000000000000",
     },
     text: "Deploy access requested for dep-1",
     idempotencyKey: "dep-copy",
@@ -207,7 +207,7 @@ test("deploy-access copy renders without components while keychain copy keeps bu
       type: DISCORD_DM_DELIVERY_TYPE,
       target: "ana@acme.com",
       keychainAskId: "ask-1",
-      informational: true,
+      copyOf: "00000000-0000-0000-0000-000000000000",
     },
     text: "Keychain ask",
     idempotencyKey: "key-copy",

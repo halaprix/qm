@@ -299,7 +299,14 @@ test("the in-process reply acks its run delivery only after it was delivered", a
 test("spine mode posts nothing itself when the agent spoke through deliveries", async () => {
   const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
   const c = { ...core({ wait: async () => ({ status: "silent" }) }) } as unknown as SurfaceCoreClient;
-  await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "spine", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.deepEqual(log.sent, []);
 });
 
@@ -313,10 +320,85 @@ test("spine mode posts a refusal, because core has nothing to deliver", async ()
       }),
     }),
   } as unknown as SurfaceCoreClient;
-  await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "spine", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.deepEqual(log.sent, [
     "I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM.",
   ]);
+});
+
+test("a guest appears before the spine refusal post → no reason or adminUrl text is posted", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const c = {
+    ...core({
+      submit: async () => ({
+        status: "refused",
+        reason: "secret reason that should not leak",
+        adminUrl: "https://qm/admin/private",
+      }),
+    }),
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  });
+  assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
+  assert.equal(
+    log.sent.some((s) => s.includes("secret reason") || s.includes("admin/private")),
+    false,
+  );
+});
+
+test("a guest appears before the spine approval post → the approval text and adminUrl are not posted", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const c = {
+    ...core({
+      submit: async () => ({
+        status: "pending_approval",
+        adminUrl: "https://qm/admin/private",
+        pendingApprovals: [{ requestId: "A1", command: "rm", reason: "needs approval" }],
+      }),
+    }),
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  });
+  assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
+});
+
+test("a guest appears before the spine failure post → the neutral text is posted", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const c = {
+    ...core({
+      submit: async () => {
+        throw new Error("down");
+      },
+    }),
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  });
+  assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
 });
 
 test("a turn waiting on an approval points to the DM buttons and keeps the web link", async () => {
@@ -357,17 +439,28 @@ test("spine mode posts the same approval pointer in the thread", async () => {
       }),
     }),
   } as unknown as SurfaceCoreClient;
-  await runDiscordTurn({ core: c, channel: channel(log), body: baseBody, mode: "spine", inFlightRuns: new Set() });
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "spine",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
   assert.deepEqual(log.sent, [
     "This needs your approval — I sent you the buttons in a direct message. If they don't arrive, approve it in the QM web app: https://qm/x",
   ]);
 });
 
-test("onAccepted runs once core accepts the turn, and never on a refusal or a submit failure", async () => {
+test("onSettled receives the run's final result once, and is never called on a submit failure", async () => {
   const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
-  const calls: string[] = [];
+  const calls: Array<[string, string]> = [];
   const base = { reportRunEditRef: async () => {}, ackRunDelivery: async () => {} };
   const accepted = { ...core({}), ...base } as unknown as SurfaceCoreClient;
+  const refusedAfterQueue = {
+    ...core({ wait: async () => ({ status: "refused", reason: "nope" }) }),
+    ...base,
+  } as unknown as SurfaceCoreClient;
   const refused = {
     ...core({ submit: async () => ({ status: "refused", reason: "nope" }) }),
     ...base,
@@ -382,6 +475,7 @@ test("onAccepted runs once core accepts the turn, and never on a refusal or a su
   } as unknown as SurfaceCoreClient;
   for (const [name, c] of [
     ["accepted", accepted],
+    ["refusedAfterQueue", refusedAfterQueue],
     ["refused", refused],
     ["broken", broken],
   ] as const)
@@ -392,9 +486,150 @@ test("onAccepted runs once core accepts the turn, and never on a refusal or a su
       mode: "stream",
       inFlightRuns: new Set(),
       mayPost: allowAll,
-      onAccepted: async () => void calls.push(name),
+      onSettled: async (r) => void calls.push([name, r.status]),
     });
-  assert.deepEqual(calls, ["accepted"]);
+  assert.deepEqual(calls, [
+    ["accepted", "ok"],
+    ["refusedAfterQueue", "refused"],
+    ["refused", "refused"],
+  ]);
+});
+
+test("onAccepted runs once core queues the turn, before the result, and not on a refusal or failure", async () => {
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const calls: string[] = [];
+  const mk = (c: SurfaceCoreClient, name: string) =>
+    runDiscordTurn({
+      core: c,
+      channel: channel(log),
+      body: baseBody,
+      mode: "stream",
+      inFlightRuns: new Set(),
+      mayPost: allowAll,
+      onAccepted: async () => void calls.push(`${name}:accepted`),
+      onSettled: async (r) => void calls.push(`${name}:${r.status}`),
+    });
+  await mk(core({}), "queued");
+  await mk(core({ submit: async () => ({ status: "refused", reason: "no" }) }), "refused");
+  assert.deepEqual(calls, ["queued:accepted", "queued:ok", "refused:refused"]);
+});
+
+test("a guest-gate stop mid-run still settles with the run result and posts nothing to the channel", async () => {
+  const log = fresh();
+  const settled: string[] = [];
+  let calls = 0;
+  const c = core({
+    wait: () =>
+      new Promise<TurnResult>((r) => setTimeout(() => r({ status: "refused", reason: "approval denied for x" }), 80)),
+    snapshots: ["safe snapshot", "leaked after guest"],
+  });
+  await runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    streamIntervalMs: 10,
+    mayPost: async () => {
+      calls += 1;
+      return calls <= 2;
+    },
+    onSettled: async (r) => void settled.push(`${r.status}:${r.reason}`),
+  });
+  assert.deepEqual(settled, ["refused:approval denied for x"]);
+  assert.deepEqual(log.sent, ["⚙ Working…"]);
+  assert.ok(!log.edits.includes("leaked after guest"));
+  assert.equal(log.edits.at(-1), "I can't post this reply here right now.");
+});
+
+test("waitRun rejecting after acceptance settles with failed and posts the failure text", async () => {
+  const log = fresh();
+  const events: string[] = [];
+  await runDiscordTurn({
+    core: core({
+      wait: async () => {
+        throw new Error("run lost");
+      },
+    }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+    onAccepted: async () => void events.push("accepted"),
+    onSettled: async (r) => void events.push(r.status),
+  });
+  assert.deepEqual(events, ["accepted", "failed"]);
+  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
+});
+
+test("a throwing refusal edit on the pre-stream gate still settles with the real run result", async () => {
+  const settled: string[] = [];
+  const inFlight = new Set<string>();
+  let heldDuringWait = false;
+  const ch: ReplyChannel = {
+    async send(): Promise<StatusMessage> {
+      return {
+        id: "s1",
+        edit: async () => {
+          throw new Error("message deleted");
+        },
+        delete: async () => {},
+      };
+    },
+    typing: async () => {},
+  };
+  await runDiscordTurn({
+    core: core({
+      wait: async () => {
+        heldDuringWait = inFlight.has("r1");
+        return { status: "refused", reason: "approval denied for x" };
+      },
+    }),
+    channel: ch,
+    body,
+    mode: "stream",
+    inFlightRuns: inFlight,
+    mayPost: async () => false,
+    onSettled: async (r) => void settled.push(`${r.status}:${r.reason}`),
+  });
+  assert.deepEqual(settled, ["refused:approval denied for x"]);
+  assert.equal(heldDuringWait, true);
+});
+
+test("a plain turn whose gate refuses before streaming does not wait for the run", async () => {
+  const log = fresh();
+  let waited = false;
+  await runDiscordTurn({
+    core: core({
+      wait: async () => {
+        waited = true;
+        return { status: "ok", reply: "x" };
+      },
+    }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+  });
+  assert.equal(waited, false);
+});
+
+test("a gate that refuses before streaming still settles with the run result", async () => {
+  const log = fresh();
+  const settled: string[] = [];
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "ok", reply: "secret" }) }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: async () => false,
+    onSettled: async (r) => void settled.push(r.status),
+  });
+  assert.deepEqual(settled, ["ok"]);
+  assert.ok(!log.edits.includes("secret"));
 });
 
 test("a guest reader appearing mid-stream stops streaming and replaces status with refusal", async () => {
@@ -468,7 +703,7 @@ test("a DM stream with always-allowing gate is unaffected", async () => {
   assert.equal(log.edits.at(-1), "dm reply");
 });
 
-test("a throw from onAccepted logs the failure, reports the edit ref, and continues the stream", async () => {
+test("a throw from onSettled logs the failure, reports the edit ref, and continues the stream", async () => {
   const log = fresh();
   let reportedRef = false;
   const c = {
@@ -484,7 +719,7 @@ test("a throw from onAccepted logs the failure, reports the edit ref, and contin
     mode: "stream",
     inFlightRuns: new Set(),
     mayPost: async () => true,
-    onAccepted: async () => {
+    onSettled: async () => {
       throw new Error("settle failed");
     },
   } as never);

@@ -203,7 +203,9 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
       const limit = Math.max(1, opts?.limit ?? 20);
       return [...deliveries.values()]
         .filter(
-          (d) => d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef,
+          (d) =>
+            !d.destination.copyOf &&
+            (d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef),
         )
         .sort((a, b) => a.createdAt - b.createdAt)
         .slice(-limit);
@@ -213,7 +215,7 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
       const byId = new Set(sources.map((s) => s.sessionId));
       const byThreadRef = new Map(sources.map((s) => [s.threadRef, s.sessionId]));
       for (const d of deliveries.values()) {
-        if (d.shadow || d.expiredAt !== undefined || !d.provenance) continue;
+        if (d.shadow || d.expiredAt !== undefined || !d.provenance || d.destination.copyOf) continue;
         let id: string | undefined;
         if (d.provenance.sourceSessionId) {
           if (byId.has(d.provenance.sourceSessionId)) id = d.provenance.sourceSessionId;

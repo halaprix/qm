@@ -1,3 +1,4 @@
+import { approvalDeniedReason } from "./approval-continuation.ts";
 import { isBackendCredential } from "../credentials/keychain.ts";
 import { memoryRecallDelta } from "../memory/recall-delta.ts";
 import { requiresDelegation, delegatedAuthorizationOrigin } from "../sessions/session-syscalls.ts";
@@ -2023,7 +2024,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             return {
               status: "refused",
               sessionId: session.id,
-              reason: `approval denied for ${p.command}`,
+              reason: approvalDeniedReason(p.command),
             };
           } else {
             const scope = input.approval.scope ?? "once";

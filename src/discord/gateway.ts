@@ -12,14 +12,25 @@ import type { DiscordHistoryReader, HistoryMessage } from "./context.ts";
 import type { ChannelKind } from "./deliveries.ts";
 import type { DiscordInbound } from "./events.ts";
 import type { MemberHydrator } from "./member-hydrator.ts";
-import { classifyMember, mergeMemberships, type DiscordMemberFacts, type LinkedInternal } from "./members.ts";
+import {
+  classifyMember,
+  type CoreStatusOf,
+  mergeMemberships,
+  type DiscordMemberFacts,
+  type LinkedInternal,
+} from "./members.ts";
 import type { ChannelViewers } from "./readers.ts";
 import type { StakeMessage } from "./thread-stake.ts";
 
 const STAKE_HISTORY_LIMIT = 100;
 
 export function memberFacts(m: GuildMember): DiscordMemberFacts {
-  return { userId: m.id, displayName: m.displayName, roleIds: [...m.roles.cache.keys()], isBot: m.user.bot };
+  return {
+    userId: m.id,
+    displayName: m.displayName,
+    roleIds: [...m.roles.cache.keys()].filter((id) => id !== m.guild.id),
+    isBot: m.user.bot,
+  };
 }
 
 function cachedBase(client: Client, channelId: string) {
@@ -59,6 +70,7 @@ export function createMergedClassify(deps: {
   client: Client;
   cfg: DiscordPluginConfig;
   linkedInternal: LinkedInternal;
+  coreStatus: CoreStatusOf;
 }): (userId: string, fallbackName: string) => Promise<ActorAssertion> {
   return async (userId, fallbackName) => {
     const memberships = [...deps.cfg.guildIds]
@@ -66,7 +78,12 @@ export function createMergedClassify(deps: {
       .filter((m): m is GuildMember => m !== undefined)
       .map(memberFacts);
     const displayName = memberships.map((m) => m.displayName).sort()[0] ?? fallbackName;
-    return classifyMember(mergeMemberships(userId, displayName, memberships), deps.cfg, deps.linkedInternal);
+    return classifyMember(
+      mergeMemberships(userId, displayName, memberships),
+      deps.cfg,
+      deps.linkedInternal,
+      deps.coreStatus,
+    );
   };
 }
 
@@ -75,6 +92,7 @@ export function createUserClassifier(deps: {
   cfg: DiscordPluginConfig;
   hydrator: Pick<MemberHydrator, "allReady">;
   linkedInternal: LinkedInternal;
+  coreStatus: CoreStatusOf;
 }): (userId: string, fallbackName: string) => Promise<ActorAssertion | null> {
   const merged = createMergedClassify(deps);
   return async (userId, fallbackName) => {

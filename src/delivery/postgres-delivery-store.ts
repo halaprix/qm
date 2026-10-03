@@ -248,7 +248,8 @@ export function createPostgresDeliveryStore(connectionString: string, opts?: { m
       const limit = Math.max(1, opts?.limit ?? 20);
       const rows = await q(
         `SELECT * FROM deliveries
-          WHERE provenance->>'sourceSessionId' = $1 OR provenance->>'sourceThreadRef' = $2
+          WHERE (provenance->>'sourceSessionId' = $1 OR provenance->>'sourceThreadRef' = $2)
+            AND destination->>'copyOf' IS NULL
           ORDER BY created_at DESC
           LIMIT $3`,
         [sourceSessionId, sourceThreadRef, limit],
@@ -264,7 +265,7 @@ export function createPostgresDeliveryStore(connectionString: string, opts?: { m
                 provenance->>'sourceThreadRef' AS thread_ref,
                 COUNT(*)::int AS sent
            FROM deliveries
-          WHERE NOT shadow AND expired_at IS NULL
+          WHERE NOT shadow AND expired_at IS NULL AND destination->>'copyOf' IS NULL
             AND (provenance->>'sourceSessionId' = ANY($1)
               OR (provenance->>'sourceSessionId' IS NULL AND provenance->>'sourceThreadRef' = ANY($2)))
           GROUP BY 1, 2`,

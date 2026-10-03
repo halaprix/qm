@@ -24,7 +24,7 @@ export function withPrincipalRouting(store: DeliveryStore, route: PrincipalRoute
         if (type) {
           await store.enqueue({
             ...input,
-            destination: { ...input.destination, type, informational: true },
+            destination: { ...input.destination, type, copyOf: original.id },
             idempotencyKey: `${input.idempotencyKey}:discord-dm`,
           });
         }

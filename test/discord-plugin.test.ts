@@ -19,6 +19,7 @@ function fakeCore(): DiscordCoreClient {
     waitRun: async () => ({ status: "ok", reply: "done" }),
     streamSnapshot: () => null,
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     discordUserIdsFor: () => [],
     reportRunEditRef: async () => {},
     ackRunDelivery: async () => {},
@@ -536,6 +537,7 @@ function guildHarness(opts: {
     displayName: `u${id}`,
     user: { id, bot, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+    guild: { id: "900" },
   });
   const cache = new Map(opts.viewers.map((v) => [v.id, member(v.id, v.roles, v.bot)]));
   const guild = {
@@ -631,6 +633,7 @@ function guildHarness(opts: {
       return { status: "silent" };
     },
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     ingestSurfaceEvents: async (events: unknown[]) => {
       ingested.push(events);
     },
@@ -1079,6 +1082,7 @@ test("a member removed from the guild between hydrations is dropped from the cac
     displayName: `u${id}`,
     user: { id, bot: false, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+    guild: { id: "900" },
   });
   const membersCache = new Map([
     ["111", member("111", ["staff"])],
@@ -1106,6 +1110,7 @@ test("a member removed from the guild between hydrations is dropped from the cac
       return { status: "silent" };
     },
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1179,6 +1184,7 @@ test("a member added to the cache while the fetch is pending is still cached aft
     displayName: `u${id}`,
     user: { id, bot: false, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+    guild: { id: "900" },
   });
   const membersCache = new Map([["111", member("111", ["staff"])]]);
   const guild = {
@@ -1205,6 +1211,7 @@ test("a member added to the cache while the fetch is pending is still cached aft
       return { status: "silent" };
     },
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1273,6 +1280,7 @@ test("a rejected fetch prunes nothing", async () => {
     displayName: `u${id}`,
     user: { id, bot: false, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+    guild: { id: "900" },
   });
   const membersCache = new Map([["111", member("111", ["staff"])]]);
   const guild = {
@@ -1288,6 +1296,7 @@ test("a rejected fetch prunes nothing", async () => {
   const core = {
     ...fakeCore(),
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1342,6 +1351,7 @@ test("a run in flight from a stopping connection is not delivered by the next co
     waitRun: () => waitRunPromise,
     reportRunEditRef: async () => {},
     linkedInternal: async () => false,
+    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1451,6 +1461,7 @@ function continuationHarness(opts: { members: Array<{ id: string; roles: string[
     displayName: `u${id}`,
     user: { id, bot: false, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+    guild: { id: "900" },
   });
   const membersCache = new Map(opts.members.map((m) => [m.id, member(m.id, m.roles)]));
   const guild = {

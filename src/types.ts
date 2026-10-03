@@ -222,7 +222,7 @@ export interface Destination {
   identity?: string;
   debugFooter?: string;
   webTranscript?: { kind: "reply" } | { kind: "turn_failure"; notBefore: number; runId?: string };
-  informational?: boolean;
+  copyOf?: string;
 }
 
 export interface CandidateDestination extends Destination {

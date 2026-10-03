@@ -4,7 +4,7 @@ import { orgId } from "../../config.ts";
 import { canonicalPerson, foldPrincipalId, personIds, samePerson } from "../../directory/person.ts";
 import { discordExternalId, discordUserIdOf } from "../../discord/config.ts";
 import { PrincipalLinkError } from "../../identity/principal-links.ts";
-import { discordLinkRedirectUri } from "../../surfaces/discord-installation.ts";
+import { DISCORD_API, discordLinkRedirectUri, SNOWFLAKE } from "../../surfaces/discord-installation.ts";
 import { scopeId } from "../../types.ts";
 import { sendJson } from "../http.ts";
 import type { ApiCtx, Route } from "./route.ts";
@@ -20,8 +20,6 @@ export const DISCORD_LINK_STATE_TTL_MS = 10 * 60_000;
 const DISCORD_OAUTH_TIMEOUT_MS = 10_000;
 const LINK_PURPOSE = "discord-account-link";
 const DISCORD_AUTHORIZE = "https://discord.com/oauth2/authorize";
-const DISCORD_API = "https://discord.com/api/v10";
-const SNOWFLAKE = /^\d{17,20}$/;
 const NONCE_HASH = /^[0-9a-f]{64}$/;
 
 async function linkingPrincipal(ctx: ApiCtx): Promise<string | null> {

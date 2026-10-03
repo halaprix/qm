@@ -72,6 +72,24 @@ export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void>
     [sourced.id],
     "source-session delivery events are queryable",
   );
+  await store.enqueue({
+    destination: { type: DISCORD_DM_DELIVERY_TYPE, target: "U-alice", copyOf: sourced.id },
+    text: "from source session (copy)",
+    idempotencyKey: "cron:c1:slot:discord-dm",
+    provenance: {
+      trigger: "cron",
+      surface: "cron",
+      fireKey: "cron:c1:slot",
+      sourceScopeId: "personal:U-carol",
+      sourceThreadRef: "agent:main:cron:c1",
+      sourceSessionId: "source-session",
+    },
+  });
+  assert.deepEqual(
+    (await store.listBySourceSession("source-session", "agent:main:cron:c1")).map((e) => e.id),
+    [sourced.id],
+    "copy deliveries are excluded from source-session listing",
+  );
   assert.deepEqual(
     (await store.listBySourceSession("missing", "agent:main:cron:c1")).map((e) => e.id),
     [sourced.id],

@@ -9,11 +9,12 @@ import {
   toInbound,
 } from "../src/discord/gateway.ts";
 
-const member = (id: string, roles: string[], bot = false) => ({
+const member = (id: string, roles: string[], bot = false, guildId = "900") => ({
   id,
   displayName: `u${id}`,
   user: { id, bot, globalName: null, username: `u${id}` },
   roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
+  guild: { id: guildId },
 });
 
 const guild = (id: string, members: Array<ReturnType<typeof member>>) => ({
@@ -28,14 +29,24 @@ const cfg = {
   internalRoleIds: new Set(["staff"]),
 };
 
-function classifier(allReady: boolean, guilds: Array<ReturnType<typeof guild>>) {
+function classifier(
+  allReady: boolean,
+  guilds: Array<ReturnType<typeof guild>>,
+  notInternal: (id: string) => boolean = () => false,
+) {
   return createUserClassifier({
     client: { guilds: { cache: new Map(guilds.map((g) => [g.id, g])) } } as never,
     cfg,
     hydrator: { allReady: () => allReady },
     linkedInternal: async (id) => id === "3",
+    coreStatus: async (id) => ({ notInternal: notInternal(id), overrideInternal: false }),
   });
 }
+
+test("a deactivated member with staff role is classified as a guest", async () => {
+  const c = classifier(true, [guild("900", [member("2", ["staff"])])], (id) => id === "2");
+  assert.equal((await c("2", "two"))!.isExternalGuest, true);
+});
 
 test("a staff role in any configured guild makes a DM user internal, regardless of guild order", async () => {
   const a = classifier(true, [guild("900", [member("2", [])]), guild("901", [member("2", ["staff"])])]);
@@ -65,6 +76,12 @@ test("memberFacts extracts facts from a guild member", () => {
     roleIds: ["r1", "r2"],
     isBot: false,
   });
+});
+
+test("memberFacts excludes the role whose id equals the member guild id", () => {
+  const m = member("10", ["r1", "900", "r2"], false, "900");
+  const facts = memberFacts(m as never);
+  assert.deepEqual(facts.roleIds, ["r1", "r2"]);
 });
 
 test("cachedViewers returns not_a_guild_channel when channel is not in cache", () => {

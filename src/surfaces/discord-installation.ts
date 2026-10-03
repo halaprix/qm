@@ -4,8 +4,8 @@ import { discordPluginConfigFromEnv, type DiscordPluginConfig } from "../discord
 import type { ReloadableSurfaceConfig } from "./surface-runtime.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 
-const DISCORD_API = "https://discord.com/api/v10";
-const SNOWFLAKE = /^\d{17,20}$/;
+export const DISCORD_API = "https://discord.com/api/v10";
+export const SNOWFLAKE = /^\d{17,20}$/;
 const MAX_IDS = 500;
 const DISCORD_API_TIMEOUT_MS = 10_000;
 
@@ -126,10 +126,17 @@ export function parseDiscordSettings(
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   const botToken = secretFrom(b.botToken);
   const oauthClientSecret = secretFrom(b.oauthClientSecret);
+  const allowUserIds = idsFrom(b.allowUserIds, "allowUserIds");
+  const guildIds = idsFrom(b.guildIds, "guildIds");
+  const internalRoleIds = idsFrom(b.internalRoleIds, "internalRoleIds");
+  const guildSet = new Set(guildIds);
+  if (internalRoleIds.some((id) => guildSet.has(id))) {
+    throw new DiscordInstallationError(400, "internalRoleIds cannot contain guild ids");
+  }
   return {
-    allowUserIds: idsFrom(b.allowUserIds, "allowUserIds"),
-    guildIds: idsFrom(b.guildIds, "guildIds"),
-    internalRoleIds: idsFrom(b.internalRoleIds, "internalRoleIds"),
+    allowUserIds,
+    guildIds,
+    internalRoleIds,
     principalDeliveries: b.principalDeliveries !== false,
     ...(botToken ? { botToken } : {}),
     ...(oauthClientSecret ? { oauthClientSecret } : {}),

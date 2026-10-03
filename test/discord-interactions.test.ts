@@ -29,9 +29,13 @@ function harness(opts: {
   hasGuestReader?: boolean;
   slowContinue?: Promise<void>;
   submitFails?: boolean | (() => boolean);
+  submitResult?: unknown;
+  finalEditFails?: boolean;
+  approvalGoneAfterFirstRead?: boolean;
 }) {
   const log: string[] = [];
   const continued: Array<Record<string, unknown>> = [];
+  let approvalReads = 0;
   const handler = createInteractionHandler({
     core: {
       getDelivery: async (id: string) => {
@@ -40,9 +44,13 @@ function harness(opts: {
           ? ({ id, destination: { type: "discord-dm", target: "discord:111", ...opts.destination } } as Delivery)
           : null;
       },
-      getApproval: async () =>
-        opts.approval === undefined ? { requestId: "A1", command: "rm", request } : opts.approval,
+      getApproval: async () => {
+        approvalReads += 1;
+        if (opts.approvalGoneAfterFirstRead && approvalReads > 1) return null;
+        return opts.approval === undefined ? { requestId: "A1", command: "rm", request } : opts.approval;
+      },
       decideDeploymentAccess: async (_v: string, _a: unknown, approve: boolean) => (approve ? "Granted" : "Declined"),
+      discordUserIdsFor: () => [],
       ...(opts.omitKeychainApprovals
         ? {}
         : {
@@ -75,14 +83,15 @@ function harness(opts: {
         };
       return { ok: true, readers: [{ externalId: "discord:111" }, { externalId: "discord:112" }] };
     },
-    continueTurn: async (body, onAccepted) => {
+    continueTurn: async (body, hooks) => {
       continued.push(body as Record<string, unknown>);
       const aud = (body as { conversation?: { audience?: Array<{ isExternalGuest?: boolean }> } }).conversation
         ?.audience;
       if (aud?.some((a) => a.isExternalGuest)) return;
       const fails = typeof opts.submitFails === "function" ? opts.submitFails() : opts.submitFails;
       if (fails) return;
-      await onAccepted();
+      await hooks.onAccepted();
+      await hooks.onSettled((opts.submitResult ?? { status: "ok" }) as never);
       await opts.slowContinue;
     },
   });
@@ -92,6 +101,10 @@ function harness(opts: {
     defer: async () => void log.push("defer"),
     refuse: async (c) => void log.push(`refuse:${c}`),
     settle: async (c) => void log.push(`settle:${c}`),
+    settleFinal: async (c) => {
+      if (opts.finalEditFails) throw new Error("edit failed");
+      log.push(`final:${c}`);
+    },
   });
   return { handler, click, log, continued };
 }
@@ -103,7 +116,7 @@ test("the click is deferred before any core call", async () => {
 });
 
 test("a click by a non-requester is refused ephemerally and submits nothing", async () => {
-  const h = harness({ destination: { commandApprovalId: "A1" } });
+  const h = harness({ destination: { commandApprovalId: "A1", target: "discord:112" } });
   await h.handler(h.click("112", cardCustomId("cmd", "always", DID)));
   assert.equal(h.log.at(-1), "refuse:Only the person who requested this command can approve or deny it.");
   assert.deepEqual(h.continued, []);
@@ -112,7 +125,8 @@ test("a click by a non-requester is refused ephemerally and submits nothing", as
 test("the requester's click settles the card and continues the turn with fresh readers and an idempotency key", async () => {
   const h = harness({ destination: { commandApprovalId: "A1" } });
   await h.handler(h.click("111", cardCustomId("cmd", "session", DID)));
-  assert.ok(h.log.some((l) => l.startsWith("settle:")));
+  assert.ok(h.log.includes("settle:Approving `rm`…"));
+  assert.ok(h.log.includes("final:Approved (session): `rm`"));
   const body = h.continued[0] as {
     approval: unknown;
     conversation: { audience: unknown[] };
@@ -148,13 +162,13 @@ test("a continuation that core does not accept leaves the card actionable and sa
   const h = harness({ destination: { commandApprovalId: "A1" }, submitFails: () => submitFails });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
   assert.equal(
-    h.log.some((l) => l.startsWith("settle:")),
+    h.log.some((l) => l.startsWith("settle:") || l.startsWith("final:")),
     false,
   );
   assert.equal(h.log.at(-1), "refuse:I couldn't continue that yet. The card is still active, so try again.");
   submitFails = false;
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
-  assert.ok(h.log.some((l) => l.startsWith("settle:Approved")));
+  assert.ok(h.log.includes("final:Approved (once): `rm`"));
 });
 
 test("deny submits a denial with no scope", async () => {
@@ -187,7 +201,7 @@ test("a card whose base channel now has a guest reader leaves the card actionabl
   const h = harness({ destination: { commandApprovalId: "A1" }, hasGuestReader: true });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
   assert.equal(
-    h.log.some((l) => l.startsWith("settle:")),
+    h.log.some((l) => l.startsWith("settle:") || l.startsWith("final:")),
     false,
   );
   assert.equal(h.log.at(-1), "refuse:I couldn't continue that yet. The card is still active, so try again.");
@@ -206,7 +220,7 @@ test("an expired approval settles the card without a turn", async () => {
 
 test("keychain decision by a non-owner surfaces the core refusal", async () => {
   const h = harness({
-    destination: { keychainAskId: "k1" },
+    destination: { keychainAskId: "k1", target: "discord:112" },
     keychainError: new Error("Only the credential owner can decide this request."),
   });
   await h.handler(h.click("112", cardCustomId("key", "once", DID)));
@@ -276,4 +290,112 @@ test("unreadable channel final failure refuses locally without continuing turn",
     "refuse:I can't confirm who can read that conversation right now. Try the button again in a minute.",
   );
   assert.deepEqual(h.continued, []);
+});
+
+test("a continuation refused by core settles the final card as Not approved, never Approved", async () => {
+  const h = harness({
+    destination: { commandApprovalId: "A1" },
+    submitResult: {
+      status: "refused",
+      reason: "internal-only: shared audience includes a non-internal participant",
+    },
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.equal(
+    h.log.some((l) => l.includes("Approved")),
+    false,
+  );
+  assert.ok(
+    h.log.includes(
+      "final:Not approved: I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM. The request is still pending; use the web link in the thread to retry.",
+    ),
+  );
+});
+
+test("a refusal after the approval record is gone says it is no longer pending", async () => {
+  const h = harness({
+    destination: { commandApprovalId: "A1" },
+    approval: { requestId: "A1", command: "x", request },
+    submitResult: { status: "refused", reason: "nope" },
+    approvalGoneAfterFirstRead: true,
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.ok(h.log.includes("final:Not approved: I can't do that: nope The request is no longer pending."));
+});
+
+test("a deny click whose result is refused with approval denied shows Denied", async () => {
+  const h = harness({
+    destination: { commandApprovalId: "A1" },
+    approval: { requestId: "A1", command: "x", request },
+    submitResult: { status: "refused", reason: "approval denied for x" },
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "deny", DID)));
+  assert.ok(h.log.includes("settle:Denying `x`…"));
+  assert.ok(h.log.includes("final:Denied: `x`"));
+});
+
+test("an approve click refused with approval denied text is not shown as Denied or Approved", async () => {
+  const h = harness({
+    destination: { commandApprovalId: "A1" },
+    submitResult: { status: "refused", reason: "approval denied for rm" },
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.equal(
+    h.log.some((l) => l.startsWith("final:Approved") || l.startsWith("final:Denied")),
+    false,
+  );
+});
+
+test("a failed run shows the failure text on the final card", async () => {
+  const h = harness({ destination: { commandApprovalId: "A1" }, submitResult: { status: "failed" } });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.ok(h.log.includes("final:Something went wrong on my side and I couldn't finish that. Please try again."));
+});
+
+test("a failing final edit never throws into the click handler", async () => {
+  const h = harness({ destination: { commandApprovalId: "A1" }, finalEditFails: true });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.ok(h.log.includes("settle:Approving `rm`…"));
+  assert.equal(
+    h.log.some((l) => l.startsWith("refuse:")),
+    false,
+  );
+});
+
+test("a keychain copy click by the recipient decides the ask", async () => {
+  const h = harness({
+    destination: { keychainAskId: "k1", copyOf: "orig-1" },
+    keychainView: {
+      ask: { id: "k1", status: "approved", requesterScopeId: "s" },
+      service: "github",
+      conversation: "#eng",
+      mode: "once",
+    },
+  });
+  await h.handler(h.click("111", cardCustomId("key", "once", DID)));
+  assert.equal(h.log.at(-1), "settle:Allowed once.");
+});
+
+test("a deploy-access copy refuses as a stale button even with a forged dep custom id", async () => {
+  const h = harness({
+    destination: { deploymentAccess: { deploymentId: "d", requesterId: "bob@acme.com" }, copyOf: "orig-1" },
+  });
+  await h.handler(h.click("111", cardCustomId("dep", "approve", DID)));
+  assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
+});
+
+test("a delivery whose type is not discord-dm refuses as a stale button", async () => {
+  const h = harness({
+    destination: { type: "discord", commandApprovalId: "A1" },
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
+});
+
+test("a clicker who is not the DM recipient refuses as a stale button", async () => {
+  const h = harness({
+    destination: { commandApprovalId: "A1", target: "discord:999" },
+  });
+  await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
+  assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
 });
