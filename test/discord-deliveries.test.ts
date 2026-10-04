@@ -224,7 +224,7 @@ test("lease loss mid-drain stops dispatching subsequent deliveries", async () =>
   assert.deepEqual(log, ["send:c1:hello:", "ack:d1"]);
 });
 
-function dmHarness(opts: { recipient: string | null; openDmFails?: boolean }) {
+function dmHarness(opts: { recipient: string | null; openDmFails?: boolean; destination?: Partial<Destination> }) {
   const log: string[] = [];
   const dispatcher = createDiscordDispatcher({
     core: {
@@ -233,7 +233,12 @@ function dmHarness(opts: { recipient: string | null; openDmFails?: boolean }) {
           ? [
               row({
                 id: "p1",
-                destination: { type: "discord-dm", target: "discord:111", commandApprovalId: "A1" },
+                destination: {
+                  type: "discord-dm",
+                  target: "discord:111",
+                  commandApprovalId: "A1",
+                  ...opts.destination,
+                },
                 text: "Approval needed: ls",
               }),
             ]
@@ -251,9 +256,11 @@ function dmHarness(opts: { recipient: string | null; openDmFails?: boolean }) {
         { id: "x" }
       ),
       openDm: async (userId: string) => {
+        log.push(`open:${userId}`);
         if (opts.openDmFails) throw Object.assign(new Error("Cannot send messages to this user"), { code: 50007 });
         return `dm-${userId}`;
       },
+      edit: async () => void log.push("edit"),
     } as never,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
@@ -266,13 +273,13 @@ function dmHarness(opts: { recipient: string | null; openDmFails?: boolean }) {
 test("a discord-dm card opens the recipient's DM and acks with the DM thread", async () => {
   const h = dmHarness({ recipient: "111" });
   await h.dispatcher.drain();
-  assert.deepEqual(h.log, ["send:dm-111:1", "ack:p1:discord:dm:dm-111"]);
+  assert.deepEqual(h.log, ["open:111", "send:dm-111:1", "ack:p1:discord:dm:dm-111"]);
 });
 
 test("a recipient with DMs closed is reported and dropped; the web link in the thread is the fallback", async () => {
   const h = dmHarness({ recipient: "111", openDmFails: true });
   await h.dispatcher.drain();
-  assert.deepEqual(h.log, ["undeliverable:p1:recipient does not accept DMs from the bot", "ack:p1:"]);
+  assert.deepEqual(h.log, ["open:111", "undeliverable:p1:recipient does not accept DMs from the bot", "ack:p1:"]);
 });
 
 test("a discord-dm row with no Discord recipient is reported and dropped", async () => {
@@ -296,4 +303,10 @@ test("delivery guard refuses DM recipient who is deactivated (guest) and allows 
 
   const normVerdict = await guard.mayPost("dm-norm");
   assert.deepEqual(normVerdict, { ok: true });
+});
+
+test("a keychain resolution row is acked without opening a DM or sending anything", async () => {
+  const h = dmHarness({ recipient: "111", destination: { keychainAskId: "k1", keychainResolution: true } });
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["ack:p1:"]);
 });

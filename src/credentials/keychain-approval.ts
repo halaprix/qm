@@ -3,8 +3,11 @@ import type { App } from "../api/app.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { SessionStore } from "../sessions/session-store.ts";
 import type { AuditLog } from "../audit/audit-log.ts";
-import type { ActorAssertion } from "../types.ts";
+import type { ActorAssertion, Destination } from "../types.ts";
+import type { DeliveryStore } from "../delivery/delivery-store.ts";
+import { principalDestination } from "../reach/reach.ts";
 import { samePerson } from "../directory/person.ts";
+import { surfaceCapabilities, surfaceForDeliveryType } from "../surfaces/surface-capabilities.ts";
 import { swallow } from "../util/errors.ts";
 
 export interface KeychainApprovalView {
@@ -13,6 +16,7 @@ export interface KeychainApprovalView {
   accountLabel?: string;
   conversation: string;
   sessionId?: string;
+  requesterSessionId?: string;
   seq?: number;
   slack?: { channel: string; ts: string };
   mode?: "once" | "standing";
@@ -20,7 +24,31 @@ export interface KeychainApprovalView {
 
 export interface KeychainApprovals {
   get(id: string, ownerId: string): Promise<KeychainApprovalView | null>;
+  card(id: string): Promise<KeychainApprovalView | null>;
   decide(id: string, actor: ActorAssertion, decision: "once" | "standing" | "deny"): Promise<KeychainApprovalView>;
+}
+
+// The card goes where the request came from: its Slack thread or channel, a cron's destination in
+// that same conversation, or inline in the owner's own web session (no delivery). Anything else,
+// including a destination outside the requesting conversation, falls back to the owner's DM.
+export function approvalCardDestination(ask: KeychainAsk): Destination | null {
+  const d = ask.requesterDestination;
+  const own = samePerson(ask.ownerId, ask.requesterId);
+  if (d?.type === "web" && own) return null;
+  const caps = d ? surfaceCapabilities(surfaceForDeliveryType(d.type)) : undefined;
+  if (caps && !caps.keychainCardInConversation && caps.approvalCardType)
+    return {
+      ...principalDestination(ask.ownerId, ask.requesterId),
+      type: caps.approvalCardType,
+      keychainAskId: ask.id,
+    };
+  if (
+    d?.type === "principal"
+      ? samePerson(d.target, ask.ownerId)
+      : d && d.type !== "web" && d.audienceScopeId === ask.requesterScopeId
+  )
+    return { ...d!, keychainAskId: ask.id };
+  return { ...principalDestination(ask.ownerId, ask.requesterId), keychainAskId: ask.id };
 }
 
 export function createKeychainApprovals(deps: {
@@ -29,6 +57,7 @@ export function createKeychainApprovals(deps: {
   identity: IdentityService;
   sessions: SessionStore;
   audit?: AuditLog;
+  deliveries?: Pick<DeliveryStore, "enqueue">;
   resume(ask: KeychainAsk, grant?: KeychainGrant): Promise<unknown>;
 }): KeychainApprovals {
   const { keychain, app, identity, sessions } = deps;
@@ -39,6 +68,7 @@ export function createKeychainApprovals(deps: {
     if (!credential) return null;
     const context = (await app.listContexts(ownerId)).find((c) => c.scopeId === ask.requesterScopeId);
     let session = ask.requesterThreadRef ? await sessions.getByThread(ask.requesterThreadRef) : null;
+    const requester = session && (await sessions.getForParticipant(session.id, ownerId));
     const seen = new Set<string>();
     while (session?.parentSessionId && !seen.has(session.id)) {
       seen.add(session.id);
@@ -62,6 +92,7 @@ export function createKeychainApprovals(deps: {
       ...(credential.accountLabel ? { accountLabel: credential.accountLabel } : {}),
       conversation: visible?.title || context?.name || "the requesting conversation",
       ...(visible ? { sessionId: visible.id } : {}),
+      ...(requester ? { requesterSessionId: requester.id } : {}),
       ...(ask.requesterSeq !== undefined && visible?.threadRef === ask.requesterThreadRef
         ? { seq: ask.requesterSeq }
         : {}),
@@ -71,6 +102,10 @@ export function createKeychainApprovals(deps: {
   }
   return {
     get,
+    async card(id) {
+      const ask = await keychain.getAsk(id);
+      return ask ? get(id, ask.ownerId) : null;
+    },
     async decide(id, assertion, decision) {
       await identity.refresh(true);
       const actor = identity.resolve(assertion);
@@ -88,18 +123,13 @@ export function createKeychainApprovals(deps: {
       let resolved: KeychainAsk;
       let grant: KeychainGrant | undefined;
       try {
-        if (decision === "deny")
-          resolved = await keychain.declineAsk({
-            askId: id,
-            ownerId: actor.id,
-            note: "Denied by the credential owner",
-          });
+        if (decision === "deny") resolved = await keychain.declineAsk({ askId: id, ownerId: actor.id, note: "Denied" });
         else
           ({ ask: resolved, grant } = await keychain.approveAsk({
             askId: id,
             ownerId: actor.id,
             mode: decision,
-            purpose: `${decision === "once" ? "Allow once" : "Allow always"}: ${ask.purpose}`,
+            purpose: ask.purpose,
           }));
       } catch (error) {
         if (!(error instanceof KeychainError) || error.status !== 410) throw error;
@@ -114,6 +144,15 @@ export function createKeychainApprovals(deps: {
         resource: `${id} (${ask.credentialId}→${ask.requesterScopeId})`,
         scopeLabel: ask.requesterScopeId,
       });
+      const destination = approvalCardDestination(resolved);
+      if (destination)
+        await deps.deliveries
+          ?.enqueue({
+            destination: { ...destination, keychainResolution: true },
+            text: "Credential request resolved.",
+            idempotencyKey: `ask:${id}:resolved`,
+          })
+          .catch((error) => swallow("keychain: sync approval card", error));
       void deps
         .resume(resolved, grant)
         .then(() => keychain.markAskNotified(id, resolved.status))

@@ -64,7 +64,16 @@ function commandCard(deliveryId: string, a: StoredApprovalView): OutboundMessage
   return card("cmd", actions, deliveryId, body);
 }
 
+export function keychainSettleText(view: KeychainApprovalView): string {
+  if (view.ask.status === "approved") {
+    return view.mode === "standing" ? "Always allowed." : "Allowed once.";
+  }
+  if (view.ask.status === "declined") return "Denied.";
+  return APPROVAL_EXPIRED_TEXT;
+}
+
 function keychainCard(deliveryId: string, v: KeychainApprovalView): OutboundMessage {
+  if (v.ask.status !== "pending") return { content: keychainSettleText(v) };
   const account = v.accountLabel ? ` (${v.accountLabel})` : "";
   return card(
     "key",

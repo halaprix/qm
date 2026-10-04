@@ -178,7 +178,7 @@ test("deploy-access copy renders without components while keychain copy keeps bu
         service: "aws",
         accountLabel: "prod",
         conversation: "dm",
-        askId,
+        ask: { id: askId, status: "pending" },
       }),
     } as never,
   });
@@ -481,4 +481,23 @@ test("recordPrincipalDelivery records recipient thread for discord-dm deliveries
   const threadDeliveries = await built.deliveries.listByRecipientThread("discord:dm:channel-99");
   assert.equal(threadDeliveries.length, 1);
   assert.equal(threadDeliveries[0]!.id, delivery.id);
+});
+
+test("a keychain resolution row gets no discord copy while the initial card still does", async () => {
+  const store = withPrincipalRouting(createDeliveryStore(), toDiscord);
+  const card = { ...principalDestination("ana@acme.com", "bob@acme.com"), keychainAskId: "k1" };
+  await store.enqueue({ destination: card, text: "ask", idempotencyKey: "ask:k1:notice" });
+  await store.enqueue({
+    destination: { ...card, keychainResolution: true },
+    text: "Credential request resolved.",
+    idempotencyKey: "ask:k1:resolved",
+  });
+  assert.deepEqual(
+    (await store.pending(DISCORD_DM_DELIVERY_TYPE)).map((d) => d.idempotencyKey),
+    ["ask:k1:notice:discord-dm"],
+  );
+  assert.deepEqual(
+    (await store.pending("principal")).map((d) => d.idempotencyKey),
+    ["ask:k1:notice", "ask:k1:resolved"],
+  );
 });

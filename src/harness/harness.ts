@@ -1,5 +1,5 @@
 import type { DocumentInput } from "../core/document-inputs.ts";
-import type { RuntimeControl, RuntimeHandoff } from "./runtime-types.ts";
+import type { RuntimeControl, HarnessHandoff } from "./runtime-types.ts";
 import type {
   AttachmentMeta,
   ClientToolDeclaration,
@@ -151,10 +151,11 @@ export interface HarnessTurnInput {
   onTextBlockStart?(phase?: "commentary" | "final_answer"): void | Promise<void>;
   onToolCallStart?(name: string): void;
   screenToolResult?(input: ToolResultScreenInput): Promise<ToolResultScreen>;
+  verifyGoal?: import("./goal.ts").GoalVerifier;
 }
 
 export interface HarnessTurnResult {
-  runtimeHandoff?: RuntimeHandoff;
+  runtimeHandoff?: HarnessHandoff;
   reply: string;
   silent?: boolean;
   stopped?: true;

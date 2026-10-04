@@ -8,6 +8,7 @@ export interface SurfaceCapabilities {
   deliveryTypes: readonly string[];
   coreAmbient: boolean;
   approvalCardType: string | null;
+  keychainCardInConversation: boolean;
   mentionHint: string;
   externalParticipantsAllowed(config: ScopedConfigStore | undefined): Promise<boolean>;
 }
@@ -18,6 +19,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     deliveryTypes: ["slack", "group", "principal"],
     coreAmbient: true,
     approvalCardType: "principal",
+    keychainCardInConversation: true,
     mentionHint:
       " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping.",
     externalParticipantsAllowed: async (config) =>
@@ -28,6 +30,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     deliveryTypes: [DISCORD_SURFACE, DISCORD_DM_DELIVERY_TYPE],
     coreAmbient: false,
     approvalCardType: DISCORD_DM_DELIVERY_TYPE,
+    keychainCardInConversation: false,
     mentionHint:
       " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with a Unicode emoji character, not a :name:.",
     externalParticipantsAllowed: async () => false,

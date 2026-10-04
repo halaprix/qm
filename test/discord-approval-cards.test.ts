@@ -63,7 +63,7 @@ test("deploy-access and keychain rows render their own buttons; plain rows rende
   const render = createCardRenderer({
     getApproval: async () => null,
     keychainApprovals: {
-      get: async () => ({ ask: { id: "k1" }, service: "github", conversation: "#eng" }),
+      get: async () => ({ ask: { id: "k1", status: "pending" }, service: "github", conversation: "#eng" }),
       decide: async () => {
         throw new Error("unused");
       },
@@ -82,4 +82,22 @@ test("deploy-access and keychain rows render their own buttons; plain rows rende
     ["Allow once", "Always allow", "Deny"],
   );
   assert.equal(await render(row({})), null);
+});
+
+test("a keychain ask that is no longer pending renders plain status text without buttons", async () => {
+  const view = (ask: object, mode?: string) => ({ ask, service: "github", conversation: "#eng", mode });
+  const views = [
+    [view({ id: "k1", status: "approved" }, "once"), "Allowed once."],
+    [view({ id: "k1", status: "approved" }, "standing"), "Always allowed."],
+    [view({ id: "k1", status: "declined" }), "Denied."],
+  ] as const;
+  for (const [v, text] of views) {
+    const render = createCardRenderer({
+      getApproval: async () => null,
+      keychainApprovals: { get: async () => v },
+    } as never);
+    const card = await render(row({ keychainAskId: "k1", target: "ana@acme.com" }));
+    assert.equal(card!.content, text);
+    assert.deepEqual(buttons(card), []);
+  }
 });

@@ -9,6 +9,11 @@ export function approvalDeliveryKey(id: string, record: Pick<PendingApprovalReco
   return `command-approval:${id}:${record.createdAt ?? 0}`;
 }
 
+export function approvalDeliveryRecipient(actor: { externalId?: string } | undefined): string | undefined {
+  const id = actor?.externalId;
+  return id && !id.startsWith("system:") ? id : undefined;
+}
+
 export function createApprovalStore(
   backing: DurableMap<PendingApprovalRecord>,
   deliveries: Pick<DeliveryStore, "enqueue">,
@@ -17,9 +22,17 @@ export function createApprovalStore(
     const request = record.request;
     const type = request ? surfaceCapabilities(request.surface)?.approvalCardType : null;
     if (!request || !type) return;
-    const actorId = request.actor.externalId;
+    const actorId = approvalDeliveryRecipient(request.actor);
+    if (!actorId) return;
     await deliveries.enqueue({
-      destination: { ...principalDestination(actorId, actorId), type, commandApprovalId: id },
+      destination: {
+        ...principalDestination(actorId, actorId),
+        type,
+        commandApprovalId: id,
+        ...(request.slackSource
+          ? { slackAccountId: request.slackSource.accountId, slackTeamId: request.slackSource.teamId }
+          : {}),
+      },
       text: `Approval needed: ${record.summary ?? record.command}`,
       idempotencyKey: approvalDeliveryKey(id, record),
     });

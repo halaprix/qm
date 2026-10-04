@@ -1,6 +1,8 @@
 import { test } from "node:test";
+import { createGoalRecord } from "../src/harness/goal.ts";
 import assert from "node:assert/strict";
 import { Check } from "typebox/value";
+import { fromJSONSchema, z, type ZodObject } from "zod";
 import { createAgentTools, pauseStampAfterToolCall, type ToolContextRef } from "../src/harness/agent-tools.ts";
 import { createMemoryRunSignalStore, waitForClientResult } from "../src/runs/run-signal-store.ts";
 import { filterHistoryForAudience } from "../src/resolution/context-filter.ts";
@@ -22,9 +24,6 @@ function fakeToolContext(sink?: { lastExecOpts?: Parameters<ToolContext["execute
       };
     },
     async restartComputer() {},
-    async migrateComputer(): Promise<{ from: string; to: string }> {
-      throw new Error("computer migration is not available on this deployment");
-    },
     async computerStatus() {
       return { machine: "healthy", guestResponsive: true };
     },
@@ -346,11 +345,8 @@ function fakeToolContext(sink?: { lastExecOpts?: Parameters<ToolContext["execute
     async getStandingOrder() {
       return { ok: true, orders: "" };
     },
-    async setStandingOrder(orders: string) {
-      return { ok: true, orders };
-    },
-    async staySilent() {
-      return { ok: true as const, message: "[staying silent]" };
+    async setStandingOrder(orders) {
+      return { ok: true, orders: orders ?? "" };
     },
     mcpToolDefs() {
       return [];
@@ -1439,7 +1435,7 @@ test("readOnly exposes observation and constrained session coordination without 
   for (const t of ["execute", "background", "files", "apps", "cron", "webhook", "guidance"]) {
     assert.ok(names(full).has(t), `full toolset has ${t}`);
   }
-  assert.deepEqual([...names(readOnly)].sort(), ["finish_silently", "history", "memory", "runtime", "sessions"]);
+  assert.deepEqual([...names(readOnly)].sort(), ["finish_silently", "history", "memory", "runtime", "subagents"]);
   for (const t of ["execute", "background", "files", "apps", "cron", "webhook", "guidance"]) {
     assert.ok(!names(readOnly).has(t), `read-only toolset drops ${t}`);
   }
@@ -1479,7 +1475,7 @@ test("finish_silently on a poll fire terminates the turn at the tool contract; o
   assert.match(noop.content[0]?.text ?? "", /no-op/);
 });
 
-test("stay_silent records its reason in the tape like finish_silently", async () => {
+test("finish_silently ends surface turns and replaces stay_silent", async () => {
   const emitted: Emitted[] = [];
   const ref: ToolContextRef = {
     current: fakeToolContext(),
@@ -1488,13 +1484,17 @@ test("stay_silent records its reason in the tape like finish_silently", async ()
     },
     scopeLabel: "personal:U1",
   };
-  const stay = createAgentTools(ref, { surfaceTools: true }).find((t) => t.name === "stay_silent");
-  await call(stay, { reason: "nothing new since the last check" });
+  const tools = createAgentTools(ref, { surfaceTools: true });
+  assert.ok(!tools.some((t) => t.name === "stay_silent"));
+  const finish = tools.find((t) => t.name === "finish_silently");
+  const result = (await call(finish, { reason: "nothing new since the last check" })) as { terminate?: boolean };
+  assert.equal(result.terminate, true);
+  assert.equal(ref.silentRequested, true);
   assert.equal(
     emitted.filter(
       (e) =>
         e.type === "tool_call" &&
-        e.payload.tool === "stay_silent" &&
+        e.payload.tool === "finish_silently" &&
         e.payload.reason === "nothing new since the last check",
     ).length,
     1,
@@ -1966,7 +1966,7 @@ test("background dispatches each action and emits tool_call/tool_result", async 
   assert.match(polled, /cursor 18/);
   assert.match(polled, /exited 0/);
 
-  const wrote = textOf(await call(background, { action: "write", process_id: "bg-1", data: "ABCD-1234\n" }));
+  const wrote = textOf(await call(background, { action: "send_input", process_id: "bg-1", data: "ABCD-1234\n" }));
   assert.match(wrote, /wrote 10B to bg-1 stdin/);
 
   const stopped = textOf(await call(background, { action: "stop", process_id: "bg-1" }));
@@ -2021,8 +2021,11 @@ test("background per-action validation returns a crisp [error] instead of throwi
   assert.match(textOf(await call(background, { action: "start" })), /\[error\].*requires `command`/);
   assert.match(textOf(await call(background, { action: "poll" })), /\[error\].*requires `process_id`/);
   assert.match(textOf(await call(background, { action: "stop" })), /\[error\].*requires `process_id`/);
-  assert.match(textOf(await call(background, { action: "write", process_id: "bg-1" })), /\[error\].*requires `data`/);
-  assert.match(textOf(await call(background, { action: "write", data: "x" })), /\[error\].*requires `process_id`/);
+  assert.match(
+    textOf(await call(background, { action: "send_input", process_id: "bg-1" })),
+    /\[error\].*requires `data`/,
+  );
+  assert.match(textOf(await call(background, { action: "send_input", data: "x" })), /\[error\].*requires `process_id`/);
 });
 
 test("background surfaces a policy denial/approval as a tool_result, not a throw", async () => {
@@ -2358,14 +2361,14 @@ test("webhook create requires task + verification; list and disable dispatch", a
   assert.match(textOut(await call(tool("webhook"), { action: "disable" })), /\[error\].*requires `id`/);
 });
 
-test("guidance conversation scope reads the effective SOUL; write requires content and reports the version", async () => {
+test("guidance conversation scope reads the effective SOUL; replace requires content and reports the version", async () => {
   assert.match(textOut(await call(tool("guidance"), { action: "read", scope: "conversation" })), /Be terse\./);
   assert.match(
-    textOut(await call(tool("guidance"), { action: "write", scope: "conversation", content: "New guidance." })),
+    textOut(await call(tool("guidance"), { action: "replace", scope: "conversation", content: "New guidance." })),
     /version 4/,
   );
   assert.match(
-    textOut(await call(tool("guidance"), { action: "write", scope: "conversation" })),
+    textOut(await call(tool("guidance"), { action: "replace", scope: "conversation" })),
     /\[error\].*requires `content`/,
   );
 });
@@ -2373,15 +2376,15 @@ test("guidance conversation scope reads the effective SOUL; write requires conte
 test("guidance defaults to channel scope when a channel is available, and rewrites the channel order", async () => {
   assert.match(textOut(await call(tool("guidance"), { action: "read" })), /Ambient replies: default/);
   assert.match(
-    textOut(await call(tool("guidance"), { action: "write", content: "reply piratey to tweets" })),
+    textOut(await call(tool("guidance"), { action: "replace", content: "reply piratey to tweets" })),
     /channel guidance updated/,
   );
   assert.match(
-    textOut(await call(tool("guidance"), { action: "write", bots: { newsbot: { mode: "ignore" } } })),
+    textOut(await call(tool("guidance"), { action: "replace", bots: { newsbot: { mode: "ignore" } } })),
     /channel guidance updated/,
   );
   assert.match(
-    textOut(await call(tool("guidance"), { action: "write" })),
+    textOut(await call(tool("guidance"), { action: "replace" })),
     /\[error\].*needs `content`.*`bots`.*and\/or `ambientEnabled`/,
   );
 });
@@ -2395,25 +2398,68 @@ test("guidance reads and writes channel ambient replies without changing omitted
     },
     async setStandingOrder(orders, _bots, nextAmbientEnabled) {
       if (nextAmbientEnabled !== undefined) ambientEnabled = nextAmbientEnabled ?? undefined;
-      return { ok: true, orders, ...(ambientEnabled === undefined ? {} : { ambientEnabled }) };
+      return { ok: true, orders: orders ?? "keep watch", ...(ambientEnabled === undefined ? {} : { ambientEnabled }) };
     },
   };
 
-  assert.match(textOut(await call(tool("guidance", tc), { action: "write", ambientEnabled: true })), /updated/);
+  assert.match(textOut(await call(tool("guidance", tc), { action: "replace", ambientEnabled: true })), /updated/);
   assert.match(textOut(await call(tool("guidance", tc), { action: "read" })), /Ambient replies: on/);
-  await call(tool("guidance", tc), { action: "write", content: "keep watching" });
+  await call(tool("guidance", tc), { action: "replace", content: "keep watching" });
   assert.match(textOut(await call(tool("guidance", tc), { action: "read" })), /Ambient replies: on/);
-  await call(tool("guidance", tc), { action: "write", ambientEnabled: false });
+  await call(tool("guidance", tc), { action: "replace", ambientEnabled: false });
   assert.match(textOut(await call(tool("guidance", tc), { action: "read" })), /Ambient replies: off/);
-  await call(tool("guidance", tc), { action: "write", ambientEnabled: null });
+  await call(tool("guidance", tc), { action: "replace", ambientEnabled: null });
   assert.match(textOut(await call(tool("guidance", tc), { action: "read" })), /Ambient replies: default/);
+});
+
+test("guidance edit swaps one exact passage in either scope and refuses ambiguous or missing matches", async () => {
+  let orders = "reply piratey\nwatch tweets\nwatch tweets";
+  const soulWrites: string[] = [];
+  const setCalls: unknown[] = [];
+  const tc: ToolContext = {
+    ...fakeToolContext(),
+    async getStandingOrder() {
+      return { ok: true, orders };
+    },
+    async setStandingOrder(next, bots, ambientEnabled) {
+      orders = next ?? orders;
+      setCalls.push({ bots, ambientEnabled });
+      return { ok: true, orders };
+    },
+    soulRead() {
+      return {
+        effectiveSoul: "Org policy.\n\nBe terse. Use $1 sparingly.",
+        soul: "Be terse. Use $1 sparingly.",
+        soulVersion: 3,
+      };
+    },
+    async soulWrite(content) {
+      soulWrites.push(content);
+      return { ok: true, version: 4 };
+    },
+  };
+  const edit = (args: Record<string, unknown>) => call(tool("guidance", tc), { action: "edit", ...args });
+  assert.match(textOut(await edit({ old: "watch tweets", new: "x" })), /\[error\].*more than once/);
+  assert.match(textOut(await edit({ old: "absent", new: "x" })), /\[error\].*no exact match/);
+  assert.match(textOut(await edit({ content: "everything" })), /\[error\].*requires `old`/);
+  assert.equal(orders, "reply piratey\nwatch tweets\nwatch tweets");
+  assert.match(
+    textOut(await edit({ old: "piratey", new: "plainly", bots: { newsbot: { mode: "ignore" } } })),
+    /channel guidance updated/,
+  );
+  assert.equal(orders, "reply plainly\nwatch tweets\nwatch tweets");
+  assert.deepEqual(setCalls, [{ bots: { newsbot: { mode: "ignore" } }, ambientEnabled: undefined }]);
+  assert.match(textOut(await edit({ scope: "conversation", old: "Be terse.", new: "Be $& brief." })), /version 4/);
+  assert.deepEqual(soulWrites, ["Be $& brief. Use $1 sparingly."]);
+  assert.match(textOut(await edit({ scope: "conversation", old: "Org policy.", new: "x" })), /no exact match/);
+  assert.ok(!Check(tool("guidance").parameters, { action: "write", content: "x" }));
 });
 
 test("guidance rejects ambient replies at conversation scope", async () => {
   assert.match(
     textOut(
       await call(tool("guidance"), {
-        action: "write",
+        action: "replace",
         scope: "conversation",
         content: "Be terse.",
         ambientEnabled: true,
@@ -2899,6 +2945,25 @@ test("unified sandbox keeps strict approval and quarantined output associated wi
   assert.equal(entries[1]?.quarantined, true);
 });
 
+test("strict approval records carry the gated call's redacted arguments", async () => {
+  const ref: ToolContextRef = {
+    current: fakeToolContext(),
+    pendingApprovals: [],
+    scopeLabel: "personal:U1",
+    toolApprovalGate: () => false,
+  };
+  const tool = createAgentTools(ref, { sandboxResources: true }).find((t) => t.name === "sandbox")!;
+  await call(tool, { action: "exec", command: "ls /tmp" });
+  await call(tool, { action: "exec", command: "curl --token s3cr3t-value https://example.com" });
+  await call(tool, { action: "exec", command: "env", api_key: "k3y-value" });
+  const [a, b, c] = ref.pendingApprovals!;
+  assert.equal(a?.command, b?.command);
+  assert.match(a?.summary ?? "", /ls \/tmp/);
+  assert.match(b?.summary ?? "", /curl --token <redacted>/);
+  assert.doesNotMatch(b?.summary ?? "", /s3cr3t-value/);
+  assert.doesNotMatch(c?.summary ?? "", /k3y-value/);
+});
+
 test("unscreened unified output retains the called action in the durable transcript", async () => {
   const entries: Array<Record<string, unknown>> = [];
   const tool = createAgentTools(
@@ -2966,7 +3031,7 @@ test("sandbox strict approvals remain action-scoped across resource activation",
 });
 
 for (const outcome of ["unscreened", "quarantine"] as const)
-  test(`sandbox command failure preserves safe transcript metadata when output is ${outcome}`, async () => {
+  test(`sandbox nonzero exit preserves safe transcript metadata when output is ${outcome}`, async () => {
     const entries: Emitted[] = [];
     const tool = createAgentTools(
       {
@@ -2986,7 +3051,7 @@ for (const outcome of ["unscreened", "quarantine"] as const)
     const input = entries.find((e) => e.type === "tool_call")!.payload;
     const output = entries.find((e) => e.type === "tool_result")!.payload;
     assert.equal(input.sandbox_id, "box-a");
-    assert.equal(output.isError, true);
+    assert.equal(output.isError, outcome === "quarantine");
     assert.equal(output.stdout, undefined);
     assert.equal(output.stderr, undefined);
     if (outcome === "unscreened") {
@@ -3223,7 +3288,9 @@ test("read passes turn cancellation through and cannot record a late success", a
 
 test("session tools are omitted when the actor feature is disabled", () => {
   assert.equal(
-    createAgentTools({ current: fakeToolContext() }, { sessionTools: false }).some((tool) => tool.name === "sessions"),
+    createAgentTools({ current: fakeToolContext() }, { sessionTools: false }).some((tool) =>
+      ["sessions", "subagents"].includes(tool.name),
+    ),
     false,
   );
 });
@@ -3357,7 +3424,7 @@ test("conversation coordinators cannot execute commands through any command tool
         textOut(await call(sandbox, { action: "start_process", command: "echo forbidden" })),
         /unsupported sandbox action/,
       );
-      assert.ok(tools.some((tool) => tool.name === "sessions"));
+      assert.ok(tools.some((tool) => tool.name === "subagents"));
     }
   }
   assert.ok(
@@ -3365,7 +3432,34 @@ test("conversation coordinators cannot execute commands through any command tool
   );
 });
 
-test("sessions open schema and dispatch preserve an explicit false fast mode", async () => {
+test("subagents open exposes noComputer and preserves the internal restriction", async () => {
+  const opened: Array<{ readOnly?: boolean }> = [];
+  const tc = fakeToolContext();
+  tc.sessionSyscalls = {
+    open: async (input) => {
+      opened.push(input);
+      return { ok: true, sessionId: "child", title: "child", liveRunsRemaining: 9 };
+    },
+    write: async () => ({ ok: false, message: "unused" }),
+    read: async () => ({ ok: false, message: "unused" }),
+  };
+  const session = createAgentTools({ current: tc }).find((tool) => tool.name === "subagents")!;
+  const properties = (session.parameters as { properties: Record<string, { description?: string }> }).properties;
+  assert.ok(properties.noComputer);
+  assert.equal(properties.readOnly, undefined);
+  assert.match(properties.noComputer.description!, /no shell, filesystem, browser/);
+  const shape = (fromJSONSchema(session.parameters as Parameters<typeof fromJSONSchema>[0]) as ZodObject).shape;
+  assert.ok(!Check(session.parameters, { action: "open", task: "test", noComputer: "true" }));
+  for (const noComputer of [undefined, false, true]) {
+    const params = { action: "open", task: "test", ...(noComputer === undefined ? {} : { noComputer }) };
+    assert.ok(Check(session.parameters, params));
+    await call(session, z.object(shape).parse(params));
+    assert.equal(opened.at(-1)!.readOnly, noComputer);
+  }
+  assert.equal(opened.length, 3);
+});
+
+test("subagents open schema and dispatch preserve an explicit false fast mode", async () => {
   const tc = fakeToolContext();
   tc.sessionSyscalls = {
     open: async (input) => {
@@ -3375,10 +3469,51 @@ test("sessions open schema and dispatch preserve an explicit false fast mode", a
     write: async () => ({ ok: false, message: "unused" }),
     read: async () => ({ ok: false, message: "unused" }),
   };
-  const session = createAgentTools({ current: tc }).find((tool) => tool.name === "sessions")!;
+  const session = createAgentTools({ current: tc }).find((tool) => tool.name === "subagents")!;
   assert.ok(Check(session.parameters, { action: "open", task: "test", fastMode: false }));
   assert.ok(!Check(session.parameters, { action: "open", task: "test", fastMode: "false" }));
   assert.match(textOut(await call(session, { action: "open", task: "test", fastMode: false })), /child/);
+});
+
+test("subagents followup_task takes its instruction in task, like open", async () => {
+  const writes: Array<{ followup?: boolean; text?: string; interrupt?: boolean }> = [];
+  const tc = fakeToolContext();
+  tc.sessionSyscalls = {
+    open: async () => ({ ok: false, message: "unused" }),
+    write: async (input) => {
+      writes.push(input);
+      return input.text || input.interrupt
+        ? { ok: true, sessionId: "child", title: "child", delivered: input.followup ? "queued_turn" : "queued_message" }
+        : {
+            ok: false,
+            message: input.followup ? "followup_task requires `task`." : "send_message requires `text`.",
+          };
+    },
+    read: async () => ({ ok: false, message: "unused" }),
+  };
+  const session = createAgentTools({ current: tc }).find((tool) => tool.name === "subagents")!;
+  assert.ok(!Check(session.parameters, { action: "write", target: "child", text: "hi" }));
+  assert.match(
+    textOut(await call(session, { action: "followup_task", target: "child", task: "next task" })),
+    /queued as a new turn/,
+  );
+  assert.match(
+    textOut(await call(session, { action: "send_message", target: "child", text: "fyi" })),
+    /queued internally/,
+  );
+  assert.match(
+    textOut(await call(session, { action: "followup_task", target: "child", task: "stop?", interrupt: true })),
+    /interrupt applies to send_message/,
+  );
+  await call(session, { action: "followup_task", target: "child", text: "misplaced" });
+  assert.deepEqual(
+    writes.map(({ followup, text, interrupt }) => ({ followup, text, interrupt })),
+    [
+      { followup: true, text: "next task", interrupt: undefined },
+      { followup: false, text: "fyi", interrupt: undefined },
+      { followup: true, text: undefined, interrupt: undefined },
+    ],
+  );
 });
 
 test("conversation coordinator mailbox checks never block on children", async () => {
@@ -3393,7 +3528,7 @@ test("conversation coordinator mailbox checks never block on children", async ()
     write: async () => ({ ok: false, message: "unused" }),
     read: async () => ({ ok: false, message: "unused" }),
   };
-  const session = createAgentTools({ current: tc }, { delegateWork: true }).find((tool) => tool.name === "sessions")!;
+  const session = createAgentTools({ current: tc }, { delegateWork: true }).find((tool) => tool.name === "subagents")!;
   await call(session, { action: "wait", timeoutMs: 60000 });
   assert.ok(waits.length > 0);
   assert.ok(waits.every((timeout) => timeout === 0));
@@ -3417,7 +3552,7 @@ test("resource catalog exposes one home per operation and leaves MCP tools intac
     },
   );
   const names = tools.map((tool) => tool.name);
-  for (const name of ["files", "apps", "skills", "sessions", "goal", "cron", "example_search"])
+  for (const name of ["files", "apps", "skills", "subagents", "goal", "cron", "example_search"])
     assert.ok(names.includes(name));
   for (const name of [
     "read",
@@ -3714,4 +3849,229 @@ test("a client tool stops waiting when the turn is cancelled", async () => {
   const ret = await pending;
   assert.match(ret.content[0]?.text ?? "", /cancelled/);
   assert.equal(emitted.find((e) => e.type === "tool_result")!.payload.cancelled, true);
+});
+
+test("context recovery drains in-flight effects, preserves an active goal, and blocks subsequent calls", async () => {
+  const gate = Promise.withResolvers<void>();
+  const events: Emitted[] = [];
+  let effects = 0;
+  const ref: ToolContextRef = {
+    current: {
+      ...fakeToolContext(),
+      execute: async () => {
+        effects++;
+        await gate.promise;
+        return { stdout: "done", stderr: "", code: 0, timedOut: false };
+      },
+    },
+    scopeLabel: "personal:U1",
+    goal: createGoalRecord({ objective: "finish verification" }),
+    emit: async (entry) => {
+      events.push(entry as Emitted);
+    },
+  };
+  const goal = structuredClone(ref.goal);
+  const tools = createAgentTools(ref);
+  const first = call(
+    tools.find((t) => t.name === "execute"),
+    { command: "echo done", purpose: "Test effect" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const recovery = call(
+    tools.find((t) => t.name === "context"),
+    { action: "compact", mode: "recent" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    events.some((e) => e.payload.tool === "context"),
+    false,
+  );
+  await call(
+    tools.find((t) => t.name === "execute"),
+    { command: "echo duplicate", purpose: "Test barrier" },
+  );
+  assert.equal(effects, 1);
+  gate.resolve();
+  await first;
+  assert.equal(((await recovery) as { terminate: boolean }).terminate, true);
+  assert.deepEqual(ref.runtimeHandoff, { context: "recent" });
+  assert.deepEqual(ref.goal, goal);
+  assert.equal(events.at(-1)!.payload.tool, "context");
+  assert.equal(events.filter((e) => e.type === "tool_result" && e.payload.tool === "execute").length, 1);
+});
+
+for (const cancel of [false, true]) {
+  test(`context recovery cannot latch after ${cancel ? "cancellation" : "persistence failure"}`, async () => {
+    const gate = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    const ref: ToolContextRef = {
+      current: fakeToolContext(),
+      scopeLabel: "personal:U1",
+      abortSignal: abort.signal,
+      runtimeInFlight: new Set([gate.promise]),
+      emit: async (entry) => {
+        if (!cancel && entry.type === "tool_result") throw new Error("write failed");
+      },
+    };
+    const tool = createAgentTools(ref).find((t) => t.name === "context");
+    const recovery = call(tool, { action: "compact", mode: "recent" });
+    if (cancel) abort.abort();
+    gate.resolve();
+    if (cancel) await recovery;
+    else await assert.rejects(recovery, /write failed/);
+    assert.equal(ref.runtimeHandoff, undefined);
+    assert.equal(ref.runtimeMutationPending, false);
+  });
+}
+
+test("context recovery is not available in read-only mode", () => {
+  assert.ok(!createAgentTools({ current: fakeToolContext() }, { readOnly: true }).some((t) => t.name === "context"));
+});
+
+test("command exit codes are data; timeouts and thrown tool errors are failures", async () => {
+  for (const sandboxResources of [false, true]) {
+    for (const outcome of ["zero", "nonzero", "timeout", "provider", "denied"] as const) {
+      const entries: Emitted[] = [];
+      const tool = createAgentTools(
+        {
+          current: {
+            ...fakeToolContext(),
+            execute: async () => {
+              if (outcome === "provider") throw new Error("sandbox provider unavailable");
+              if (outcome === "denied") throw new CommandDenied("[ -d dir ]", "policy denied");
+              return { stdout: "", stderr: "", code: outcome === "zero" ? 0 : 1, timedOut: outcome === "timeout" };
+            },
+          },
+          scopeLabel: "personal:U1",
+          emit: (entry) => {
+            entries.push(entry as Emitted);
+          },
+        },
+        { sandboxResources },
+      ).find((t) => t.name === (sandboxResources ? "sandbox" : "execute"))!;
+      const run = () =>
+        call(tool, {
+          ...(sandboxResources ? { action: "exec" } : {}),
+          command: "[ -d dir ]",
+          purpose: "Check directory",
+        });
+      if (outcome === "provider") {
+        await assert.rejects(run, /sandbox provider unavailable/);
+        const result = entries.find((e) => e.type === "tool_result")!.payload;
+        assert.equal(result.isError, true);
+        assert.equal(result.result, "Command execution failed: sandbox provider unavailable");
+        assert.equal(result.code, undefined);
+        continue;
+      }
+      const returned = await run();
+      const result = entries.find((e) => e.type === "tool_result")!.payload;
+      assert.equal(result.isError, !["zero", "nonzero"].includes(outcome), outcome);
+      if (outcome === "nonzero") {
+        assert.equal(result.code, 1);
+        assert.match(textOut(returned), /\[exit 1\]/);
+      }
+    }
+  }
+});
+
+test("thrown execution errors leave pending child messages for the next delivered result", async () => {
+  for (const sandboxResources of [false, true]) {
+    let pending = true;
+    const context = fakeToolContext();
+    context.execute = async () => {
+      throw new Error("provider unavailable");
+    };
+    context.sessionSyscalls = {
+      open: async () => ({ ok: false, message: "unused" }),
+      write: async () => ({ ok: false, message: "unused" }),
+      read: async () => ({ ok: false, message: "unused" }),
+      receive: async () =>
+        pending
+          ? [
+              {
+                id: "mail",
+                senderId: "child",
+                recipientId: "parent",
+                actor: { id: "U1", type: "internal" as const },
+                audience: [],
+                text: "Important child finding",
+                createdAt: 1,
+              },
+            ]
+          : [],
+      acknowledge: async () => {
+        pending = false;
+      },
+    };
+    const tools = createAgentTools({ current: context }, { sandboxResources });
+    const tool = tools.find((t) => t.name === (sandboxResources ? "sandbox" : "execute"))!;
+    const input = { ...(sandboxResources ? { action: "exec" } : {}), command: "true", purpose: "Check provider" };
+    await assert.rejects(() => call(tool, input), /provider unavailable/);
+    assert.equal(pending, true);
+    context.execute = async () => ({ stdout: "ok", stderr: "", code: 0, timedOut: false });
+    assert.match(JSON.stringify(await call(tool, input)), /Important child finding/);
+    assert.equal(pending, false);
+  }
+});
+
+test("subagents and sessions are separate tools with one noun each", async () => {
+  const writes: Array<{ followup?: boolean; target: string; text?: string }> = [];
+  const starts: Array<{ fork: boolean; text?: string; title?: string }> = [];
+  const tc = fakeToolContext();
+  tc.sessionSyscalls = {
+    open: async () => ({ ok: false, message: "unused" }),
+    write: async (input) => {
+      writes.push(input);
+      return { ok: true, sessionId: "peer", title: "peer", delivered: "queued_message" };
+    },
+    read: async () => ({ ok: true, mode: "children", children: [] }),
+    list: async () => ({
+      ok: true,
+      sessions: [{ sessionId: "peer", title: "peer", status: "idle", current: false }],
+    }),
+    start: async (input) => {
+      starts.push(input);
+      return { ok: true, sessionId: "made", title: "made" };
+    },
+  };
+  const tools = createAgentTools({ current: tc }, { surfaceName: "web" });
+  const subagents = tools.find((tool) => tool.name === "subagents")!;
+  const sessions = tools.find((tool) => tool.name === "sessions")!;
+  assert.match(subagents.description, /does not get its own sidebar entry/);
+  assert.match(subagents.description, /does not inherit this conversation/);
+  assert.match(sessions.description, /web sidebar/);
+  for (const action of ["open", "followup_task", "wait"])
+    assert.ok(!Check(sessions.parameters, { action }), `sessions has no ${action}`);
+  for (const action of ["list", "new", "fork"])
+    assert.ok(!Check(subagents.parameters, { action }), `subagents has no ${action}`);
+  assert.match(textOut(await call(sessions, { action: "list" })), /peer \(peer\) — idle/);
+  assert.match(textOut(await call(sessions, { action: "new", text: "hi", title: "t" })), /Started session "made"/);
+  assert.match(textOut(await call(sessions, { action: "fork" })), /Forked this conversation into session "made"/);
+  assert.match(textOut(await call(sessions, { action: "send_message", target: "peer", text: "fyi" })), /queued/);
+  assert.match(textOut(await call(sessions, { action: "read" })), /requires `target`/);
+  assert.deepEqual(starts, [{ fork: false, text: "hi", title: "t" }, { fork: true }]);
+  assert.deepEqual(
+    writes.map(({ followup, target, text }) => ({ followup, target, text })),
+    [{ followup: undefined, target: "peer", text: "fyi" }],
+  );
+});
+
+test("sessions is a web UI tool: Slack turns get subagents only", () => {
+  const slack = createAgentTools({ current: fakeToolContext() }, { surfaceName: "slack" });
+  assert.ok(slack.some((tool) => tool.name === "subagents"));
+  assert.ok(!slack.some((tool) => tool.name === "sessions"));
+  assert.doesNotMatch(slack.find((tool) => tool.name === "subagents")!.description, /use sessions/);
+  assert.ok(!createAgentTools({ current: fakeToolContext() }).some((tool) => tool.name === "sessions"));
+});
+
+test("background process guidance reflects the configured sandbox token lifetime", () => {
+  const guidance = (opts?: { sandboxCapabilityTtlMs?: number }) =>
+    createAgentTools({ current: fakeToolContext() }, { sandboxResources: true, ...opts })
+      .map((tool) => tool.description)
+      .join("\n");
+  assert.match(guidance(), /turn tokens expire 48 hours/);
+  assert.match(guidance({ sandboxCapabilityTtlMs: 72 * 3_600_000 }), /turn tokens expire 72 hours/);
+  const unlimited = guidance({ sandboxCapabilityTtlMs: 0 });
+  assert.match(unlimited, /does not expire those turn tokens/);
+  assert.doesNotMatch(unlimited, /turn tokens expire \d+ hours/);
 });

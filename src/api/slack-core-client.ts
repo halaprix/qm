@@ -1,3 +1,11 @@
+import { replayableRequest } from "../core/orchestrator/turn-helpers.ts";
+import {
+  createSlackSessionStatus,
+  type SlackStatusActivity,
+  type SlackSessionStatus,
+  type SlackSessionStatusState,
+} from "../slack/session-status.ts";
+import type { FeatureFlagStore } from "../feature-flags.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import { createTaskAcknowledgements, type TaskAckState, type TaskAcknowledgements } from "../slack/task-ack.ts";
@@ -7,8 +15,9 @@ import { resolveBranding } from "../resolution/branding.ts";
 import type { App } from "./app.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
 import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
-import type { Delivery, ScopeId, SurfaceContextRequest } from "../types.ts";
+import type { Delivery, ScopeId, SurfaceContextRequest, TurnRequest } from "../types.ts";
 import { scopeId } from "../types.ts";
+import type { MemoryService } from "../memory/memory-service.ts";
 import type { CachedMessage, ReadMessagesOpts, SurfaceCache, IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
 import type { OrgBranding, ScopedConfigStore } from "../resolution/config-store.ts";
@@ -59,6 +68,7 @@ interface DirectoryPush {
   workspaceUrl?: string;
   membersSyncedAt?: number;
   channelsSyncedAt?: number;
+  partialChannels?: boolean;
   groupsSyncedAt?: number;
 }
 
@@ -69,7 +79,9 @@ export interface SlackCoreClient extends Omit<
   streamSnapshot?(runId: string): string | null;
   getDelivery?(id: string): Promise<Delivery | null>;
   reportDeliveryUndeliverable?(id: string, reason: string): Promise<void>;
+  privateContinuationSource?(runId: string): Promise<TurnRequest | null>;
   taskAcknowledgements?: TaskAcknowledgements;
+  sessionStatus?: SlackSessionStatus;
   externalSlackParticipants(): Promise<boolean>;
   internalMemberOverrides(): Promise<string[]>;
   ackEmojiOverride(): Promise<string[] | null>;
@@ -79,6 +91,7 @@ export interface SlackCoreClient extends Omit<
   onScopeModelChanged(listener: (scope: ScopeId) => void): void;
   onChannelHeaderPinChanged(listener: (scope: ScopeId) => void): void;
   rememberSurfaceHistory?(events: IngestEvent[]): Promise<void>;
+  noteSurfaceHistoryGap?(container: string, note: string): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
   reportTurnMetrics(runId: string, patch: { deliverMs?: number; slackInflightMs?: number }): Promise<void>;
   putAgentRequest(requestId: string, record: SlackAgentRequestContext): Promise<void>;
@@ -119,6 +132,9 @@ export interface SlackCoreClientDeps extends SurfaceCoreClientDeps {
   identity: IdentityService;
   keychainApprovals?: KeychainApprovals;
   taskAcknowledgements?: DurableMap<TaskAckState>;
+  sessionStatus?: DurableMap<SlackSessionStatusState>;
+  statusActivity?: SlackStatusActivity;
+  featureFlags?: FeatureFlagStore;
   app: App;
   config: ScopedConfigStore;
   runtimeFallback: RuntimeChoice;
@@ -137,6 +153,7 @@ export interface SlackCoreClientDeps extends SurfaceCoreClientDeps {
   leaderLease?: LeaderLease;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
   surfaceCache?: SurfaceCache;
+  memory?: MemoryService;
   inboxEvent?(event: ConversationEvent): Promise<void>;
 }
 
@@ -190,6 +207,18 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
     ...(deps.taskAcknowledgements
       ? { taskAcknowledgements: createTaskAcknowledgements(deps.taskAcknowledgements, lease, deps) }
       : {}),
+    ...(deps.sessionStatus && deps.featureFlags
+      ? {
+          sessionStatus: createSlackSessionStatus(
+            deps.sessionStatus,
+            lease,
+            deps.runs,
+            deps.featureFlags,
+            Date.now,
+            deps.statusActivity,
+          ),
+        }
+      : {}),
     async externalSlackParticipants() {
       return (await deps.config.getExternalSlackParticipantsDurable(orgScope)) === true;
     },
@@ -233,8 +262,21 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       await deps.surfaceCache?.ingest(events);
     },
 
+    async noteSurfaceHistoryGap(container, note) {
+      if (!deps.memory) return;
+      const kind = (await deps.surfaceCache?.containerState(container))?.kind;
+      await deps.memory.capture(scopeId(kind === "group" ? "group" : "channel", container), [note], Date.now());
+    },
+
     async readSurfaceMessages(container, opts) {
       return deps.app.readSurfaceMessages(container, { ...opts, noFallback: true });
+    },
+
+    async privateContinuationSource(runId) {
+      const run = await deps.runs.get(runId);
+      if (!run?.request.externalSlack || run.request.origin.kind !== "human" || run.request.actor.type !== "internal")
+        return null;
+      return replayableRequest(run.request);
     },
 
     async reportTurnMetrics(runId, patch) {
@@ -255,6 +297,7 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
             body.channelsSyncedAt,
             body.channelRosterIds,
             body.channelRevocations,
+            body.partialChannels,
           )) && applied;
       }
       if (body.groupMembers) {

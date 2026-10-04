@@ -90,3 +90,29 @@ test("discord approvals go to the requester's discord DM", async () => {
   assert.deepEqual(await deliveries.pending("principal"), []);
   assert.deepEqual(await deliveries.pending("discord"), []);
 });
+
+test("system approvals stay pending without enqueuing or reviving an impossible Slack DM", async () => {
+  const backing = createMemoryMap<PendingApprovalRecord>();
+  const deliveries = createDeliveryStore({ maxAgeMs: 0 });
+  const approvals = createApprovalStore(backing, deliveries);
+  const approval = record("slack:C1:ambient:1.0");
+  approval.request!.actor.externalId = "system:ambient:acme";
+  const stale = await deliveries.enqueue({
+    destination: { type: "principal", target: "system:ambient:acme", commandApprovalId: "A1" },
+    text: "Approval needed: publish",
+    idempotencyKey: "command-approval:A1:1",
+  });
+  await deliveries.claimPending("principal", 1);
+  const expiredAt = (await deliveries.get(stale.id))?.expiredAt;
+  assert.ok(expiredAt);
+
+  await approvals.put("A1", approval);
+  await approvals.put("A2", approval);
+  await approvals.deliverPending();
+  await createApprovalStore(backing, deliveries).deliverPending();
+
+  assert.deepEqual(await backing.get("A1"), approval, "the protected action still requires approval");
+  assert.deepEqual(await backing.get("A2"), approval);
+  assert.deepEqual(await deliveries.pending("principal"), []);
+  assert.equal((await deliveries.get(stale.id))?.expiredAt, expiredAt, "a sweep must not revive the stale DM");
+});

@@ -1,10 +1,9 @@
 import type { CoreTurnBody, SurfaceCoreClient } from "../api/surface-core-client.ts";
 import { approvalContinuation, approvalDeniedReason } from "../core/approval-continuation.ts";
-import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
 import { samePerson } from "../directory/person.ts";
 import type { ActorAssertion, Delivery, TurnResult } from "../types.ts";
 import { errMessage, reportFailureAs } from "../util/errors.ts";
-import { APPROVAL_EXPIRED_TEXT, parseCardCustomId, type CardKind } from "./approval-cards.ts";
+import { APPROVAL_EXPIRED_TEXT, keychainSettleText, parseCardCustomId, type CardKind } from "./approval-cards.ts";
 import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, discordUserIdOf } from "./config.ts";
 import { audienceWith, type ReaderResult } from "./readers.ts";
 import { FAILURE_TEXT, refusalText } from "./turn-flow.ts";
@@ -19,14 +18,6 @@ const CONTINUE_FAILED_TEXT = "I couldn't continue that yet. The card is still ac
 const RETRY_PENDING_TEXT = "The request is still pending; use the web link in the thread to retry.";
 const RETRY_GONE_TEXT = "The request is no longer pending.";
 const KEYCHAIN_DECISION = { once: "once", standing: "standing", deny: "deny" } as const;
-
-function keychainSettleText(view: KeychainApprovalView): string {
-  if (view.ask.status === "approved") {
-    return view.mode === "standing" ? "Always allowed." : "Allowed once.";
-  }
-  if (view.ask.status === "declined") return "Denied.";
-  return APPROVAL_EXPIRED_TEXT;
-}
 
 export interface ButtonClick {
   customId: string;

@@ -29,6 +29,7 @@ import type { IngestEvent } from "../surface-cache/surface-cache.ts";
 import { decideDeploymentAccess } from "../deploy/access-decision.ts";
 
 interface SurfaceRunHooks {
+  onReplying?(): void;
   onFirstBlock?(text: string): void;
   onSurfacePosted?(): void;
   onTasks?(tasks: Array<{ id: string; title: string; status: TaskStatus }>): void | Promise<void>;
@@ -136,8 +137,14 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
     },
 
     async waitRun(runId, hooks = {}) {
+      let replyingSignaled = false;
       let firstBlockSignaled = false;
       let surfaceSignaled = false;
+      const signalReplying = (durable = false): void => {
+        if (replyingSignaled || !(durable || deps.turnStream.replying(runId))) return;
+        replyingSignaled = true;
+        hooks.onReplying?.();
+      };
       const signalFirstBlock = (text: string): void => {
         if (firstBlockSignaled || !text.trim()) return;
         firstBlockSignaled = true;
@@ -199,6 +206,7 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
               if (view?.surfacePosted) signalSurface();
               return (view?.result as TurnResult | null | undefined) ?? null;
             }
+            signalReplying(run.deliveryState?.replying === true);
             await emitTasks();
             await emitGoal().catch(swallowAs("surface-core-client: goal refresh", undefined));
             const fb = deps.turnStream.firstBlock(runId);

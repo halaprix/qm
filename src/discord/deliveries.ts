@@ -118,6 +118,7 @@ export function createDiscordDispatcher(deps: {
 
   async function deliverOne(d: Delivery): Promise<void> {
     if (waitingOnRun(d)) return;
+    if (d.destination.keychainResolution) return deps.core.ackDelivery(d.id);
     if (d.destination.type === DISCORD_DM_DELIVERY_TYPE) {
       const userId = deps.recipientFor(d.destination.target);
       if (!userId) return drop(d, "no linked Discord account");

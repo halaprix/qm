@@ -13,6 +13,7 @@ export function withPrincipalRouting(store: DeliveryStore, route: PrincipalRoute
       if (
         input.destination.type !== "principal" ||
         input.destination.commandApprovalId ||
+        input.destination.keychainResolution ||
         input.destination.react ||
         input.destination.delete ||
         input.destination.editRef
