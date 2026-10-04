@@ -21,6 +21,7 @@ function fakeRes() {
   const out = { status: 0, body: undefined as unknown };
   return {
     res: {
+      getHeader() {},
       writeHead(status: number) {
         out.status = status;
         return this;
@@ -69,6 +70,7 @@ function world(over: { tokens?: boolean; fire?: boolean } = {}): World {
       shipOutput: async () => null,
       returnOutput: async () => null,
       sweepStale: async () => {},
+      previewTriage: async () => [],
       followUp: async (loop: Loop, item: LoopItem, message: string, actorId: string) => {
         w.followUps.push({ itemId: item.id, message, actorId });
         await w.loops.items.appendThread(item.id, [{ role: "human", text: message, actorId }]);
@@ -1122,4 +1124,42 @@ test("a company loop cannot opt into personal inbox classification", async () =>
   const [item] = await w.loops.items.byLoop(loop.id);
   assert.equal(item!.sourcePayload!.automated, undefined);
   assert.equal(item!.sourcePayload!.probablyResolved, undefined);
+});
+
+test("only a person overrides triage, and archiving a whole group resolves its members", async () => {
+  const w = world();
+  const { loop, item } = await seed(w);
+  await call(w, {
+    method: "POST",
+    path: `/v1/loops/${loop.id}/items`,
+    body: { items: [{ ...ITEM, sourceKey: "C2:1.3", slack: { channelId: "C2", ts: "1.3" } }] },
+  });
+  await w.loops.store.update(loop.id, {
+    triage: { prioritize: { enabled: true }, consolidate: { enabled: true } },
+  });
+  const member = (await w.loops.items.byLoop(loop.id)).find((other) => other.id !== item.id)!;
+  await w.loops.items.setTriage(item.id, { groupId: item.id }, "agent");
+  await w.loops.items.setTriage(member.id, { groupId: item.id }, "agent");
+  const path = `/v1/loops/${loop.id}/items/${item.id}/action`;
+  const byAgent = await call(w, { method: "POST", path, body: { kind: "prioritize", args: { priority: "urgent" } } });
+  assert.equal(byAgent.status, 403);
+  const byPerson = await call(w, {
+    method: "POST",
+    path: `${path}?principalId=josh`,
+    body: { kind: "prioritize", args: { priority: "urgent" } },
+    capability: PORTAL,
+  });
+  assert.deepEqual((byPerson.body as { item: LedgerItemView }).item.triage?.pinned, ["priority"]);
+  await call(w, { method: "POST", path, body: { kind: "dismiss", args: { group: true } } });
+  assert.equal((await w.loops.items.get(member.id))?.status, "ready");
+  await call(w, { method: "POST", path, body: { kind: "reopen" } });
+  await call(w, {
+    method: "POST",
+    path: `${path}?principalId=josh`,
+    body: { kind: "dismiss", args: { group: true } },
+    capability: PORTAL,
+  });
+  const settled = (await w.loops.items.get(member.id))!;
+  assert.equal(settled.actionKind, "consolidated");
+  assert.deepEqual(settled.sourcePayload, member.sourcePayload);
 });

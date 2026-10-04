@@ -1,8 +1,17 @@
 import { choiceGroup, settingStatus, saveFooter } from "./setting-controls.ts";
 import { html, render, nothing } from "lit";
 import { classMap } from "lit/directives/class-map.js";
+import { live } from "lit/directives/live.js";
 import { repeat } from "lit/directives/repeat.js";
-import { states, connectors, installation, emoji, context, type SlackSetting } from "./integrations-state.ts";
+import {
+  states,
+  connectors,
+  installation,
+  discordInstallation,
+  emoji,
+  context,
+  type SlackSetting,
+} from "./integrations-state.ts";
 export {
   configure,
   owns,
@@ -14,6 +23,7 @@ export {
   states,
   connectors,
   installation,
+  discordInstallation,
 } from "./integrations-state.ts";
 import { loadScope as loadSettings } from "./integrations-state.ts";
 export function loadScope(data: any, scope: string) {
@@ -22,6 +32,7 @@ export function loadScope(data: any, scope: string) {
 }
 export const loadConnectors = () => connectors.load();
 export const loadSlackInstallation = () => installation.load();
+export const loadDiscordInstallation = () => discordInstallation.load();
 const cards: Record<string, () => ReturnType<typeof html>> = {};
 cards["card-external-slack"] = () => {
   const s = states.get("external-slack-participants")!;
@@ -428,6 +439,121 @@ cards["card-slack-installation"] = () => {
     </div>
   </section>`;
 };
+function discordTitle(d: Record<string, any>): string {
+  if (d.configured) return `Connected as ${d.botTag}`;
+  if (d.source === "environment") return "Using environment config";
+  if (d.disabled) return "Disconnected";
+  return "Not configured";
+}
+async function copyText(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    void 0;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok: boolean;
+  try {
+    ok = Boolean(document.execCommand("copy"));
+  } catch {
+    ok = false;
+  } finally {
+    document.body.removeChild(ta);
+  }
+  return ok;
+}
+cards["card-discord-installation"] = () => {
+  const s = discordInstallation,
+    d = s.data;
+  const field = (id: string, label: string, key: "allowUserIds" | "guildIds" | "internalRoleIds") =>
+    html`<label for=${id}>${label}</label>
+      <input id=${id} .value=${s[key]} @input=${(e: Event) => (s[key] = (e.target as HTMLInputElement).value)} />`;
+  return html`<section class="card" id="card-discord-installation">
+    <div class="head"><h2>Discord</h2></div>
+    <div class="body">
+      <h3 id="discord-installation-state">${discordTitle(d)}</h3>
+      <label for="discord-application-id">Application ID</label>
+      <input id="discord-application-id" readonly .value=${d.applicationId ?? ""} />
+      <label for="discord-bot-token">Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}</label>
+      <input
+        id="discord-bot-token"
+        type="password"
+        autocomplete="new-password"
+        .value=${live(s.botToken)}
+        @input=${(e: Event) => (s.botToken = (e.target as HTMLInputElement).value)}
+      />
+      <label for="discord-oauth-client-secret"
+        >OAuth2 client secret (for "Connect Discord" in user settings)
+        ${d.oauthConfigured ? "(set; leave empty to keep)" : ""}</label
+      >
+      <input
+        id="discord-oauth-client-secret"
+        type="password"
+        autocomplete="new-password"
+        .value=${live(s.oauthClientSecret)}
+        @input=${(e: Event) => (s.oauthClientSecret = (e.target as HTMLInputElement).value)}
+      />
+      <label for="discord-redirect-uri"
+        >OAuth2 redirect URI (add it under OAuth2 → Redirects in the Developer Portal)</label
+      >
+      <input id="discord-redirect-uri" readonly .value=${d.redirectUri ?? ""} />
+      <button
+        type="button"
+        class="copy"
+        id="discord-copy-redirect-uri"
+        @click=${async (e: MouseEvent) => {
+          const btn = e.currentTarget as HTMLButtonElement | null;
+          const ok = await copyText(d.redirectUri ?? "");
+          if (btn) {
+            btn.textContent = ok ? "Copied" : "Copy failed";
+            if (ok) {
+              btn.classList.add("copied");
+              setTimeout(() => {
+                btn.textContent = "Copy redirect URI";
+                btn.classList.remove("copied");
+              }, 1200);
+            }
+          }
+        }}
+      >
+        Copy redirect URI
+      </button>
+      ${field("discord-allow-user-ids", "Allowlisted user ids", "allowUserIds")}
+      ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
+      ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
+      <label
+        ><input
+          id="discord-principal-deliveries"
+          type="checkbox"
+          .checked=${s.principalDeliveries}
+          @change=${(e: Event) => (s.principalDeliveries = (e.target as HTMLInputElement).checked)}
+        />
+        Deliver personal notices (keychain requests, access requests, messages to a person) to linked Discord
+        accounts</label
+      >
+      <div class="actions">
+        <button id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>
+        <button
+          id="discord-remove"
+          class=${d.configured ? "" : "hidden"}
+          ?disabled=${!!s.busy}
+          @click=${() => s.remove()}
+        >
+          Disconnect
+        </button>
+      </div>
+      <p class="hint ${s.tone}">${s.message}</p>
+    </div>
+  </section>`;
+};
 function overrideCount(s: SlackSetting) {
   const n = s.collect().members!.length;
   return n ? n + " override" + (n === 1 ? "" : "s") : "No overrides configured.";
@@ -596,6 +722,7 @@ export function mountCards() {
     const draw = () => render(template(), fragment);
     if (id === "card-connectors") connectors.render = draw;
     else if (id === "card-slack-installation") installation.render = draw;
+    else if (id === "card-discord-installation") discordInstallation.render = draw;
     else {
       const key = (
         {

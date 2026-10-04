@@ -43,7 +43,6 @@ import type { RunSignalStore } from "../runs/run-signal-store.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { FileArtifactStore } from "../files/file-artifact-store.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
-import type { SandboxMigrationRunner } from "../sandbox/sandbox-migration-runner.ts";
 import type { EgressEnforcement, Sandbox } from "../sandbox/sandbox.ts";
 import type { EnvironmentStore } from "../environments/environment-store.ts";
 import type { Scheduler } from "../cron/scheduler.ts";
@@ -78,8 +77,10 @@ import type { ConnectorTokenSource, SlackUserClient } from "../loops/sources/ada
 import type { RateLimiter } from "../ratelimit/rate-limiter.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces/slack-installation.ts";
+import type { DiscordInstallationStore } from "../surfaces/discord-installation.ts";
 
 import type { SlackAccountLink, ComposioReturn } from "./routes/composio.ts";
+import type { DiscordAccountLink } from "./routes/discord-link.ts";
 
 export interface ServerDeps {
   externalSlackPolicies?: ExternalSlackPolicies;
@@ -87,6 +88,7 @@ export interface ServerDeps {
   browserModelGateway?: ModelGatewayTransportConfig;
   resolveBrowserCompanyKeys?: (includeSubscription?: boolean) => Promise<ProviderKeys>;
   slackAccounts?: DurableMap<SlackAccountLink>;
+  discordAccounts?: DurableMap<DiscordAccountLink>;
   composioReturns?: DurableMap<ComposioReturn>;
   composioFetch?: typeof fetch;
   suggestedActivities?: ReturnType<typeof createSuggestedActivityService>;
@@ -109,6 +111,9 @@ export interface ServerDeps {
   slackEnvironmentState?: "absent" | "configured" | "partial";
   slackEventsPort?: number;
   slackEnvBotToken?: string;
+  discordInstallation?: DiscordInstallationStore;
+  discordInstallationFetch?: typeof fetch;
+  discordEnvironmentConfigured?: boolean;
   oauthStateSecret?: string;
   oauthFetch?: FetchLike;
   oauthEnv?: NodeJS.ProcessEnv;
@@ -166,7 +171,6 @@ export interface ServerDeps {
   egressDeclaredEnforcement?: EgressEnforcement;
   egressEnforcement?: EgressEnforcement;
   egressControlPlaneConfigured?: boolean;
-  sandboxMigration?: SandboxMigrationRunner;
   sandboxResources?: SandboxResources;
   sandbox?: Sandbox;
   advisoryLock?: AdvisoryLock;

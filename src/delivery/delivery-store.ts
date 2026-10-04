@@ -2,8 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { Delivery, DeliveryProvenance, Destination, OutgoingAttachment, ScopeId } from "../types.ts";
 import type { TurnOrigin } from "../core/turn-origin.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
+import { DISCORD_DM_DELIVERY_TYPE } from "../discord/config.ts";
 
 export const DELIVERY_MAX_AGE_MS = 6 * 3_600_000;
+
+export const PERSON_ADDRESSED_TYPES = ["principal", DISCORD_DM_DELIVERY_TYPE] as const;
+
+export function isPersonAddressed(destination: { type: string }): boolean {
+  return (PERSON_ADDRESSED_TYPES as readonly string[]).includes(destination.type);
+}
 
 export function logDeliveryExpiry(d: Delivery, now: number, reason = "overaged"): void {
   console.error(
@@ -178,7 +185,7 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
     },
     async recordRecipientThread(id, recipientThreadRef, at) {
       const d = deliveries.get(id);
-      if (!d || d.destination.type !== "principal") return;
+      if (!d || !isPersonAddressed(d.destination)) return;
       d.recipientThreadRef = recipientThreadRef;
       if (d.deliveredAt === null) {
         d.deliveredAt = at;
@@ -188,7 +195,7 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
     async listByRecipientThread(recipientThreadRef, opts) {
       const limit = Math.max(1, opts?.limit ?? 20);
       return [...deliveries.values()]
-        .filter((d) => d.recipientThreadRef === recipientThreadRef && d.destination.type === "principal")
+        .filter((d) => d.recipientThreadRef === recipientThreadRef && isPersonAddressed(d.destination))
         .sort((a, b) => a.createdAt - b.createdAt)
         .slice(-limit);
     },
@@ -196,7 +203,9 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
       const limit = Math.max(1, opts?.limit ?? 20);
       return [...deliveries.values()]
         .filter(
-          (d) => d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef,
+          (d) =>
+            !d.destination.copyOf &&
+            (d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef),
         )
         .sort((a, b) => a.createdAt - b.createdAt)
         .slice(-limit);
@@ -206,7 +215,7 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
       const byId = new Set(sources.map((s) => s.sessionId));
       const byThreadRef = new Map(sources.map((s) => [s.threadRef, s.sessionId]));
       for (const d of deliveries.values()) {
-        if (d.shadow || d.expiredAt !== undefined || !d.provenance) continue;
+        if (d.shadow || d.expiredAt !== undefined || !d.provenance || d.destination.copyOf) continue;
         let id: string | undefined;
         if (d.provenance.sourceSessionId) {
           if (byId.has(d.provenance.sourceSessionId)) id = d.provenance.sourceSessionId;

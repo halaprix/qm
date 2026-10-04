@@ -114,7 +114,6 @@ import {
   type SubagentMailRef,
   type ToolActivity,
   type TurnOptions,
-  userMessagesBefore,
   type WorkBlock,
   fileContentUrl,
 } from "./core-bridge";
@@ -197,6 +196,7 @@ import {
   type PeekLine,
   type SubagentRow,
 } from "./subagent-activity";
+import { createSwarmStrip } from "./swarm-strip.ts";
 import { newChatDraftKey, saveDraft, storedDraft } from "./drafts";
 import { createForkOriginController, forkOriginView } from "./fork-origin";
 import { base64ToBytes } from "./paste-text";
@@ -206,6 +206,7 @@ import { decorateTextCodeBlocks } from "./text-code";
 
 import { createTranscriptViewport } from "./transcript-viewport";
 import { suggestedActivities } from "./suggested-activities";
+import { reportHandledError } from "./browser-errors.ts";
 
 installMarkdownSanitizer();
 
@@ -882,8 +883,8 @@ export function createChatSurface(
       const rawEarlier = page.earlierEntries ?? 0;
       chatState.earlierCount = currentEarlierCount(chatState.forkSession ?? {}, rawEarlier);
       chatState.transcriptAnchorSeq = rawEarlier > 0 ? (page.entries?.[0]?.seq ?? null) : null;
-    } catch {
-      void 0;
+    } catch (error) {
+      reportHandledError("web:transcript_refresh", error);
     }
     drawActiveChat(agent);
   }
@@ -907,7 +908,8 @@ export function createChatSurface(
     let active: Awaited<ReturnType<typeof activeRunForThread>>;
     try {
       active = await activeRunForThread(threadRef);
-    } catch {
+    } catch (error) {
+      reportHandledError("web:reattach_active_run", error);
       return;
     }
     if (agent !== chatState.agent || threadRef !== chatState.threadRef || agent.state.isStreaming) return;
@@ -939,7 +941,8 @@ export function createChatSurface(
     let activeRun: Awaited<ReturnType<typeof activeRunForThread>>;
     try {
       activeRun = await activeRunForThread(threadRef);
-    } catch {
+    } catch (error) {
+      reportHandledError("web:resume_active_run", error);
       return false;
     }
     if (agent === chatState.agent && threadRef === chatState.threadRef)
@@ -1292,7 +1295,8 @@ export function createChatSurface(
     else readonlyRedraw?.();
   }
 
-  function togglePins(): void {
+  function togglePins(e: Event): void {
+    if ((e.target as Element | null)?.closest("a")) return;
     chatState.pinsExpanded = !chatState.pinsExpanded;
     if (chatState.agent) drawActiveChat(chatState.agent);
     else readonlyRedraw?.();
@@ -1301,9 +1305,7 @@ export function createChatSurface(
   function linkifiedText(text: string): TemplateResult {
     return html`${splitLinks(text).map((seg) =>
       seg.kind === "link"
-        ? html`<a href=${seg.href} target="_blank" rel="noreferrer noopener" @click=${(e: Event) => e.stopPropagation()}
-            >${seg.href}</a
-          >`
+        ? html`<a href=${seg.href} target="_blank" rel="noreferrer noopener">${seg.href}</a>`
         : seg.text,
     )}`;
   }
@@ -1404,8 +1406,8 @@ export function createChatSurface(
         scrollerNow.scrollTop = priorTop + (scrollerNow.scrollHeight - priorHeight);
         scrollerNow.style.scrollBehavior = prev;
       });
-    } catch {
-      void 0;
+    } catch (error) {
+      reportHandledError("web:load_earlier", error);
     } finally {
       if (agent === chatState.agent && sessionId === chatState.sessionId && chatState.loadingEarlier) {
         chatState.loadingEarlier = false;
@@ -1533,7 +1535,7 @@ export function createChatSurface(
         busy: agent.state.isStreaming,
         showPrompts: !messages.length,
         toolbar: html`${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()}
-        ${backgroundActivityStrip()}`,
+        ${swarmUi.strip(chatState.sessionId)} ${backgroundActivityStrip()}`,
         composer: ctx.composer.composerForm(agent),
         onPrompt: (prompt) => ctx.composer.fillSuggestedPrompt(prompt, agent),
         onDragEnter: (event) => ctx.composer.onDragEnter(event),
@@ -1578,8 +1580,9 @@ export function createChatSurface(
             </div>
           </section>
           <div class="chat-bottom-dock">
-            ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()} ${backgroundActivityStrip()}
-            ${ctx.composer.composerForm(agent)} ${ctx.pane ? nothing : suggestions}
+            ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()}
+            ${swarmUi.strip(chatState.sessionId)} ${backgroundActivityStrip()} ${ctx.composer.composerForm(agent)}
+            ${ctx.pane ? nothing : suggestions}
           </div>
         </div>
       `;
@@ -1693,7 +1696,7 @@ export function createChatSurface(
       !work?.activity.some(
         (activity) =>
           activity.type === "user" ||
-          ["session", "sessions"].includes((activity.payload as ToolPayload | null)?.tool ?? ""),
+          ["session", "sessions", "subagents"].includes((activity.payload as ToolPayload | null)?.tool ?? ""),
       ) &&
       (!work || ((work.status === "complete" || work.status === "failed") && !work.pendingApprovals?.length));
     if (!cacheable) return chatMessage(message, index, isStreaming);
@@ -1994,20 +1997,13 @@ export function createChatSurface(
     const sessionId = chatState.sessionId;
     const sourceThreadRef = chatState.threadRef;
     if (!agent || !sessionId) return;
-    const messages = agent.state.messages as Array<{ role?: string }>;
-    const target = messages[index];
-    if (!target) return;
-    const isUser = target.role === "user" || target.role === "user-with-attachments";
-    let userOrdinal = 0;
-    for (let i = 0; i <= index; i++) {
-      const role = messages[i]?.role;
-      if (role === "user" || role === "user-with-attachments") userOrdinal++;
-    }
+    const messages = agent.state.messages;
+    if (!messages[index]) return;
+    const floorSeq = Math.max(chatState.forkSession?.forkBoundarySeq ?? -1, (chatState.transcriptAnchorSeq ?? 0) - 1);
     try {
       const { entries } = await api<{ entries: SessionEntry[] }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
-      const anchor = chatState.transcriptAnchorSeq;
-      if (anchor !== null) userOrdinal += userMessagesBefore(entries ?? [], anchor);
-      const upToSeq = forkCutSeq(entries ?? [], userOrdinal, isUser);
+      const upToSeq = forkCutSeq(entries ?? [], messages, index, floorSeq);
+      if (upToSeq === undefined) throw new Error("That message is still saving. Try forking again in a moment.");
       const forked = await forkSession(sessionId, upToSeq);
       const split = inheritedTranscript(forked.session, forked.entries ?? []);
       ctx.composer.carryModelPick(sourceThreadRef, forked.session.threadRef);
@@ -2445,6 +2441,7 @@ export function createChatSurface(
     `;
   }
 
+  const swarmUi = createSwarmStrip(() => drawActiveChat());
   const SUBAGENT_ACK_KEY = "qm.subagentAck";
   const subagentUi = {
     expanded: false,
@@ -3200,8 +3197,8 @@ export function createChatSurface(
     redrawTranscript();
   }
 
-  function fileChip(name: string, size?: number, href?: string): TemplateResult {
-    return chipBadge(Paperclip, name, size, href);
+  function fileChip(name: string, size?: number, href?: string, mimetype?: string): TemplateResult {
+    return chipBadge(Paperclip, name, size, href, false, mimetype);
   }
 
   function inlineHtmlName(name?: string, mimeType?: string): boolean {
@@ -3337,7 +3334,7 @@ export function createChatSurface(
       }
       if (src) return inlineHtmlFrame(a.fileName, src, a.size, artifactHref);
     }
-    return fileChip(a.fileName, a.size, artifactHref ?? localContentUrl(a));
+    return fileChip(a.fileName, a.size, artifactHref ?? localContentUrl(a), a.mimeType);
   }
 
   function deliveredFileBadge(file: DeliveredFile): TemplateResult {
@@ -3350,7 +3347,7 @@ export function createChatSurface(
       /></a>`;
     }
     if (inlineHtmlName(file.name, file.mimetype)) return inlineHtmlFrame(file.name, href, file.sizeBytes, href);
-    return fileChip(file.name, file.sizeBytes, href);
+    return fileChip(file.name, file.sizeBytes, href, file.mimetype);
   }
 
   function scrollToBottom(): void {

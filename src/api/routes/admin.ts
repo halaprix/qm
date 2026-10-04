@@ -21,7 +21,7 @@ import {
   putAdminCronRuntime,
 } from "./admin/artifacts.ts";
 import { getAdminMemory, listMemoryScopes, putAdminMemory } from "./admin/memory.ts";
-import { listSandboxRoutes, migrateSandboxScope, manageSandboxResources } from "./admin/sandbox.ts";
+import { manageSandboxResources } from "./admin/sandbox.ts";
 import {
   createAdminGrant,
   getUserDetail,
@@ -51,6 +51,11 @@ import {
   startSlackInstallation,
   managedSlackRequest,
 } from "./admin/slack-installation.ts";
+import {
+  deleteDiscordInstallation,
+  getDiscordInstallation,
+  putDiscordInstallation,
+} from "./admin/discord-installation.ts";
 import { deleteModelProvider, getModelProviders, putModelProvider } from "./admin/model-providers.ts";
 import { deleteCustomProvider, getCustomProviders, putCustomProvider } from "./admin/custom-providers.ts";
 import { deleteMcpServer, getMcpServers, putMcpServer } from "./admin/mcp-servers.ts";
@@ -84,6 +89,9 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "GET", path: "/v1/admin/slack-emoji", auth: "either", handle: getSlackEmojiList },
   { method: "PUT", path: "/v1/admin/slack-installation", auth: "either", handle: putSlackInstallation },
   { method: "DELETE", path: "/v1/admin/slack-installation", auth: "either", handle: deleteSlackInstallation },
+  { method: "GET", path: "/v1/admin/discord-installation", auth: "either", handle: getDiscordInstallation },
+  { method: "PUT", path: "/v1/admin/discord-installation", auth: "either", handle: putDiscordInstallation },
+  { method: "DELETE", path: "/v1/admin/discord-installation", auth: "either", handle: deleteDiscordInstallation },
   { method: "GET", path: "/v1/admin/model-providers", auth: "either", handle: getModelProviders },
   { method: "PUT", path: "/v1/admin/model-providers/:provider", auth: "either", handle: putModelProvider },
   { method: "GET", path: "/v1/admin/mcp-servers", auth: "either", handle: getMcpServers },
@@ -151,8 +159,6 @@ const routes: ReadonlyArray<Route<ApiCtx>> = [
   { method: "PUT", path: "/v1/admin/memory", auth: "either", handle: putAdminMemory },
   { method: "GET", path: "/v1/admin/sandboxes/:scopeId", auth: "either", handle: manageSandboxResources },
   { method: "POST", path: "/v1/admin/sandboxes/:scopeId", auth: "either", handle: manageSandboxResources },
-  { method: "GET", path: "/v1/admin/sandbox-routes", auth: "either", handle: listSandboxRoutes },
-  { method: "POST", path: "/v1/admin/sandbox-routes/:scopeId/migrate", auth: "either", handle: migrateSandboxScope },
   { method: "GET", path: "/v1/admin/users", auth: "either", handle: listUsers },
   { method: "GET", path: "/v1/admin/directory", auth: "either", handle: searchDirectory },
   { method: "GET", path: "/v1/admin/keychain", auth: "either", handle: listKeychainStatus },

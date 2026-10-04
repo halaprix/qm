@@ -15,19 +15,17 @@ export let context: Context;
 export function configure(value: Context) {
   context = value;
 }
+const splitIds = (raw: string, sep: RegExp = /[\s,]+/) =>
+  String(raw || "")
+    .split(sep)
+    .map((s) => s.trim())
+    .filter(Boolean);
 export class SlackSetting extends SettingState {
   scope = "";
   collect() {
     if (this.key === "internal-member-overrides")
       return {
-        members: [
-          ...new Set(
-            String(this.draft.text || "")
-              .split(/[\n,]/)
-              .map((x) => x.trim().toLowerCase())
-              .filter(Boolean),
-          ),
-        ],
+        members: [...new Set(splitIds(this.draft.text, /[\n,]/).map((x) => x.toLowerCase()))],
       };
     if (this.key === "ack-emoji") return { names: [...(this.draft.names || [])] };
     return { on: !!this.draft.on };
@@ -334,3 +332,73 @@ export const emoji = {
     states.get("ack-emoji")!.render();
   },
 };
+
+class DiscordInstallationState {
+  data: Record<string, any> = {};
+  botToken = "";
+  oauthClientSecret = "";
+  allowUserIds = "";
+  guildIds = "";
+  internalRoleIds = "";
+  principalDeliveries = true;
+  busy = "";
+  message = "";
+  tone = "";
+  render = () => {};
+  setStatus(message: string, tone: string) {
+    this.message = message;
+    this.tone = tone;
+    this.render();
+  }
+  async load() {
+    const result = await context.api("GET", "/api/discord-installation");
+    if (!result.ok) return this.setStatus(result.data?.message || "Failed to load Discord status.", "err");
+    this.data = result.data;
+    this.botToken = "";
+    this.oauthClientSecret = "";
+    this.allowUserIds = (this.data.allowUserIds ?? []).join(", ");
+    this.guildIds = (this.data.guildIds ?? []).join(", ");
+    this.internalRoleIds = (this.data.internalRoleIds ?? []).join(", ");
+    this.principalDeliveries = this.data.principalDeliveries !== false;
+    this.render();
+  }
+  async save() {
+    if (this.busy) return;
+    this.busy = "save";
+    this.setStatus("Saving…", "saving");
+    try {
+      const token = this.botToken.trim();
+      const clientSecret = this.oauthClientSecret.trim();
+      const result = await context.api("PUT", "/api/discord-installation", {
+        ...(token ? { botToken: token } : {}),
+        ...(clientSecret ? { oauthClientSecret: clientSecret } : {}),
+        allowUserIds: splitIds(this.allowUserIds),
+        guildIds: splitIds(this.guildIds),
+        internalRoleIds: splitIds(this.internalRoleIds),
+        principalDeliveries: this.principalDeliveries,
+      });
+      if (!result.ok) return this.setStatus(result.data?.message || "Save failed.", "err");
+      await this.load();
+      this.setStatus("Saved. The bot reconnects within a few seconds.", "ok");
+    } finally {
+      this.botToken = "";
+      this.oauthClientSecret = "";
+      this.busy = "";
+      this.render();
+    }
+  }
+  async remove() {
+    if (this.busy || !confirm("Disconnect the Discord bot? QM stops answering on Discord until you reconnect.")) return;
+    this.busy = "remove";
+    try {
+      const result = await context.api("DELETE", "/api/discord-installation");
+      if (!result.ok) return this.setStatus(result.data?.message || "Disconnect failed.", "err");
+      await this.load();
+      this.setStatus("Discord disconnected.", "ok");
+    } finally {
+      this.busy = "";
+      this.render();
+    }
+  }
+}
+export const discordInstallation = new DiscordInstallationState();

@@ -2,6 +2,7 @@ import { loadMessageTranscript, messageLinkSeq } from "./message-link.ts";
 import { initializeBrowserErrors, stopBrowserErrors } from "./browser-errors";
 import { initializeAnalytics, capturePageview, stopAnalytics } from "./product-analytics";
 import { captureSlackReturn } from "./slack-account";
+import { captureDiscordReturn } from "./discord-account";
 import { captureConnectionReturn } from "./connection-return";
 import { renderModelConnectGate } from "./model-connect";
 import { html, nothing, render, type TemplateResult } from "lit";
@@ -40,6 +41,9 @@ import {
   TAIL_TURNS,
   webFetch,
   withBase,
+  type CoreSession,
+  type PendingApproval,
+  type TranscriptPage,
 } from "./core-bridge";
 import { seedRuntimeConfig } from "./runtime-config-store";
 import { errMessage, swallow } from "../../chassis/src/errors";
@@ -49,7 +53,7 @@ import { markConnectorConnected } from "./chat";
 import { clearSkillsCache, resyncModelSelection } from "./composer";
 import { allConversations, ensureDeliveryStream, mainConversation, onExitCanvas } from "./conversations";
 import { clearAllDrafts, newChatDraftKey, saveDraft, storedDraft } from "./drafts";
-import { deepLinkPath, isPlainLeftClick, parseDeepLink, UI_BASE } from "./deep-link";
+import { deepLinkPath, isPlainLeftClick, parseDeepLink, sessionLinkTarget, UI_BASE } from "./deep-link";
 import {
   adoptRemoteSplit,
   beginPaneKindDrag,
@@ -101,7 +105,8 @@ import {
   routeInboxHistory,
 } from "./inbox";
 import { openSkillById, renderSkills, resetActiveSkill, routeSkillsHistory } from "./skills";
-import { applyTheme, renderSettings, watchSystemTheme } from "./settings";
+import { watchAppAnnotations } from "./app-annotations";
+import { applyTheme, renderSettings, loadOpenNewChat, watchSystemTheme } from "./settings";
 import { contextsState, ensureContexts, renderContexts, resetContextsState, resolveProjectScope } from "./contexts";
 import { appState, can, canView, isView, type AuthMode, type Me, type View } from "./shell-state";
 import { trapDialogFocus } from "./dialog-focus";
@@ -258,9 +263,11 @@ export async function signOut(): Promise<void> {
     return;
   }
   let endedSession: boolean;
+  let redirectTo = "/";
   try {
     const r = await fetch("/auth/logout", { method: "POST", headers: { accept: "application/json" } });
     endedSession = r.ok;
+    if (r.ok) redirectTo = ((await r.json()) as { redirectTo?: string }).redirectTo ?? "/";
   } catch {
     endedSession = false;
   }
@@ -269,7 +276,7 @@ export async function signOut(): Promise<void> {
     return;
   }
   clearPortalAttempt();
-  location.href = "/";
+  location.href = redirectTo;
 }
 
 export async function exitImpersonation(): Promise<void> {
@@ -1012,10 +1019,55 @@ export async function bootSafely(): Promise<void> {
   }
 }
 
+async function showLinkedSession(
+  linked: CoreSession,
+  transcript: Promise<TranscriptPage | null>,
+  seq: number | null,
+  approvals?: Promise<{ approvals: PendingApproval[] } | null>,
+): Promise<void> {
+  if (!sessionsState.list.some((s) => s.id === linked.id)) sessionsState.list = [linked, ...sessionsState.list];
+  revealSessionSurface(linked);
+  await openSession(linked, transcript, approvals);
+  if (seq !== null)
+    requestAnimationFrame(() => {
+      for (const conversation of allConversations())
+        if (conversation.state.sessionId === linked.id) conversation.revealEntry(seq);
+    });
+}
+
+// Session links nobody else handled (chat messages, markdown) switch the view instead of opening a new
+// tab or desktop window. Modified clicks fall through, so cmd/ctrl-click still opens a new tab.
+document.addEventListener("click", (e) => {
+  if (!shellMounted || e.defaultPrevented || !isPlainLeftClick(e)) return;
+  const anchor = e.composedPath().find((node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement);
+  if (!anchor?.href || anchor.hasAttribute("download")) return;
+  const target = sessionLinkTarget(anchor.href, location.origin, UI_BASE);
+  if (!target) return;
+  e.preventDefault();
+  const open = allConversations().find(
+    (conversation) => conversation.state.sessionId === target.session && conversation.state.host?.isConnected,
+  );
+  if (open) {
+    if (target.seq !== null) open.revealEntry(target.seq);
+    return;
+  }
+  const transcript = loadMessageTranscript(
+    (window) => fetchTranscript(target.session, window),
+    target.seq,
+    TAIL_TURNS,
+  ).catch(() => null);
+  void (async () => {
+    const linked = sessionsState.list.find((s) => s.id === target.session) ?? (await transcript)?.session;
+    if (linked) await showLinkedSession(linked, transcript, target.seq);
+    else location.assign(anchor.href);
+  })();
+});
+
 export async function boot(): Promise<void> {
   if (new URLSearchParams(location.search).get("themeOnly") === "1") return;
   captureConnectionReturn(location.href);
   captureSlackReturn(location.href);
+  captureDiscordReturn(location.href);
   const params = new URLSearchParams(location.search);
   const {
     view: wanted,
@@ -1038,6 +1090,7 @@ export async function boot(): Promise<void> {
   const approvalsPrefetch = linkedId ? fetchSessionApprovals(linkedId) : null;
   const runtimeConfigFetch = fetchRuntimeConfig();
   const remoteSplitFetch = fetchRemoteSplit();
+  const openNewChatFetch = loadOpenNewChat();
 
   let r: Response;
   try {
@@ -1085,8 +1138,9 @@ export async function boot(): Promise<void> {
   const connectedProvider = params.get("status") === "connected" ? params.get("connector") : null;
   if (connectedProvider) markConnectorConnected(connectedProvider);
   const viewIntent = isView(wanted) && canView(wanted) && wanted !== "chats";
-  loadPersistedSplit();
-  if (!wantedSession && wanted !== "app-edit" && prefill === null) {
+  const restoreLast = viewIntent || !(await openNewChatFetch);
+  if (restoreLast) loadPersistedSplit();
+  if (restoreLast && !wantedSession && wanted !== "app-edit" && prefill === null) {
     const restore = adoptRemoteSplit(remoteSplitFetch).then(async () => {
       if (viewIntent && restoredCanvasNeedsSessionList()) await sessions;
     });
@@ -1098,21 +1152,14 @@ export async function boot(): Promise<void> {
   }
 
   const bareEntry = !viewIntent && !wantedSession && wanted !== "app-edit" && !connectedProvider;
-  if (bareEntry && !restoredCanvasNeedsSessionList()) mountRestoredCanvas(true);
+  if (restoreLast && bareEntry && !restoredCanvasNeedsSessionList()) mountRestoredCanvas(true);
 
   if (wantedSession && !viewIntent && wanted !== "app-edit") {
     const transcript = entriesPrefetch ?? loadLinkedTranscript(wantedSession);
     const linked = (await transcript)?.session;
     if (linked) {
       exitSplitIfActive();
-      if (!sessionsState.list.some((s) => s.id === linked.id)) sessionsState.list = [linked, ...sessionsState.list];
-      revealSessionSurface(linked);
-      await openSession(linked, transcript, approvalsPrefetch ?? undefined);
-      if (wantedSeq !== null)
-        requestAnimationFrame(() => {
-          for (const conversation of allConversations())
-            if (conversation.state.sessionId === linked.id) conversation.revealEntry(wantedSeq);
-        });
+      await showLinkedSession(linked, transcript, wantedSeq, approvalsPrefetch ?? undefined);
       return;
     }
     await sessions;
@@ -1161,6 +1208,10 @@ export async function boot(): Promise<void> {
     const slug = (params.get("slug") ?? "").toLowerCase();
     if (/^[a-z0-9-]{1,63}$/.test(slug)) {
       openAppEditChat(slug);
+      if (params.get("embed") === "1")
+        watchAppAnnotations(slug, (text, files, id, remove) =>
+          mainConversation().composer.addAnnotations(text, files, id, remove),
+        );
       return;
     }
     showMainEmpty("This edit link is missing a valid app name.");
@@ -1171,7 +1222,7 @@ export async function boot(): Promise<void> {
     const recent = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a))[0]!;
     exitSplitIfActive();
     await openSession(recent);
-  } else if (!mountRestoredCanvas() && !mainConversation().state.threadRef) {
+  } else if (!(restoreLast && mountRestoredCanvas()) && !mainConversation().state.threadRef) {
     mainConversation().newChat();
   }
 }

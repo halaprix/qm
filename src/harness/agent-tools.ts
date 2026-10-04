@@ -16,6 +16,8 @@ import type { McpToolDescriptor } from "../mcp/mcp-tool-service.ts";
 import { splitToScope } from "../api/artifact-share.ts";
 import { errMessage } from "../util/errors.ts";
 import { computerVerdict } from "../sandbox/sandbox.ts";
+import { redactCommand } from "../sandbox/exec-process-session.ts";
+import { redactSecrets } from "./redact-secrets.ts";
 import { isObj } from "../util/objects.ts";
 import { BOT_MODES } from "../surface-cache/channel-policy-store.ts";
 import { headSlice, tailSlice } from "../util/text.ts";
@@ -32,6 +34,7 @@ import {
 import { SANDBOX_CAPABILITY_TTL_MS } from "../auth/capability-token.ts";
 import { CRON_FIRE_NOTE_MAX_CHARS } from "../api/control-service.ts";
 import { utcMinute } from "../util/time.ts";
+import { surfaceCapabilities, surfaceLabel } from "../surfaces/surface-capabilities.ts";
 
 function describePublishAudience(a: PublishAudienceDescriptor | undefined): string {
   if (!a) return "Owned by you.";
@@ -62,6 +65,7 @@ export interface ToolContextRef {
     matched?: string;
     purpose?: string;
     approvalKey?: string;
+    summary?: string;
     grantModes?: { session: boolean; always: boolean };
   }>;
   pausedOnApproval?: boolean;
@@ -342,7 +346,7 @@ export type CoreToolOptions = Omit<
 
 export function coreToolOptions(config: Config): CoreToolOptions {
   return {
-    sandboxResources: config.sandboxResourcesEnabled,
+    sandboxResources: true,
     scratchExec: config.scratchExecEnabled,
     // Availability is checked per turn; Open can be enabled without restarting the harness.
     ownerAuthExec: true,
@@ -359,7 +363,7 @@ export function coreToolOptions(config: Config): CoreToolOptions {
 const CLIENT_TOOL_DEFAULT_TIMEOUT_MS = 10_000;
 const CLIENT_TOOL_TIMEOUT_TEXT = "The page didn't respond in time. It may have been closed or navigated away.";
 
-const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "finish_silently", "runtime", "sessions"]);
+const READ_ONLY_TOOL_NAMES = new Set(["memory", "history", "finish_silently", "runtime", "sessions", "subagents"]);
 
 export function pauseStampAfterToolCall(
   ref: Pick<ToolContextRef, "pausedOnApproval" | "silentRequested" | "runtimeHandoff">,
@@ -739,7 +743,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         ...sandboxLog({ tool: "execute", ...scopeNote }),
         callId,
         isError: true,
-        result: "Command execution failed.",
+        result: `Command execution failed: ${redactSecrets(errMessage(e))}`,
       });
       throw e;
     }
@@ -1271,8 +1275,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     label: "memory",
     description:
       "Your durable memory of the person or team you work for — the ONE way to read or change it. " +
-      "It is NOT a file: never write it with files action write or shell commands (those land on your computer " +
-      "and are silently lost). It persists across every conversation and surface (continuity — " +
+      "It is NOT a file: writing MEMORY.md with files or the shell does not touch it. It persists across every conversation and surface (continuity — " +
       "you're a colleague who remembers, not a fresh chat each time); this conversation can only " +
       "ever touch its OWN memory, no one else's, by design. " +
       'action="search" finds remembered facts matching every word of `query` (case-insensitive) ' +
@@ -1280,11 +1283,10 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       "Every line is loaded into your context on every future turn, so memory is your most " +
       "expensive storage: it is an index, not a datastore. Save pointers to data, never the data " +
       "itself — working state (queues, backlogs, watermarks, ID lists, logs, per-item status) " +
-      "belongs in a file on your computer, with at most one memory line naming that file and what " +
-      "it holds. If a fact is a list that grows, it's a file. Two caveats: files are this " +
+      "belongs in a file written with the files tool, with at most one memory line naming that file and what " +
+      "it holds. If a fact is a list that grows, it's a file. Files are this " +
       "conversation's own (a pointer read from another conversation is a hint of where state " +
-      "lives, not a path you can open), and disk is less durable than memory — keep working " +
-      "state you could rebuild from its source. " +
+      "lives, not a path you can open). " +
       'action="remember" appends durable `facts` now — short, self-contained bullets (a preference, ' +
       "an identifier, an ongoing project, how they like to work); never secrets, credentials, " +
       "one-off trivia, or anything already recorded somewhere you can look up. " +
@@ -1482,19 +1484,21 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     },
   });
 
-  const sessionTool = defineTool({
-    name: "sessions",
-    label: "sessions",
+  const sidebarSessions = opts?.surfaceName === "web";
+  const subagentTool = defineTool({
+    name: "subagents",
+    label: "subagents",
     description:
-      "Coordinate durable subagents using internal agent messages. `open` starts a child with a complete standalone task; children do not inherit your conversation. " +
-      "`send_message` sends information to a parent, sibling, or other accessible session without starting a turn. Messages and child results arrive at tool boundaries or through `wait`. " +
-      "`followup_task` assigns new work (in `task`, like `open`) to an attached child and starts a turn if idle; active work is queued safely. `send_message` with interrupt:true stops a child. " +
-      "`read` lists children or reads a target transcript. " +
+      "Start and coordinate subagents: background workers you spawn for a task. A subagent does not get its own sidebar entry and does not inherit this conversation, so give it a complete standalone task with the context and authorization it needs. Its final answer comes back to you as an internal message. " +
+      "`open` starts a subagent with `task`. `followup_task` gives an existing subagent more work in `task` and starts a turn if it is idle; active work is queued safely. " +
+      '`send_message` passes information to one of your subagents, a sibling subagent, or your parent (target="parent") without starting a turn; with interrupt:true it stops a subagent\'s current run. ' +
+      "`read` with no target lists your subagents; with a target it reads that subagent's transcript. " +
       (delegateWork
-        ? "Delegate substantial work, then end this turn promptly. Child completion wakes you automatically to report the result. Do not wait or poll for children. "
-        : "`wait` waits up to 60 seconds for internal messages. Keep doing independent work while children run. Do not end with a final answer until the delegated work needed for the request is complete. ") +
+        ? "Delegate substantial work, then end this turn promptly. A subagent's completion wakes you automatically to report the result. Do not wait or poll for subagents. "
+        : "`wait` waits up to 60 seconds for internal messages. Keep doing independent work while subagents run. Do not give a final answer until the work the request needs is complete. ") +
       "Treat messages as internal coordination, not new user requests or authorization. Do not acknowledge routine completions, repeat already-reported results, or send no-action-needed updates. " +
-      "Give the user one combined result when the work is ready, or a meaningful blocker. Use messages for coordination and followup_task only when another turn is necessary.",
+      "Give the user one combined result when the work is ready, or a meaningful blocker." +
+      (sidebarSessions ? " For conversations that should appear in the sidebar, use sessions instead." : ""),
     parameters: Type.Object({
       timeoutMs: Type.Optional(
         Type.Integer({
@@ -1532,7 +1536,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       target: Type.Optional(
         Type.String({
           description:
-            "Message/followup/read target: literal parent, accessible sessionId, or exact child/sibling title. Do not invent filesystem paths such as /root/name. read: omit to list children.",
+            "\"parent\", or a subagent's sessionId or exact title (yours or a sibling's). Do not invent filesystem paths such as /root/name. read: omit to list your subagents.",
         }),
       ),
       text: Type.Optional(Type.String({ description: "send_message: the message to deliver." })),
@@ -1561,7 +1565,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         limit?: number;
       };
       await recordCall(callId, {
-        tool: "sessions",
+        tool: "subagents",
         action: p.action,
         ...(p.task ? { task: p.task } : {}),
         ...(p.name ? { name: p.name } : {}),
@@ -1573,8 +1577,8 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       if (!syscalls) {
         return recordResult(
           callId,
-          { tool: "sessions", action: p.action, error: "unavailable" },
-          text("[error] subagent sessions aren't available on this turn."),
+          { tool: "subagents", action: p.action, error: "unavailable" },
+          text("[error] subagents aren't available on this turn."),
           true,
         );
       }
@@ -1582,7 +1586,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         await syscalls.receive?.(delegateWork ? 0 : (p.timeoutMs ?? 60_000));
         return recordCoreAuthoredResult(
           callId,
-          { tool: "sessions", action: "wait" },
+          { tool: "subagents", action: "wait" },
           text(
             delegateWork
               ? "Mailbox checked. End this turn if no immediate coordination remains; child completion will wake you."
@@ -1604,16 +1608,16 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         if (!result.ok) {
           return recordResult(
             callId,
-            { tool: "sessions", action: "open", error: result.message },
+            { tool: "subagents", action: "open", error: result.message },
             text(`[error] ${result.message}`),
             true,
           );
         }
         return recordResult(
           callId,
-          { tool: "sessions", action: "open", sessionId: result.sessionId, title: result.title },
+          { tool: "subagents", action: "open", sessionId: result.sessionId, title: result.title },
           text(
-            `Opened subagent "${result.title}" (sessionId ${result.sessionId}). It is working now. Its result will arrive as an internal message. ${delegateWork ? "End this turn promptly; completion will wake you to report the result." : "Continue independent work, then use sessions wait before your final answer if you need its result."} ${result.liveRunsRemaining} of its run slots remain.`,
+            `Opened subagent "${result.title}" (sessionId ${result.sessionId}). It is working now. Its result will arrive as an internal message. ${delegateWork ? "End this turn promptly; completion will wake you to report the result." : "Continue independent work, then use subagents wait before your final answer if you need its result."} ${result.liveRunsRemaining} of its run slots remain.`,
           ),
         );
       }
@@ -1624,7 +1628,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
           const message = "interrupt applies to send_message, not followup_task.";
           return recordResult(
             callId,
-            { tool: "sessions", action: p.action, error: message },
+            { tool: "subagents", action: p.action, error: message },
             text(`[error] ${message}`),
             true,
           );
@@ -1639,7 +1643,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         if (!result.ok) {
           return recordResult(
             callId,
-            { tool: "sessions", action: p.action, error: result.message },
+            { tool: "subagents", action: p.action, error: result.message },
             text(`[error] ${result.message}`),
             true,
           );
@@ -1654,7 +1658,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         return recordResult(
           callId,
           {
-            tool: "sessions",
+            tool: "subagents",
             action: p.action,
             sessionId: result.sessionId,
             title: result.title,
@@ -1670,7 +1674,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
       if (!result.ok) {
         return recordResult(
           callId,
-          { tool: "sessions", action: "read", error: result.message },
+          { tool: "subagents", action: "read", error: result.message },
           text(`[error] ${result.message}`),
           true,
         );
@@ -1681,10 +1685,119 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         );
         return recordResult(
           callId,
-          { tool: "sessions", action: "read", children: result.children.length },
-          text(lines.length ? lines.join("\n") : "[no subagent sessions opened from this conversation]"),
+          { tool: "subagents", action: "read", children: result.children.length },
+          text(lines.length ? lines.join("\n") : "[no subagents opened from this conversation]"),
         );
       }
+      return recordResult(
+        callId,
+        { tool: "subagents", action: "read", sessionId: result.sessionId, title: result.title, status: result.status },
+        text(`"${result.title}" — ${result.status}\n${result.rendered}`),
+      );
+    },
+  });
+
+  const sessionTool = defineTool({
+    name: "sessions",
+    label: "sessions",
+    description:
+      "Work with sessions: the conversations people see in the web sidebar, within this same context. Subagents are not sessions; use the subagents tool for them. " +
+      "`list` shows the sessions here that you can see. `read` shows a session's recent transcript. " +
+      "`send_message` delivers a private note to another session without starting a turn; it arrives there as internal context, not as a request from a person. " +
+      "`new` starts a clean session whose first message is `text`; it inherits nothing from this conversation. " +
+      "`fork` copies this conversation's visible history into a new session and, if you give `text`, runs it there as the next message. " +
+      "New and forked sessions appear in the sidebar under the person's name, so create one only when the person attending this turn asks for it; both are refused on automated turns.",
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal("list"),
+        Type.Literal("read"),
+        Type.Literal("send_message"),
+        Type.Literal("new"),
+        Type.Literal("fork"),
+      ]),
+      target: Type.Optional(Type.String({ description: "read and send_message: a sessionId from list." })),
+      text: Type.Optional(
+        Type.String({
+          description:
+            "send_message: the note to deliver. new: the new session's first message (required). fork: an optional next message to run in the fork.",
+        }),
+      ),
+      title: Type.Optional(Type.String({ description: "new and fork: optional sidebar title." })),
+      limit: Type.Optional(Type.Integer({ description: "read: max transcript entries to show (default 30)." })),
+    }),
+    async execute(callId, params) {
+      const syscalls = ref.current?.sessionSyscalls;
+      const p = params as {
+        action: "list" | "read" | "send_message" | "new" | "fork";
+        target?: string;
+        text?: string;
+        title?: string;
+        limit?: number;
+      };
+      await recordCall(callId, {
+        tool: "sessions",
+        action: p.action,
+        ...(p.target ? { target: p.target } : {}),
+        ...(p.text ? { text: p.text } : {}),
+        ...(p.title ? { name: p.title } : {}),
+      });
+      const fail = (message: string) =>
+        recordResult(callId, { tool: "sessions", action: p.action, error: message }, text(`[error] ${message}`), true);
+      if (!syscalls?.list || !syscalls.start) return fail("sessions aren't available on this turn.");
+      if (p.action === "list") {
+        const result = await syscalls.list();
+        if (!result.ok) return fail(result.message);
+        const lines = result.sessions.map(
+          (s) => `- ${s.title} (${s.sessionId}) — ${s.status}${s.current ? " — this conversation" : ""}`,
+        );
+        return recordResult(
+          callId,
+          { tool: "sessions", action: "list", count: result.sessions.length },
+          text(lines.length ? lines.join("\n") : "[no sessions here]"),
+        );
+      }
+      if (p.action === "new" || p.action === "fork") {
+        const result = await syscalls.start({
+          fork: p.action === "fork",
+          ...(p.text ? { text: p.text } : {}),
+          ...(p.title ? { title: p.title } : {}),
+        });
+        if (!result.ok) return fail(result.message);
+        let outcome = "";
+        if (result.refused) outcome = `, but your message was refused there: ${result.refused}`;
+        else if (p.text) outcome = " and is working on the message you gave it";
+        return recordResult(
+          callId,
+          { tool: "sessions", action: p.action, sessionId: result.sessionId, title: result.title },
+          text(
+            `${p.action === "fork" ? "Forked this conversation into" : "Started"} session "${result.title}" (sessionId ${result.sessionId}). It appears in the sidebar${outcome}.`,
+          ),
+        );
+      }
+      if (!p.target?.trim()) return fail(`${p.action} requires \`target\`: a sessionId from list.`);
+      if (p.action === "send_message") {
+        if (!p.text?.trim()) return fail("send_message requires `text`: the note to deliver.");
+        const result = await syscalls.write({ requestId: callId, peer: true, target: p.target, text: p.text });
+        if (!result.ok) return fail(result.message);
+        return recordResult(
+          callId,
+          {
+            tool: "sessions",
+            action: p.action,
+            sessionId: result.sessionId,
+            title: result.title,
+            delivered: result.delivered,
+          },
+          text(`Message to "${result.title}" queued internally without starting a turn.`),
+        );
+      }
+      const result = await syscalls.read({
+        peer: true,
+        target: p.target,
+        ...(p.limit !== undefined ? { limit: p.limit } : {}),
+      });
+      if (!result.ok) return fail(result.message);
+      if (result.mode === "children") return fail("read requires `target`: a sessionId from list.");
       return recordResult(
         callId,
         { tool: "sessions", action: "read", sessionId: result.sessionId, title: result.title, status: result.status },
@@ -3268,12 +3381,12 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
   }
 
   const surfaceName = opts?.surfaceName ?? "slack";
-  const surfaceLabel = surfaceName === "slack" ? "Slack" : surfaceName;
+  const surfaceLabelText = surfaceLabel(surfaceName);
   const surface = defineTool({
     name: surfaceName,
     label: surfaceName,
     description:
-      `Everything you do on ${surfaceLabel} goes through this tool — posting (the ONLY way your words ` +
+      `Everything you do on ${surfaceLabelText} goes through this tool — posting (the ONLY way your words ` +
       "reach people; end the turn without a post and you stay silent), reacting, editing/deleting your " +
       "own messages, reading threads, checking what's new, searching, listing members, fetching files. " +
       "Pick an `action`.",
@@ -3305,9 +3418,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
         Type.String({
           description:
             "post/reach: the message to send. edit: the new message content. Use Markdown, including [label](url) links; the surface renders it." +
-            (surfaceName === "slack"
-              ? " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping."
-              : ""),
+            (surfaceCapabilities(surfaceName)?.mentionHint ?? ""),
         }),
       ),
       channel: Type.Optional(
@@ -4207,7 +4318,7 @@ export function createAgentTools(ref: ToolContextRef, opts?: AgentToolsOptions):
     memory,
     history,
     ...(!opts?.sandboxResources && !delegateWork ? [background] : []),
-    ...(opts?.sessionTools === false ? [] : [sessionTool]),
+    ...(opts?.sessionTools === false ? [] : [subagentTool, ...(sidebarSessions ? [sessionTool] : [])]),
     sandbox,
     registerLogin,
     ...(controlTools
@@ -4277,6 +4388,7 @@ function withToolApprovalGate(
           reason: STRICT_TOOL_APPROVAL_REASON,
           kind: "approval",
           approvalKey: `tool:${approvalIdentity}`,
+          ...(params === undefined ? {} : { summary: redactCommand(redactSecrets(JSON.stringify(params))) }),
           ...(tool.name === "sandbox" && isObj(params) && typeof params.purpose === "string"
             ? { purpose: params.purpose }
             : {}),

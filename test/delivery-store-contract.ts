@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { DeliveryStore } from "../src/delivery/delivery-store.ts";
+import { DISCORD_DM_DELIVERY_TYPE } from "../src/discord/config.ts";
 
 export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void> {
   const d = await store.enqueue({
@@ -38,6 +39,21 @@ export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void>
     "only principal deliveries become recipient events",
   );
 
+  const discordDelivery = await store.enqueue({
+    destination: { type: DISCORD_DM_DELIVERY_TYPE, target: "U-bob" },
+    text: "for bob",
+    idempotencyKey: "fire-discord-1",
+  });
+  await store.recordRecipientThread(discordDelivery.id, "discord:dm:chan-bob", 333);
+  const discordEvents = await store.listByRecipientThread("discord:dm:chan-bob");
+  assert.deepEqual(
+    discordEvents.map((e) => e.id),
+    [discordDelivery.id],
+    "discord-dm recipient-thread delivery events are queryable",
+  );
+  assert.equal(discordEvents[0]!.recipientThreadRef, "discord:dm:chan-bob");
+  assert.equal(discordEvents[0]!.deliveredAt, 333);
+
   const sourced = await store.enqueue({
     destination: { type: "principal", target: "U-alice", onBehalfOf: "U-carol" },
     text: "from source session",
@@ -55,6 +71,24 @@ export async function exerciseDeliveryStore(store: DeliveryStore): Promise<void>
     (await store.listBySourceSession("source-session", "agent:main:cron:c1")).map((e) => e.id),
     [sourced.id],
     "source-session delivery events are queryable",
+  );
+  await store.enqueue({
+    destination: { type: DISCORD_DM_DELIVERY_TYPE, target: "U-alice", copyOf: sourced.id },
+    text: "from source session (copy)",
+    idempotencyKey: "cron:c1:slot:discord-dm",
+    provenance: {
+      trigger: "cron",
+      surface: "cron",
+      fireKey: "cron:c1:slot",
+      sourceScopeId: "personal:U-carol",
+      sourceThreadRef: "agent:main:cron:c1",
+      sourceSessionId: "source-session",
+    },
+  });
+  assert.deepEqual(
+    (await store.listBySourceSession("source-session", "agent:main:cron:c1")).map((e) => e.id),
+    [sourced.id],
+    "copy deliveries are excluded from source-session listing",
   );
   assert.deepEqual(
     (await store.listBySourceSession("missing", "agent:main:cron:c1")).map((e) => e.id),

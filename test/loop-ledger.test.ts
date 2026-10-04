@@ -227,7 +227,7 @@ test("open items sort ahead of resolved ones, newest source event first", async 
   ]);
   const items = await ledger.byLoop(LOOP);
   await ledger.recordAction(items.find((i) => i.sourceKey === "done")!.id, { kind: "send", outcome: "actioned" });
-  const sorted = sortLedgerItems(await ledger.byLoop(LOOP));
+  const sorted = sortLedgerItems(await ledger.byLoop(LOOP), {});
   assert.deepEqual(
     sorted.map((i) => i.sourceKey),
     ["new", "old", "done"],
@@ -238,7 +238,7 @@ test("the ledger view exposes the generic shape and never leaks claim tokens", a
   const ledger = createLoopItemLedger();
   await ledger.ingest([entry({ proposal: { data: { body: "hi" }, by: "agent" } })]);
   const [item] = await ledger.byLoop(LOOP);
-  const view = ledgerItemView(item!);
+  const view = ledgerItemView(item!, {});
   assert.equal(view.dedupeKey, "gmail:thread-1");
   assert.equal(view.state, "held");
   assert.equal(view.source, "gmail");

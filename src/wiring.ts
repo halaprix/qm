@@ -45,7 +45,6 @@ import {
   type SandboxResource,
   type SandboxDefault,
   type SandboxResources,
-  type SandboxResourceRollout,
 } from "./sandbox/sandbox-resources.ts";
 import { createModelVerifier, type ModelVerifier } from "./model/model-verification.ts";
 import type { probeModel } from "./harness/pi-harness.ts";
@@ -77,6 +76,7 @@ import {
   type PrincipalLinkService,
 } from "./identity/principal-links.ts";
 import type { SlackAccountLink, ComposioReturn } from "./api/routes/composio.ts";
+import type { DiscordAccountLink } from "./api/routes/discord-link.ts";
 import { installPrincipalLinks } from "./directory/person.ts";
 import type { ExternalMember } from "./identity/external-members.ts";
 import { createResendMailer } from "./admin/invite-email.ts";
@@ -165,6 +165,7 @@ import { createPostgresDeliveryStore } from "./delivery/postgres-delivery-store.
 import { wireRunResultDeliveries } from "./delivery/run-result-delivery.ts";
 import { adminSessionUrl } from "./util/admin-links.ts";
 import { withWebTranscriptDeliveries } from "./delivery/web-transcript-delivery.ts";
+import { createDiscordPrincipalRoute, withPrincipalRouting } from "./delivery/principal-routing.ts";
 import { createDirectoryStore, type DirectoryStore } from "./directory/directory-store.ts";
 import { createPostgresDirectoryStore } from "./directory/postgres-directory-store.ts";
 import {
@@ -235,13 +236,12 @@ import { createS3SnapshotStore } from "./sandbox/home-snapshot.ts";
 import { createModalSandbox, type StoredModalSandbox } from "./sandbox/modal-sandbox.ts";
 import { createSdkModalClient } from "./sandbox/modal-client.ts";
 import { createPorterSandbox } from "./sandbox/porter-sandbox.ts";
+import { createSandboxRouter, type SandboxBackendName } from "./sandbox/sandbox-routing.ts";
 import {
-  createSandboxRouter,
-  ROUTE_CACHE_TTL_MS,
-  type SandboxBackendName,
-  type SandboxRoute,
-} from "./sandbox/sandbox-routing.ts";
-import { createSandboxMigrationRunner, type SandboxMigrationRunner } from "./sandbox/sandbox-migration-runner.ts";
+  upgradeLegacySandboxes,
+  legacySandboxBackendForScope,
+  type LegacyRoute,
+} from "./sandbox/sandbox-resource-upgrade.ts";
 import { effectiveEgressEnforcement, type Sandbox } from "./sandbox/sandbox.ts";
 import { withOperatorTokenFallback } from "./credentials/connector-token.ts";
 import {
@@ -364,9 +364,11 @@ import { createPostgresSessionStateBus } from "./runs/postgres-session-state-bus
 import { createMemoryRunActivityStore, type RunActivityStore } from "./runs/run-activity-store.ts";
 import { createPostgresRunActivityStore } from "./runs/postgres-run-activity-store.ts";
 import { createApp, type App } from "./api/app.ts";
+import { startSession } from "./api/start-session.ts";
 import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackAgentRequestContext, type SlackCoreClient } from "./api/slack-core-client.ts";
+import { createDiscordCoreClient, type DiscordCoreClient, linkedDiscordUserIds } from "./api/discord-core-client.ts";
 import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
@@ -425,6 +427,7 @@ import { createPostgresMetricsSink } from "./admin/postgres-metrics-sink.ts";
 import { errMessage, swallowAs } from "./util/errors.ts";
 import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
+import { createDiscordInstallationStore, type DiscordInstallationStore } from "./surfaces/discord-installation.ts";
 
 export interface Runtime {
   start(): void;
@@ -493,6 +496,7 @@ export interface BuiltApp {
   config: ScopedConfigStore;
   connectorTokens: ConnectorTokenStore;
   slackInstallation: SlackInstallationStore;
+  discordInstallation: DiscordInstallationStore;
   resolveClient: OAuthClientResolver;
   consentLinks: ConsentLinkStore;
   oauthFlows: OAuthFlowStore;
@@ -528,6 +532,7 @@ export interface BuiltApp {
   identity: IdentityService;
   principalLinks: PrincipalLinkService;
   slackAccounts: DurableMap<SlackAccountLink>;
+  discordAccounts: DurableMap<DiscordAccountLink>;
   composioReturns: DurableMap<ComposioReturn>;
   keychain?: Keychain;
   serviceCreds: ServiceCredentialStore;
@@ -539,7 +544,6 @@ export interface BuiltApp {
   memory: MemoryService;
   sandbox: Sandbox;
   advisoryLock: AdvisoryLock;
-  sandboxMigration: SandboxMigrationRunner;
   sandboxResources: SandboxResources;
   blobTransfer: BlobTransferStore;
   files: FileArtifactStore;
@@ -564,6 +568,7 @@ export interface BuiltApp {
   sessionShareBytes: DurableByteStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
+  discordCore: DiscordCoreClient;
 }
 
 const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
@@ -717,6 +722,11 @@ export function buildApp(
     artifactMap("slack_installation"),
     config.connectorSecretKey ?? randomBytes(32),
   );
+  const discordInstallation = createDiscordInstallationStore(
+    config.orgId,
+    artifactMap("discord_installation"),
+    config.connectorSecretKey ?? randomBytes(32),
+  );
   const deploymentLayer = config.deploymentLayerDir
     ? loadDeploymentLayer(config.deploymentLayerDir)
     : emptyDeploymentLayer();
@@ -798,8 +808,7 @@ export function buildApp(
     config.orgId,
     configStore,
     acl,
-    config.securityScreenBackend !== "off" || Boolean(overrides.securityScreener),
-    config.securityScreenAllPostures,
+    config.securityScreen === "off" && overrides.securityScreener ? "enforce" : config.securityScreen,
   );
 
   const workspace = createLocalWorkspaceStore(config.dataDir);
@@ -1094,38 +1103,47 @@ export function buildApp(
   for (const name of Object.keys(buildBackend) as Array<Config["sandboxBackend"]>) {
     if (name !== config.sandboxBackend && enabledBackends.has(name)) sandboxBackends[name] = buildBackend[name]();
   }
-  for (const backend of Object.values(config.sandboxScopeDefaults ?? {})) {
-    if (backend && !sandboxBackends[backend]) throw new Error(`Scope sandbox backend ${backend} is not configured`);
-  }
-  const sandboxRoutes = artifactMap<SandboxRoute>("sandbox_routing");
+  const sandboxRecords = artifactMap<SandboxResource>("sandbox_resources");
+  const sandboxDefaults = artifactMap<SandboxDefault>("sandbox_defaults");
   const sandboxResources = createSandboxResources({
-    enabled: config.sandboxResourcesEnabled,
-    rollout: artifactMap<SandboxResourceRollout>("sandbox_resource_rollout"),
-    legacyScopes: async () => (await sessions.distinctScopes()).map((scope) => scope.scopeId),
-    legacySandboxes: async () => {
-      const [e2b, modal, aws, superserve] = await Promise.all([
-        e2bBodies.entries(),
-        modalBodies.entries(),
-        awsBodies.entries(),
-        superserveBodies.entries(),
-      ]);
-      return [
-        ...e2b.map(([scopeId, body]) => ({ scopeId, backend: "e2b" as const, machineId: body.sandboxId })),
-        ...modal.map(([scopeId, body]) => ({ scopeId, backend: "modal" as const, machineId: body.sandboxId })),
-        ...aws.map(([scopeId, body]) => ({ scopeId, backend: "aws" as const, machineId: body.microvmId })),
-        ...superserve.map(([scopeId, body]) => ({
-          scopeId,
-          backend: "superserve" as const,
-          machineId: body.sandboxId,
-        })),
-      ];
-    },
-    records: artifactMap<SandboxResource>("sandbox_resources"),
-    defaults: artifactMap<SandboxDefault>("sandbox_defaults"),
-    routes: sandboxRoutes,
+    records: sandboxRecords,
+    defaults: sandboxDefaults,
+    upgrade: () =>
+      upgradeLegacySandboxes({
+        availableBackends: Object.keys(sandboxBackends) as SandboxBackendName[],
+        records: sandboxRecords,
+        defaults: sandboxDefaults,
+        marker: artifactMap<{ activatedAt: string }>("sandbox_resource_rollout"),
+        routes: () => artifactMap<LegacyRoute>("sandbox_routing").entries(),
+        lock: advisoryLock,
+        legacyBackend: (scope) =>
+          legacySandboxBackendForScope(scope, config.sandboxBackend, config.legacySandboxScopeDefaults),
+        specFor: (backend) => sandboxBackends[backend]?.profile.spec,
+        legacyScopes: async () => [
+          ...(await sessions.distinctScopes()).map((scope) => scope.scopeId),
+          ...(await environments.list()).map((environment) => environment.id),
+        ],
+        legacySandboxes: async () => {
+          const [e2b, modal, aws, superserve] = await Promise.all([
+            e2bBodies.entries(),
+            modalBodies.entries(),
+            awsBodies.entries(),
+            superserveBodies.entries(),
+          ]);
+          return [
+            ...e2b.map(([scopeId, body]) => ({ scopeId, backend: "e2b" as const, machineId: body.sandboxId })),
+            ...modal.map(([scopeId, body]) => ({ scopeId, backend: "modal" as const, machineId: body.sandboxId })),
+            ...aws.map(([scopeId, body]) => ({ scopeId, backend: "aws" as const, machineId: body.microvmId })),
+            ...superserve.map(([scopeId, body]) => ({
+              scopeId,
+              backend: "superserve" as const,
+              machineId: body.sandboxId,
+            })),
+          ];
+        },
+      }),
     backends: sandboxBackends,
     defaultBackend: config.sandboxBackend,
-    scopeDefaults: config.sandboxScopeDefaults,
     lock: advisoryLock,
     beforeRetire: async (record) => {
       if (
@@ -1162,36 +1180,8 @@ export function buildApp(
   const sandbox: Sandbox = createSandboxRouter({
     resources: sandboxResources,
     backends: sandboxBackends,
-    routes: sandboxRoutes,
     defaultBackend: config.sandboxBackend,
-    scopeDefaults: config.sandboxScopeDefaults,
     onError: sandboxOnError,
-  });
-  const sandboxMigration = createSandboxMigrationRunner({
-    backends: sandboxBackends,
-    routes: sandboxRoutes,
-    defaultBackend: config.sandboxBackend,
-    scopeDefaults: config.sandboxScopeDefaults,
-    advisoryLock,
-    settleMs: ROUTE_CACHE_TTL_MS,
-    provisionOptions: async (scopeId) => {
-      const egressSecret = config.capabilitySecret ?? config.signingSecret;
-      if (!egressSecret) return {};
-      const egressToken = await mintCapabilityToken(
-        {
-          actorId: "system:sandbox-migration",
-          scopeId: scopeId as ScopeId,
-          aud: EGRESS_PROXY_AUD,
-          egress: egressClaimAllowingControlPlane({ allowedHosts: [] }, config.apiBaseUrl ?? "", true),
-          exp: Date.now() + CAPABILITY_TTL_MS,
-        },
-        egressSecret,
-        config.capabilityTokenCompression,
-      );
-      return { egressToken };
-    },
-    withLegacyMutation: (scope, action) => sandboxResources.withLegacyMutation(scope, action),
-    hasLiveWork: async (scope) => !!processes && (await processes.liveByScope(scope)).length > 0,
   });
   const secretSource =
     config.secretsBackend === "aws"
@@ -1471,11 +1461,7 @@ export function buildApp(
     );
   });
 
-  if (
-    config.securityScreenBackend !== "model" &&
-    !config.securityScreenProxy?.shadow &&
-    !overrides.securityScreener?.shadow
-  ) {
+  if (config.securityScreen === "off" || config.securityScreenClassifier !== "model") {
     delete harness.models.screenSecurity;
   }
 
@@ -1552,7 +1538,10 @@ export function buildApp(
           runs,
           sandboxes: sandboxResources,
           lock: advisoryLock,
+          signals: runSignals,
+          enabled: (actorId) => featureFlags.enabled("swarms", scopeId("personal", actorId)),
           authorize: async (claims) => {
+            if (!(await featureFlags.enabled("swarms", scopeId("personal", claims.actorId)))) return false;
             await identity.refresh();
             return (
               identity.isInternal(identity.classify(claims.actorId)) &&
@@ -1727,9 +1716,16 @@ export function buildApp(
   membership.managesArtifactHome = managesArtifactHome;
   const deployGitSecret = config.signingSecret;
   const deployGitBase = config.apiBaseUrl;
-  const deliveries = withWebTranscriptDeliveries(
-    config.databaseUrl ? createPostgresDeliveryStore(config.databaseUrl) : createDeliveryStore(),
-    sessions,
+  const deliveries = withPrincipalRouting(
+    withWebTranscriptDeliveries(
+      config.databaseUrl ? createPostgresDeliveryStore(config.databaseUrl) : createDeliveryStore(),
+      sessions,
+    ),
+    createDiscordPrincipalRoute({
+      installation: discordInstallation,
+      environmentConfigured: config.discordEnvironmentConfigured,
+      linkedDiscordUserIds,
+    }),
   );
   const deployService = createDeployService({
     deliveries,
@@ -1851,13 +1847,10 @@ export function buildApp(
   });
   const approvals = createApprovalStore(artifactMap<PendingApprovalRecord>("approvals"), deliveries);
   let securityScreener = overrides.securityScreener;
-  if (!securityScreener && config.securityScreenBackend === "proxy") {
+  if (!securityScreener && config.securityScreen !== "off" && config.securityScreenProxy) {
     securityScreener = createSecurityScreenProxy({
-      provider: config.securityScreenProxy!.provider,
-      endpoint: config.securityScreenProxy!.endpoint,
-      token: config.securityScreenProxy!.token,
+      ...config.securityScreenProxy,
       timeoutMs: config.securityScreenTimeoutMs,
-      shadow: config.securityScreenProxy!.shadow,
     });
   }
   const layerEnv = config.layerEnv ?? {};
@@ -1906,6 +1899,10 @@ export function buildApp(
     advisoryLock,
     prepareRequest: prepareSessionRequest,
     authorize: (session, actorId) => canWriteScope(actorId, session.scopeId),
+    conversations: {
+      list: (actorId) => app.listSessions(actorId),
+      start: (actorId, input) => startSession(app, sessions, actorId, input),
+    },
     async validateRuntime(input, scope) {
       await resolveRuntimeChoiceDurable(
         configStore,
@@ -1939,7 +1936,6 @@ export function buildApp(
     workspace,
     files,
     sandbox,
-    sandboxMigration,
     sandboxResources,
     swarms,
     connectorTokens,
@@ -2246,6 +2242,18 @@ export function buildApp(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
+  const discordCore = createDiscordCoreClient({
+    app,
+    runs,
+    turnStream,
+    tasks,
+    blobTransfer,
+    identity,
+    deliveries,
+    leaderLease,
+    errors,
+    ...(keychainApprovals ? { keychainApprovals } : {}),
+  });
   runs.onTerminal((run) => {
     void runs
       .activeForThread(run.sessionId)
@@ -2413,6 +2421,7 @@ export function buildApp(
     admittedWork,
     crons,
     samePerson: (a, b) => app.samePerson(a, b),
+    triageEnabledFor: (owner) => featureFlags.enabled("loop_triage", scopeId("personal", owner)),
     lock: advisoryLock,
     loops: loopStore,
     items: loopItems,
@@ -2824,6 +2833,7 @@ export function buildApp(
     config: configStore,
     connectorTokens,
     slackInstallation,
+    discordInstallation,
     resolveClient,
     consentLinks,
     oauthFlows,
@@ -2859,6 +2869,7 @@ export function buildApp(
     identity,
     principalLinks,
     slackAccounts: artifactMap<SlackAccountLink>("slack_accounts"),
+    discordAccounts: artifactMap<DiscordAccountLink>("discord_accounts"),
     composioReturns,
     workspace,
     memory,
@@ -2869,7 +2880,6 @@ export function buildApp(
     ...(askResolution ? { fireAskResolution: askResolution } : {}),
     ...(dropResolution ? { fireDropResolution: dropResolution } : {}),
     sandbox,
-    sandboxMigration,
     sandboxResources,
     advisoryLock,
     blobTransfer,
@@ -2907,6 +2917,7 @@ export function buildApp(
         : createLocalDurableByteStore(join(config.dataDir, "session-shares")),
     skillSyncEngine,
     slackCore,
+    discordCore,
   };
 }
 
@@ -2959,6 +2970,8 @@ export function serverDeps(
     connectorTokens: built.connectorTokens,
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
+    discordInstallation: built.discordInstallation,
+    discordEnvironmentConfigured: config.discordEnvironmentConfigured,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
     ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
     resolveClient: built.resolveClient,
@@ -3002,6 +3015,7 @@ export function serverDeps(
     identity: built.identity,
     principalLinks: built.principalLinks,
     slackAccounts: built.slackAccounts,
+    discordAccounts: built.discordAccounts,
     composioReturns: built.composioReturns,
     ...(built.keychain ? { keychain: built.keychain } : {}),
     serviceCreds: built.serviceCreds,
@@ -3047,7 +3061,6 @@ export function serverDeps(
     sessionShares: built.sessionShares,
     sessionShareBytes: built.sessionShareBytes,
     environments: built.environments,
-    sandboxMigration: built.sandboxMigration,
     sandboxResources: built.sandboxResources,
   };
 }

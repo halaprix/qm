@@ -76,6 +76,7 @@ function callShare(
 ) {
   const out: { status?: number; body?: any } = {};
   const res = {
+    getHeader() {},
     writeHead(s: number) {
       out.status = s;
     },
@@ -102,6 +103,7 @@ function callManage(
 ) {
   const out: { status?: number; body?: any } = {};
   const res = {
+    getHeader() {},
     writeHead(s: number) {
       out.status = s;
     },
@@ -116,6 +118,7 @@ function callManage(
 function callDetail(app: ReturnType<typeof createApp>, capability: CapabilityClaims, id: string) {
   const out: { status?: number; body?: any } = {};
   const res = {
+    getHeader() {},
     writeHead(s: number) {
       out.status = s;
     },
@@ -566,6 +569,9 @@ test("deployment public access is explicit, owner-only, and reversible", async (
     access: "view",
   });
   assert.equal(sharedWhilePublic.body.public, true, "person changes preserve and return general access");
+  const off = { enabled: async () => false } as unknown as FeatureFlagStore;
+  const orgWhileOff = await callShare(app, cap("U1"), "public-toggle", { scope: "org" }, off);
+  assert.equal(orgWhileOff.body.public, false, "with external sharing off, a stored public bit is reported as off");
 
   const disabled = await callShare(app, cap("U1"), "public-toggle", { public: false });
   assert.equal(disabled.status, 200);
@@ -732,6 +738,7 @@ test("exact email read grants admit app-only login and guest reach without membe
       deps: { identity, acl, featureFlags },
       url: new URL(`http://core/v1/auth/broker/email-allowed?email=${encodeURIComponent(email)}`),
       res: {
+        getHeader() {},
         writeHead(s: number) {
           status = s;
         },

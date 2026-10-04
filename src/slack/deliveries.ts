@@ -32,6 +32,7 @@ import type { TurnFlow } from "./turn-flow.ts";
 import { cleanAgentReplyForSlack, stripSlackDirectives } from "./messaging.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
 import { slackErrorCode } from "./payloads.ts";
+import { relaySenderAttribution } from "../reach/reach.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 const SLOW_DRAIN_ALARM_MS = 120_000;
@@ -57,7 +58,7 @@ function mergeSlackApiMs(body: unknown, slackApiMs: number | undefined): unknown
 
 export function createDeliveryPoller(deps: {
   clientForAccount?: (accountId: string, teamId?: string) => any;
-  externalAccount?: (accountId: string) => boolean;
+  externalNamespace?: (accountId: string) => string | undefined;
   continuePrivate?: (runId: string, task: string) => Promise<void>;
   core: SlackCoreClient;
   webUiPublicUrl?: string;
@@ -154,8 +155,8 @@ export function createDeliveryPoller(deps: {
   function deliveryFooter(d: Delivery): Array<Record<string, unknown>> {
     const base = deps.webUiPublicUrl?.trim().replace(/\/+$/, "");
     const id = d.provenance?.trigger === "cron" ? cronIdOf(d.provenance.sourceThreadRef) : null;
-    const sender = d.destination.relaySender?.trim().replace(/^@+/, "");
-    const attribution = sender ? [{ type: "plain_text", text: `Sent for @${sender}`, emoji: false }] : [];
+    const senderText = relaySenderAttribution(d.destination.relaySender);
+    const attribution = senderText ? [{ type: "plain_text", text: senderText, emoji: false }] : [];
     if (!base || !id) return attribution;
     const title = (d.provenance?.sourceTitle?.trim() || "Cron")
       .replaceAll("&", "&amp;")
@@ -200,15 +201,17 @@ export function createDeliveryPoller(deps: {
         const destinationClient = deliveryClient(defaultClient, d.destination);
         if (!destinationClient) return;
         const client = destinationClient;
+        const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
+        const namespace = deps.externalNamespace?.(d.destination.slackAccountId ?? "default");
         if (
-          deps.externalAccount?.(d.destination.slackAccountId ?? "default") &&
-          !parseDeliveryTarget(d.destination.target).channel.startsWith("D") &&
-          !d.provenance?.sourceThreadRef.startsWith("external-slack:")
+          namespace &&
+          (parseDeliveryTarget(d.destination.target).channel.startsWith("D")
+            ? runId && d.destination.slackPolicyNamespace !== namespace
+            : !d.provenance?.sourceThreadRef.startsWith(`${namespace}:`))
         ) {
           await ackDelivery(d.id);
           return;
         }
-        const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
         if (runId && inFlightRuns.has(runId)) return;
         if (runId && typeof d.createdAt === "number" && Date.now() - d.createdAt < RUN_RECOVERY_GRACE_MS) return;
         let slackApiMs: number | undefined;

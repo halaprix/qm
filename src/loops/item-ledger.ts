@@ -1,7 +1,14 @@
 import type { LedgerEvent, LedgerEventOp } from "./ledger-events.ts";
 import { canonicalJson } from "../util/objects.ts";
 import { wireMentionKeys } from "../slack/mrkdwn.ts";
-import type { LoopItem, LoopItemStatus, LoopProposal, LoopSourcePayload, LoopThreadMessage } from "../types.ts";
+import type {
+  LoopItem,
+  LoopItemStatus,
+  LoopItemTriage,
+  LoopProposal,
+  LoopSourcePayload,
+  LoopThreadMessage,
+} from "../types.ts";
 import { isResolved } from "./ledger-view.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
 import { contentPart } from "../triggers/trigger-store.ts";
@@ -49,6 +56,8 @@ interface PruneOptions {
   now?: number;
 }
 
+export type TriagePatch = Partial<Pick<LoopItemTriage, "at" | "priority" | "reason" | "groupId">>;
+
 interface RecordActionInput {
   kind: string;
   result?: string;
@@ -71,6 +80,7 @@ export interface LoopItemLedger {
     opts?: { summary?: string; expectedSourceAt?: number },
   ): Promise<LoopItem | null>;
   appendThread(id: string, messages: Array<Omit<LoopThreadMessage, "id" | "at">>): Promise<LoopItem | null>;
+  setTriage(id: string, patch: TriagePatch, by: "agent" | "human"): Promise<LoopItem | null>;
   recordAction(id: string, input: RecordActionInput): Promise<LoopItem | null>;
   reopen(id: string, opts?: { sentReply?: boolean }): Promise<LoopItem | null>;
   prune(loopId: string, options: PruneOptions): Promise<number>;
@@ -91,7 +101,7 @@ export interface LoopItemLedger {
   returnToWork(id: string, guidance: string, claimToken?: string): Promise<LoopItem | null>;
   park(id: string, reason: string, claimToken?: string): Promise<LoopItem | null>;
   skip(id: string, reason: string): Promise<LoopItem | null>;
-  stats(loopId: string, now: number): Promise<LoopQueueStats>;
+  stats(loopId: string, now: number, held?: ReadonlySet<string>): Promise<LoopQueueStats>;
   deleteByLoop(loopId: string): Promise<void>;
 }
 
@@ -414,6 +424,37 @@ export function createLoopItemLedger(
       if (applied) emit(after, "thread");
       return applied ? after : null;
     },
+    async setTriage(id, patch, by) {
+      let applied = false;
+      const after = await update(id, (item) => {
+        if (isResolved(item)) return item;
+        const current = item.triage ?? { at: 0 };
+        const pinned = new Set(current.pinned ?? []);
+        let { priority, reason, groupId } = current;
+        if ("priority" in patch && (by === "human" || !pinned.has("priority"))) {
+          priority = patch.priority;
+          reason = by === "human" ? undefined : patch.reason;
+          if (by === "human") pinned.add("priority");
+        }
+        if ("groupId" in patch && (by === "human" || !pinned.has("group"))) {
+          groupId = patch.groupId;
+          if (by === "human") pinned.add("group");
+        }
+        applied = true;
+        return {
+          ...item,
+          triage: {
+            at: patch.at ?? (by === "human" ? Math.max(current.at, item.sourceAt ?? item.createdAt) : current.at),
+            ...(priority ? { priority } : {}),
+            ...(priority && reason ? { reason } : {}),
+            ...(groupId ? { groupId } : {}),
+            ...(pinned.size ? { pinned: [...pinned] } : {}),
+          },
+        };
+      });
+      if (applied) emit(after, "triage");
+      return applied ? after : null;
+    },
     async recordAction(id, input) {
       let applied = false;
       const after = await update(id, (item) => {
@@ -621,8 +662,8 @@ export function createLoopItemLedger(
         undefined,
         "skipped",
       ),
-    async stats(loopId, now) {
-      const items = await forLoop(loopId);
+    async stats(loopId, now, held) {
+      const items = (await forLoop(loopId)).filter((item) => !held?.has(item.id));
       const queued = items.filter((item) => item.status === "queued");
       const oldest = queued.reduce<number | undefined>(
         (acc, item) => (acc === undefined || item.createdAt < acc ? item.createdAt : acc),

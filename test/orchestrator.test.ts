@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp as buildAppRaw } from "../src/wiring.ts";
 import { scopeId, type TurnRequest } from "../src/types.ts";
 import { TEST_CAPABILITY_SECRET, testConfig } from "./support/test-config.ts";
 import { runNowSettled } from "./support/settle.ts";
@@ -25,6 +25,43 @@ import { runTrigger } from "../src/triggers/run-trigger.ts";
 import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+
+const noDefaultSandbox = new WeakSet<object>();
+function requestScope(req: TurnRequest): string | null {
+  const c = req.conversation;
+  if (c.kind === "dm") return `personal:${req.actor.externalId}`;
+  if ((c.kind === "channel" || c.kind === "group") && c.channelRef) return `${c.kind}:${c.channelRef}`;
+  return null;
+}
+async function selectComputer(built: ReturnType<typeof buildAppRaw>, actorId: string, scope: ScopeId) {
+  const asSpeaker = built.sandboxResources.forTurn({ actorId, scopeId: scope, isCurrent: async () => true });
+  const computer = await asSpeaker.create(actorId, scope, built.sandboxResources.defaultBackend());
+  await asSpeaker.setDefault(actorId, scope, computer.id);
+  return computer;
+}
+function buildApp(...args: Parameters<typeof buildAppRaw>): ReturnType<typeof buildAppRaw> {
+  const built = buildAppRaw(...args);
+  const ready = new Map<string, Promise<void>>();
+  const ensure = (actorId: string, scope: string) => {
+    let p = ready.get(scope);
+    if (!p) {
+      p = (async () => {
+        if (noDefaultSandbox.has(built)) return;
+        if (await built.sandboxResources.resolve(scope as ScopeId)) return;
+        await selectComputer(built, actorId, scope as ScopeId);
+      })();
+      ready.set(scope, p);
+    }
+    return p;
+  };
+  const turn = built.app.turn.bind(built.app);
+  built.app.turn = async (req, ...rest) => {
+    const scope = requestScope(req);
+    if (scope) await ensure(req.actor.externalId, scope);
+    return turn(req, ...rest);
+  };
+  return built;
+}
 
 function freshApp(overrides: Partial<Config> = {}, securityScreener?: SecurityScreener) {
   const config = testConfig({
@@ -1726,7 +1763,9 @@ test("turn-private transfer files are removed after staging", async () => {
 });
 
 test("a later turn removes same-conversation and expired transfer files", async () => {
-  const { app, sandbox } = freshApp();
+  const built = freshApp();
+  const { app, sandbox } = built;
+  await selectComputer(built, "U1", scopeId("personal", "U1"));
   const handle = await sandbox.provision([{ scopeId: scopeId("personal", "U1"), mountPath: "", mode: "rw" }]);
   const sessionDir = `${TURN_FILES_DIR}/${hashId(["dm:U1:t1"], 24)}`;
   await sandbox.writeFile(handle, `${sessionDir}/abandoned/inbox/stale.bin`, "stale");
@@ -2992,58 +3031,11 @@ test("Auto screens only the external event envelope and records classifier usage
   assert.ok(built.modelGateway.audit().some((rec) => rec.model === "mock-security"));
 });
 
-test("proxy shadow telemetry correlates its verdict with the authoritative model without enforcing it", async () => {
-  const calls: Array<{ metadata?: Readonly<Record<string, unknown>>; requestId?: string }> = [];
-  const screener: SecurityScreener = {
-    provider: "example-screen",
-    shadow: true,
-    async classify(input) {
-      calls.push({ metadata: input.metadata, requestId: input.requestId });
-      return {
-        verdict: { decision: "strict", reason: "example-screen:system_compromise" },
-        score: 0.95,
-        threshold: 0.7,
-        outcome: "system_compromise",
-      };
-    },
-  };
-  const built = freshApp({}, screener);
-  const result = await built.app.turn(
-    dm("!run printf shadow-ok", {
-      surface: "webhook",
-      triggered: true,
-      securityScreenData: "ordinary external event",
-    }),
-  );
-  assert.equal(result.status, "ok", "the authoritative model remains in control during shadow evaluation");
-  assert.match(result.reply ?? "", /shadow-ok/);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  const events = await built.auditLog.events();
-  const classification = events.find((event) => event.action === "security_screen.classify");
-  const comparison = events.find((event) => event.action === "security_screen.shadow_evaluation");
-  assert.ok(classification?.detail);
-  assert.ok(comparison?.detail);
-  const classified = JSON.parse(classification.detail) as { requestId: string };
-  const compared = JSON.parse(comparison.detail) as { requestId: string; authoritative: string; shadow: string };
-  assert.equal(compared.requestId, classified.requestId);
-  assert.deepEqual(
-    { authoritative: compared.authoritative, shadow: compared.shadow },
-    { authoritative: "auto", shadow: "strict" },
-  );
-  assert.equal(comparison.status, "disagree");
-  assert.equal(classification.resource, "example-screen");
-  assert.equal(comparison.resource, "example-screen");
-  assert.equal(calls[0]?.requestId, compared.requestId);
-  assert.deepEqual(calls[0]?.metadata, { surface: "webhook", origin: "automation" });
-});
-
 test("an enforced proxy outage fails open and audits the configured provider", async () => {
   const built = freshApp(
     {},
     {
       provider: "example-screen",
-      shadow: false,
       async classify() {
         throw new Error("proxy unavailable");
       },
@@ -3331,7 +3323,6 @@ test("a late proxy verdict after the deadline is never audited as authoritative"
     { securityScreenTimeoutMs: 5 },
     {
       provider: "example-screen",
-      shadow: false,
       async classify(input) {
         signal = input.signal;
         await new Promise((resolve) => setTimeout(resolve, 25));
@@ -3880,7 +3871,8 @@ test("environments: an unattached scope provisions through its own scope (today'
   const config = testConfig({
     dataDir: mkdtempSync(join(tmpdir(), "ap-")),
   });
-  const { app, sandbox } = buildApp(config);
+  const built = buildApp(config);
+  const { app, sandbox } = built;
   const realProvision = sandbox.provision.bind(sandbox);
   let rwScope: string | undefined;
   sandbox.provision = (layers, opts) => {
@@ -3892,6 +3884,7 @@ test("environments: an unattached scope provisions through its own scope (today'
   assert.equal(before.status, "ok");
   assert.equal(rwScope, scopeId("personal", "U1"), "no attachment ⇒ provision through the scope itself");
 
+  await selectComputer(built, "U-shared", scopeId("personal", "U-shared"));
   const env = await app.createEnvironment({ scopeId: scopeId("personal", "U-shared"), name: "prod", actorId: "U1" });
   await app.attachScope({ scopeId: scopeId("personal", "U1"), environmentId: env.id, actorId: "U1" });
 
@@ -4232,7 +4225,9 @@ test("Auto screens oversize external output in chunks, so an injection buried pa
 });
 
 test("activated resource defaults preserve an existing computer and stop eager provisioning after unset", async () => {
-  const built = freshApp({ sandboxResourcesEnabled: true, eagerProvisionEnabled: true });
+  const built = freshApp({ eagerProvisionEnabled: true });
+  noDefaultSandbox.add(built);
+  await selectComputer(built, "U1", scopeId("personal", "U1"));
   await built.sessions.getOrCreateByThread("dm:U1:t1", "dm", "personal:U1");
   await built.sandboxResources.initialize();
   const boxes = spyProvisioning(built.sandbox);
@@ -4253,7 +4248,7 @@ test("activated resource defaults preserve an existing computer and stop eager p
 });
 
 test("default screening does not invoke a model for inbound data or tool results", async () => {
-  const built = freshApp({ securityScreenBackend: loadConfig({}).securityScreenBackend });
+  const built = freshApp({ securityScreen: loadConfig({}).securityScreen });
   let captured: ProvisionOptions | undefined;
   const provision = built.sandbox.provision.bind(built.sandbox);
   built.sandbox.provision = (layers, options) => {
@@ -4297,6 +4292,7 @@ for (const combined of [true, false]) {
   test(`turn cleanup retains recent and malformed paths and removes stale files (combined=${combined})`, async () => {
     const built = freshApp();
     if (!combined) built.sandbox.removeDirAndList = undefined;
+    await selectComputer(built, "U1", scopeId("personal", "U1"));
     const handle = await built.sandbox.provision([{ scopeId: scopeId("personal", "U1"), mountPath: "", mode: "rw" }]);
     const old = `.agent-turn/owner/${(Date.now() - 48 * 3600_000).toString(36)}-nonce/file`;
     const recent = `.agent-turn/owner/${Date.now().toString(36)}-nonce/file`;
@@ -4382,10 +4378,9 @@ test("public text phases persist with exact stream offsets in session history an
   assert.equal(view?.partial, "Checking.\n\nAll clear.");
 });
 
-function fixtureScreen(shadow = false): SecurityScreener {
+function fixtureScreen(): SecurityScreener {
   return {
     provider: "fixture-screen",
-    shadow,
     async classify(input) {
       return {
         score: 1,
@@ -4398,8 +4393,8 @@ function fixtureScreen(shadow = false): SecurityScreener {
   };
 }
 
-test("deployment screening quarantines dangerous-posture tool output with once-only release", async () => {
-  const built = freshApp({ securityPosture: "dangerous", securityScreenAllPostures: true }, fixtureScreen());
+test("enforced screening quarantines auto-posture tool output with once-only release", async () => {
+  const built = freshApp({ securityPosture: "auto" }, fixtureScreen());
   const cmd = "!screened-run printf SCREENING_FIXTURE_BLOCK";
   const first = await built.app.turn(dm(cmd));
   assert.equal(first.status, "ok");
@@ -4427,8 +4422,8 @@ test("deployment screening quarantines dangerous-posture tool output with once-o
   assert.equal(denied.status, "refused");
 });
 
-test("deployment screening flags dangerous-posture inbound data before model execution", async () => {
-  const built = freshApp({ securityPosture: "dangerous", securityScreenAllPostures: true }, fixtureScreen());
+test("enforced screening flags strict-posture inbound data before model execution", async () => {
+  const built = freshApp({ securityPosture: "strict" }, fixtureScreen());
   const request = dm("summarize the event", {
     surface: "webhook",
     triggered: true,
@@ -4444,21 +4439,12 @@ test("deployment screening flags dangerous-posture inbound data before model exe
   assert.equal(approved.status, "ok");
 });
 
-test("deployment screening retains proxy shadow behavior under dangerous posture", async () => {
-  const built = freshApp({ securityPosture: "dangerous", securityScreenAllPostures: true }, fixtureScreen(true));
-  const result = await built.app.turn(dm("!screened-run printf SCREENING_FIXTURE_BLOCK"));
-  assert.match(result.reply ?? "", /SCREENING_FIXTURE_BLOCK/);
-  assert.equal(result.pendingApprovals?.length ?? 0, 0);
-  assert.ok((await built.auditLog.events()).some((event) => event.action === "security_screen.shadow_evaluation"));
-});
-
 for (const failure of ["error", "timeout"] as const) {
   test(`deployment screening preserves marked fail-open on proxy ${failure}`, async () => {
     const built = freshApp(
-      { securityPosture: "dangerous", securityScreenAllPostures: true, securityScreenTimeoutMs: 10 },
+      { securityPosture: "auto", securityScreenTimeoutMs: 10 },
       {
         provider: "fixture-screen",
-        shadow: false,
         async classify() {
           if (failure === "timeout") await new Promise((resolve) => setTimeout(resolve, 50));
           throw new Error("fixture unavailable");
@@ -4481,24 +4467,58 @@ for (const failure of ["error", "timeout"] as const) {
   });
 }
 
-for (const securityScreenAllPostures of [false, true]) {
-  test(`dangerous posture screening opt-in=${securityScreenAllPostures} preserves automatic tools`, async () => {
-    let screens = 0;
-    const fixture = fixtureScreen();
-    const built = freshApp(
-      { securityPosture: "dangerous", securityScreenAllPostures },
-      {
-        ...fixture,
-        async classify(input) {
-          screens++;
-          return fixture.classify(input);
-        },
-      },
+async function screenEvent(built: ReturnType<typeof freshApp>, status: string) {
+  for (let i = 0; i < 50; i++) {
+    const event = (await built.auditLog.events()).find(
+      (entry) => entry.action === "security_screen.classify" && entry.status === status,
     );
-    const result = await built.app.turn(dm("!screened-run printf fixture-allowed"));
-    assert.equal(result.status, "ok");
-    assert.equal(result.reply, "fixture-allowed");
-    assert.equal(result.pendingApprovals?.length ?? 0, 0);
-    assert.equal(screens, securityScreenAllPostures ? 1 : 0);
+    if (event) return event;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`no ${status} screen verdict`);
+}
+
+test("observe screening never waits on a hung classifier", async () => {
+  const built = freshApp(
+    { securityPosture: "auto", securityScreen: "observe" },
+    { provider: "fixture-screen", classify: () => new Promise(() => {}) },
+  );
+  const started = Date.now();
+  const inbound = await built.app.turn(
+    dm("summarize the event", { surface: "webhook", triggered: true, securityScreenData: "ordinary fixture data" }),
+  );
+  const tool = await built.app.turn(dm("!screened-run printf observe-ok"));
+  assert.equal(inbound.status, "ok");
+  assert.equal(tool.reply, "observe-ok");
+  assert.ok(Date.now() - started < 5_000);
+});
+
+for (const [securityPosture, securityScreen] of [
+  ["dangerous", "observe"],
+  ["auto", "observe"],
+  ["strict", "observe"],
+  ["dangerous", "enforce"],
+] as const) {
+  test(`${securityScreen} screening under ${securityPosture} posture records would-block verdicts without quarantine`, async () => {
+    const built = freshApp({ securityPosture, securityScreen }, fixtureScreen());
+    const inbound = await built.app.turn(
+      dm("summarize the event", { surface: "webhook", triggered: true, securityScreenData: "SCREENING_FIXTURE_BLOCK" }),
+    );
+    assert.equal(inbound.status, "ok");
+    const detail = JSON.parse((await screenEvent(built, "would_block")).detail!) as Record<string, unknown>;
+    assert.equal(detail.hook, "user_input");
+    assert.equal(detail.surface, "webhook");
+    assert.deepEqual(detail.sources, ["webhook"]);
+    assert.equal(typeof detail.thread, "string");
+    assert.doesNotMatch(JSON.stringify(detail), /SCREENING_FIXTURE_BLOCK/);
+    if (securityPosture !== "strict") {
+      const tool = await built.app.turn(dm("!screened-run printf SCREENING_FIXTURE_BLOCK"));
+      assert.match(tool.reply ?? "", /SCREENING_FIXTURE_BLOCK/);
+      assert.equal(tool.pendingApprovals?.length ?? 0, 0);
+    }
+    const events = await built.auditLog.events();
+    assert.ok(!events.some((event) => event.status === "block" || event.action.startsWith("security_posture.")));
+    const prompts = JSON.stringify(await built.sessions.listLlmRequests(inbound.sessionId!));
+    assert.doesNotMatch(prompts, /NOT security-screened/);
   });
 }

@@ -29,6 +29,15 @@ async function fixture(t: TestContext, config: Partial<Config> = {}) {
     );
   };
   await roster();
+  for (const [actor, scope] of [
+    ["U1", "personal:U1"],
+    ["U2", "personal:U2"],
+    ["U3", "personal:U3"],
+    ["U1", "channel:C1"],
+  ] as const) {
+    const computer = await built.sandboxResources.create(actor, scope, "sprites", "default");
+    await built.sandboxResources.setDefault(actor, scope, computer.id);
+  }
   await built.config.setSharingPosture("org:default-org", "open");
   const turn = async (text: string, room = false, actor = "U1", extra: Partial<TurnRequest> = {}) => {
     const result = await built.app.turn({
@@ -413,7 +422,7 @@ test("sharing e2e: local notebooks retain late facts while unclassified carried 
 });
 
 test("sharing e2e: screening off preserves carried skills without model calls", async (t) => {
-  const b = await fixture(t, { securityScreenBackend: "off" });
+  const b = await fixture(t, { securityScreen: "off" });
   await b.skill("personal:U1", "unscreened-helper", "SHARED_SKILL_OK");
   await assert.equal(
     await b.turn("!skill-run unscreened-helper python3 {dir}/scripts/value.py", true),

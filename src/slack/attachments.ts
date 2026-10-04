@@ -1,24 +1,9 @@
 import { sleep } from "./util.ts";
 import { channelShareTs, parseUploadedFileIds, slackErrorCode } from "./payloads.ts";
 import { BlobTooLargeError } from "../persistence/blob-transfer.ts";
+import { readOutgoingAttachment } from "../api/surface-core-client.ts";
 
-export interface IncomingAttachment {
-  name: string;
-  mimetype: string;
-  sizeBytes: number;
-  blobId: string;
-  sourceId?: string;
-  author?: string;
-}
-
-export interface OutgoingAttachment {
-  name: string;
-  mimetype: string;
-  sizeBytes: number;
-  blobId: string;
-  artifactId?: string;
-  artifactViewerId?: string;
-}
+import type { IncomingAttachment, OutgoingAttachment } from "../types.ts";
 
 export interface SlackFile {
   id?: string;
@@ -192,13 +177,7 @@ export async function uploadAttachments(
 ): Promise<{ uploaded: boolean; messageTs?: string }> {
   const fileUploads: Array<{ filename: string; file: Buffer }> = [];
   for (const a of attachments) {
-    let file: Buffer;
-    try {
-      file = await blobs.readBlob(a.blobId);
-    } catch (err) {
-      if (!a.artifactId || !a.artifactViewerId) throw err;
-      file = await blobs.readFileArtifact(a.artifactId, a.artifactViewerId);
-    }
+    const file = await readOutgoingAttachment(blobs, a);
     if (file.length > 0) fileUploads.push({ filename: a.name, file });
   }
   if (!fileUploads.length) return { uploaded: false };

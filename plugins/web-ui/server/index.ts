@@ -643,15 +643,32 @@ function runInboxFeed(): Promise<void> {
   return consumeCoreFeed(
     "/v1/loop-items/events",
     "loop_item",
-    (data) => {
-      const ev = data as { owner?: string; loopId?: string; itemId?: string; op?: string };
-      if (!ev.owner || !ev.loopId || !ev.itemId) return;
-      for (const clients of deliveryClients.values()) for (const res of clients) sseEvent(res, "inbox_resync", {});
-    },
-    () => {
-      for (const conns of deliveryClients.values()) for (const res of conns) sseEvent(res, "inbox_resync", {});
-    },
+    (data) => void forwardInboxItem(data as { loopId?: string; itemId?: string; op?: string }),
+    resyncInbox,
   );
+}
+
+function resyncInbox(): void {
+  for (const conns of deliveryClients.values()) for (const res of conns) sseEvent(res, "inbox_resync", {});
+}
+
+async function forwardInboxItem(ev: { loopId?: string; itemId?: string; op?: string }): Promise<void> {
+  if (!ev.loopId || !ev.itemId || !deliveryClients.size) return;
+  const r = await coreFetch(
+    "POST",
+    "/v1/inbox/viewers",
+    JSON.stringify({ loopId: ev.loopId, candidates: [...deliveryClients.keys()] }),
+  ).catch(() => null);
+  if (r?.status === 404) return;
+  let viewers: string[] | undefined;
+  try {
+    viewers = r?.status === 200 ? (JSON.parse(r.text) as { viewers?: string[] }).viewers : undefined;
+  } catch {
+    viewers = undefined;
+  }
+  if (!viewers) return resyncInbox();
+  const frame = { loopId: ev.loopId, itemId: ev.itemId, op: ev.op ?? "" };
+  for (const user of viewers) for (const res of deliveryClients.get(user) ?? []) sseEvent(res, "inbox_item", frame);
 }
 
 async function coreFetch(
@@ -1309,6 +1326,47 @@ const apiRoutes: readonly WebRoute[] = [
   },
   {
     method: "GET",
+    path: "/api/discord/link",
+    handle: (c) => {
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "GET", "/v1/discord/link");
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/discord/link/authorize",
+    handle: async (c) => {
+      const body = await readJson<{ nonceHash?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "POST", "/v1/discord/link/authorize", JSON.stringify({ nonceHash: body.nonceHash }));
+    },
+  },
+  {
+    method: "POST",
+    path: "/api/discord/link/complete",
+    handle: async (c) => {
+      const body = await readJson<{ code?: unknown; state?: unknown; nonce?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(
+        c.res,
+        "POST",
+        "/v1/discord/link/complete",
+        JSON.stringify({ code: body.code, state: body.state, nonce: body.nonce }),
+      );
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/api/discord/link",
+    handle: (c) => {
+      c.res.setHeader("Cache-Control", "no-store");
+      return relayCore(c.res, "DELETE", "/v1/discord/link");
+    },
+  },
+  {
+    method: "GET",
     path: "/api/composio/toolkits",
     handle: async (c) =>
       relayCore(
@@ -1940,6 +1998,21 @@ const apiRoutes: readonly WebRoute[] = [
         `/v1/sessions/${encodeURIComponent(id)}/fork`,
         JSON.stringify({ principalId: user, ...(upToSeq !== undefined ? { upToSeq } : {}) }),
       );
+    },
+  },
+  {
+    method: "GET",
+    path: "/api/sessions/:id/swarm",
+    handle: async (c) => relayCore(c.res, "GET", `/v1/sessions/${encodeURIComponent(c.params.id!)}/swarm`),
+  },
+  {
+    method: "POST",
+    path: "/api/sessions/:id/swarm",
+    handle: async (c) => {
+      const body = await readJson<{ action?: unknown }>(c.req, c.res, false);
+      if (!body) return;
+      if (body.action !== "control") return json(c.res, 400, { error: "only swarm controls are available here" });
+      return relayCore(c.res, "POST", `/v1/sessions/${encodeURIComponent(c.params.id!)}/swarm`, JSON.stringify(body));
     },
   },
   {
@@ -2892,6 +2965,17 @@ const apiRoutes: readonly WebRoute[] = [
         `/v1/loops/${encodeURIComponent(c.params.id!)}/fire?principalId=${encodeURIComponent(user)}`,
       );
     },
+  },
+  {
+    method: "POST",
+    path: "/api/loops/:id/triage/preview",
+    handle: async ({ req, res, user, params }) =>
+      relayCore(
+        res,
+        "POST",
+        `/v1/loops/${encodeURIComponent(params.id!)}/triage/preview?principalId=${encodeURIComponent(user)}`,
+        await readBody(req),
+      ),
   },
   {
     method: "POST",

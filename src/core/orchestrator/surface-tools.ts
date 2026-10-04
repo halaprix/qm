@@ -34,6 +34,7 @@ import { errMessage } from "../../util/errors.ts";
 import { adminSessionUrl } from "../../util/admin-links.ts";
 import { headLooksLikeText, replaceThreadSegment, type TurnPostKeys } from "./turn-helpers.ts";
 import type { OrchestratorDeps, OrchestratorInput } from "./types.ts";
+import { surfaceCapabilities } from "../../surfaces/surface-capabilities.ts";
 
 const SURFACE_READ_MAX = 200;
 const SURFACE_SEARCH_DEFAULT = 10;
@@ -503,6 +504,16 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!deps.channelPolicy) return { ok: false, message: "standing orders aren't available on this turn" };
       if (conversation.kind === "dm" || !conversation.channelRef)
         return { ok: false, message: "standing orders are per-channel — you can only set one from inside a channel." };
+      if (
+        ambientEnabled !== undefined &&
+        ambientEnabled !== null &&
+        surfaceCapabilities(input.surface)?.coreAmbient === false
+      )
+        return {
+          ok: false,
+          message:
+            "ambient on/off is not a setting on this surface — here I answer in threads I'm part of. Set the orders without ambient_enabled.",
+        };
       let parsedBots: Record<string, BotPolicy> | undefined;
       if (bots !== undefined) {
         const parsed = parseBotLedger(bots);
