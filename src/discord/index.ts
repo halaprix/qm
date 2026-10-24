@@ -225,7 +225,7 @@ export function createDiscordPlugin(
           if (!fetched.has(id)) guild.members.cache.delete(id);
         }
       },
-      onError: reportFailureAs("discord: member hydration", undefined),
+      onError: (guildId, err) => reportFailureAs("discord: member hydration", undefined, `guild=${guildId}`)(err),
     });
     const mergedClassify = createMergedClassify({
       client: c,
