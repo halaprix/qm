@@ -446,7 +446,7 @@ export function createDiscordPlugin(
           const timeoutPromise = new Promise<void>((resolve) => {
             timer = setTimeout(resolve, drainTimeoutMs);
           });
-          await Promise.race([Promise.allSettled([...detached.inFlight]).then(() => {}), timeoutPromise]).finally(() =>
+          await Promise.race([Promise.allSettled(detached.inFlight).then(() => {}), timeoutPromise]).finally(() =>
             clearTimeout(timer),
           );
         }

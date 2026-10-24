@@ -32,14 +32,17 @@ function signedHeaders(method: string, corePath: string, rawBody: string): Recor
   return signedRequestHeaders(CORE_SIGNING_SECRET, method, corePath, rawBody, { "content-type": "application/json" });
 }
 
+const GOVERNANCE_UI = await buildGovernanceUI();
 const BASE_HTML = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/index.html"), "utf8")
   .replaceAll("__ADMIN_BASE__", () => ADMIN_BASE_PATH)
-  .replace('"__GOVERNANCE_UI__";', () => buildGovernanceUI())
+  .replace('"__GOVERNANCE_UI__";', () => GOVERNANCE_UI)
   .replace(
     "<style data-admin-components></style>",
     () =>
       "<style data-admin-components>" +
-      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/admin-components.css"), "utf8") +
+      ["../../web-ui/src/model-picker.css", "../../web-ui/src/tooltip.css", "../public/admin-components.css"]
+        .map((path) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), path), "utf8"))
+        .join("\n") +
       "</style>",
   );
 const BRAND_MARK = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../public/brand-mark.svg"));
@@ -300,7 +303,7 @@ const WRITES = new Map<string, string[]>([
   ["grants", ["POST", "DELETE"]],
   ["principal-links", ["POST", "DELETE"]],
   ["external-users", ["POST", "DELETE"]],
-  ["memory", ["PUT"]],
+  ["memory", ["POST", "PATCH", "DELETE"]],
   ["crons", ["PUT"]],
   ["skills", ["DELETE"]],
   ["skill-packs", ["POST", "PATCH", "DELETE"]],
@@ -310,10 +313,10 @@ const WRITES = new Map<string, string[]>([
   ["model-providers", ["PUT", "DELETE"]],
   ["model-registry", ["POST", "PUT", "DELETE"]],
   ["custom-providers", ["PUT", "DELETE"]],
+  ["mcp-servers", ["PUT", "DELETE"]],
 ]);
 
 const READS = [
-  "metrics",
   "spend",
   "egress",
   "errors",
@@ -339,6 +342,7 @@ const READS = [
   "model-providers",
   "model-registry",
   "custom-providers",
+  "mcp-servers",
   "principal-links",
 ];
 

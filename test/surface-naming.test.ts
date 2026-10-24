@@ -19,7 +19,7 @@ test("labels come from the registry", () => {
 });
 
 test("the discord surface tool describes Discord and never the Slack mention syntax", () => {
-  const tools = createAgentTools({} as never, { surfaceTools: true, surfaceName: "discord" } as never);
+  const tools = createAgentTools({ current: null }, { surfaceTools: true, surfaceName: "discord" } as never);
   const tool = tools.find((t) => t.name === "discord")!;
   const json = JSON.stringify(tool);
   assert.match(json, /on Discord/);

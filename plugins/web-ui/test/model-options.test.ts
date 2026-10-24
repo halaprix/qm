@@ -1,11 +1,10 @@
 import { applyRuntimeOptions } from "./runtime-fixture.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
   defaultModelValue,
   getModelOptions,
-  getHarnessOptions,
+  harnessOptions,
   runtimeModelOptions,
   transcriptModel,
   harnessSupportsEffort,
@@ -18,16 +17,16 @@ const catalog = { future: metadata("future", "Future API Model"), custom: metada
 test("server metadata controls picker labels, geometry, price, order and effective selection", async () => {
   await applyRuntimeOptions(
     "scope:a",
-    ["pi", "mock"],
-    { pi: ["custom", "future", "custom"], mock: ["future"] },
-    { harnessId: "mock", modelId: "future" },
+    ["pi", "claude"],
+    { pi: ["custom", "future", "custom"], claude: ["future"] },
+    { harnessId: "claude", modelId: "future" },
     catalog,
   );
   assert.deepEqual(
     getModelOptions("scope:a").map((m) => m.value),
-    ["pi:custom", "pi:future", "mock:future"],
+    ["pi:custom", "pi:future", "claude:future"],
   );
-  assert.equal(defaultModelValue("scope:a"), "mock:future");
+  assert.equal(defaultModelValue("scope:a"), "claude:future");
   const model = getModelOptions("scope:a")[1]!;
   assert.equal(model.label, "Future API Model");
   assert.equal(model.model.contextWindow, 98765);
@@ -47,20 +46,20 @@ test("empty, unknown, missing-metadata and unapproved lists stay empty", async (
   assert.deepEqual(getModelOptions("scope:empty"), []);
   assert.equal(defaultModelValue("scope:empty"), "pi:future");
   assert.equal(transcriptModel("scope:empty"), undefined);
-  assert.deepEqual(getHarnessOptions("scope:empty"), []);
+  assert.deepEqual(harnessOptions(getModelOptions("scope:empty")), []);
 });
 
 test("scopes retain independent choices and an unloaded scope does not borrow another policy", async () => {
   await applyRuntimeOptions("scope:a", ["pi"], { pi: ["future"] }, { harnessId: "pi", modelId: "future" }, catalog);
   await applyRuntimeOptions(
     "scope:b",
-    ["mock"],
-    { mock: ["custom"] },
-    { harnessId: "mock", modelId: "custom" },
+    ["claude"],
+    { claude: ["custom"] },
+    { harnessId: "claude", modelId: "custom" },
     catalog,
   );
   assert.equal(defaultModelValue("scope:a"), "pi:future");
-  assert.equal(defaultModelValue("scope:b"), "mock:custom");
+  assert.equal(defaultModelValue("scope:b"), "claude:custom");
   assert.deepEqual(getModelOptions("scope:new"), []);
 });
 
@@ -73,19 +72,11 @@ test("OpenRouter and custom provider metadata retains provider grouping", async 
   );
 });
 
-test("picker has no model IDs, clone templates or runtime SDK model registry imports", async () => {
-  const source = ["pi-models.ts", "model-options.ts"]
-    .map((file) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"))
-    .join("\n");
-  assert.doesNotMatch(source, /MODEL_CATALOG|CLONE_TEMPLATES|gpt-5|claude-opus|openrouter\/auto|import \{ getModel/);
-});
-
 test("harness controls retain their supported surfaces", async () => {
   assert.equal(harnessSupportsEffort("pi"), true);
-  assert.equal(harnessSupportsEffort("opencode"), false);
+  assert.equal(harnessSupportsEffort("codex"), false);
   assert.equal(harnessSupportsFastMode("claude"), true);
-  assert.equal(harnessSupportsFastMode("codex"), true);
-  assert.equal(harnessSupportsFastMode("opencode"), true);
+  assert.equal(harnessSupportsFastMode("codex"), false);
 });
 
 test("deleted selection retains identity and transcript rendering does not borrow a replacement", async () => {

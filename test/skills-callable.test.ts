@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { scopeId } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
@@ -120,7 +120,7 @@ async function publishFileSkill(skills: ReturnType<typeof buildApp>["skills"], n
   return sk;
 }
 
-test("skill files live only for the turn that loaded them", async () => {
+test("skill files stay on the computer across turns", async () => {
   const { app, skills } = await withDefaultComputer(freshApp());
   const first = await publishFileSkill(skills, "helper");
   const request = {
@@ -131,7 +131,101 @@ test("skill files live only for the turn that loaded them", async () => {
   const ran = await app.turn({ ...request, text: "!skill-run helper cat {dir}/scripts/run.sh" } as TurnRequest);
   assert.equal(ran.reply, "printf helper");
   const next = await app.turn({ ...request, text: "!run find . -name run.sh | wc -l | tr -d ' '" } as TurnRequest);
-  assert.equal(next.reply, "0");
+  assert.equal(next.reply, "1");
   await skills.archive(first.id);
   assert.match((await app.turn({ ...request, text: "!skill helper" } as TurnRequest)).reply ?? "", /no skill file/);
+});
+
+test("skills index order uses visible history, resets with compaction, and leaves the system prefix stable", async () => {
+  const built = freshApp();
+  for (let i = 0; i < 20; i++) {
+    const skill = await built.skills.create({
+      scopeId: "personal:U1",
+      createdBy: "U1",
+      manifest: {
+        name: `helper-${String(i).padStart(2, "0")}`,
+        description: "General task",
+        body: "Instructions",
+        requiredCapabilities: [],
+      },
+    });
+    await built.skills.review(skill.id, "reviewer", []);
+    await built.skills.publish(skill.id);
+  }
+  const request = {
+    surface: "test" as const,
+    actor,
+    conversation: { kind: "dm" as const, threadRef: "shortlist-history" },
+    text: "!sysprompt",
+  };
+  const promoted = (prompt: string) => prompt.indexOf("**helper-19**") < prompt.indexOf("**helper-00**");
+  const first = await built.app.turn(request);
+  assert.ok(!promoted(first.reply ?? ""));
+  const sessionId = first.sessionId!;
+  const { lease } = await built.sessions.acquireLease(sessionId, "turn");
+  assert.ok(lease);
+  await built.sessions.append(lease, {
+    type: "tool_call",
+    payload: { tool: "skills", callId: "skills-1", action: "read", name: "helper-19" },
+    scopeLabel: "personal:U1",
+  });
+  await built.sessions.releaseLease(lease);
+  const second = await built.app.turn(request);
+  assert.ok(promoted(second.reply ?? ""));
+  const unchanged = await built.app.turn(request);
+  assert.doesNotMatch(unchanged.reply ?? "", /\*\*helper-00\*\*/);
+  const entries = await built.sessions.getEntries(sessionId);
+  const reset = await built.sessions.acquireLease(sessionId, "compaction");
+  assert.ok(reset.lease);
+  await built.sessions.append(reset.lease, {
+    type: "system",
+    payload: { kind: "context_summary", text: "Earlier work complete", throughSeq: entries.at(-1)!.seq },
+    scopeLabel: "personal:U1",
+  });
+  await built.sessions.releaseLease(reset.lease);
+  const third = await built.app.turn(request);
+  assert.ok(!promoted(third.reply ?? ""));
+  const recorded = (await built.sessions.listLlmRequests(sessionId)).filter((r) => r.model === "mock");
+  const systems = recorded.map((r) => (r.promptEnvelope as { system: string }).system);
+  assert.equal(systems.length, 4);
+  assert.equal(systems[0], systems[1]);
+  assert.equal(systems[1], systems[2]);
+  assert.equal(systems[2], systems[3]);
+});
+
+test("Open sharing keeps private skill metadata out of the persisted channel shortlist", async () => {
+  const built = buildApp(testConfig({ securityScreen: "off" }));
+  await built.config.setSharingPosture("org:default-org", "open");
+  await publishPersonalSkill(built.skills);
+  const result = await built.app.turn({
+    surface: "test",
+    origin: { kind: "human" },
+    actor,
+    conversation: {
+      kind: "channel",
+      channelRef: "C1",
+      threadRef: "shortlist-open",
+      audience: [actor],
+      publishMembers: [actor],
+    },
+    text: "!sysprompt",
+  });
+  assert.equal(result.status, "ok");
+  assert.doesNotMatch(result.reply ?? "", /assemble a morning digest|\*\*make-digest\*\*/);
+  const read = await built.app.turn({
+    surface: "test",
+    origin: { kind: "human" },
+    actor,
+    conversation: {
+      kind: "channel",
+      channelRef: "C1",
+      threadRef: "shortlist-open",
+      audience: [actor],
+      publishMembers: [actor],
+    },
+    text: "!skill make-digest",
+  });
+  assert.match(read.reply ?? "", /Step 1: gather/);
+  const entries = await built.sessions.getEntries(result.sessionId!);
+  assert.doesNotMatch(JSON.stringify(entries.filter((e) => e.type === "user")), /assemble a morning digest/);
 });

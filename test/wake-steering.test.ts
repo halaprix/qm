@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import { jsonbStringify } from "../src/persistence/durable-map.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
@@ -206,7 +206,7 @@ test("Auto blocks a prompt-injection attempt from an unprompted mid-turn coworke
   assert.equal(
     (await built.signals.takePending(liveRunId)).length,
     0,
-    "tainted steer data never reaches the live harness",
+    "flagged steer data never reaches the live harness",
   );
   assert.ok((await built.auditLog.events()).some((event) => event.action === "security_posture.steer_block"));
 });

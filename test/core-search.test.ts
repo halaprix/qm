@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createCoreSearch, type SearchBackend } from "../src/search/core-search.ts";
 import { createIntersectionBackend } from "../src/search/backends.ts";
 import { createServer } from "../src/api/server.ts";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
 import { CAPABILITY_TTL_MS, mintCapabilityToken } from "../src/auth/capability-token.ts";
 import { scopeId } from "../src/types.ts";
@@ -180,7 +180,7 @@ test("file search retains common artifact identities when viewers own different 
       createdBy: author.id,
       createdInScope: project,
       name: "pelican.txt",
-      path: id,
+      path: artifactPath(id, "pelican.txt"),
       mimetype: "text/plain",
       data: Buffer.from("pelican launch"),
       direction: "in",
@@ -221,7 +221,7 @@ test("file search still reaches shared artifacts outside the first document page
     const id = "shared-search-" + n;
     await built.files.put({
       id,
-      path: id,
+      path: artifactPath(id, "pelican.txt"),
       ownerScopeId,
       createdBy: "carol@example.com",
       name: "note.txt",

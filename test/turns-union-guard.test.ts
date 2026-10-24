@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { createServer } from "../src/api/server.ts";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import { signedHeaders } from "../plugins/chassis/src/core-client.ts";
 import { testConfig } from "./support/test-config.ts";
 
@@ -271,21 +271,4 @@ test("POST /v1/turns rejects a client idempotencyKey in the reserved slack: name
   });
   assert.equal(r.status, 400);
   assert.match(JSON.stringify(await r.json()), /reserved slack: prefix/);
-});
-
-test("POST /v1/crons (raw source-auth) rejects runAs:scopeShared", async () => {
-  const body = JSON.stringify({
-    schedule: { everyMs: 3_600_000 },
-    action: "x",
-    owner: "internal:owner",
-    createdBy: "internal:owner",
-    ownerScopeId: "channel:C-PUBLIC",
-    runAs: "scopeShared",
-  });
-  const r = await fetch(`${base}/v1/crons`, {
-    method: "POST",
-    headers: { ...signedHeaders(SECRET, "POST", "/v1/crons", body), "content-type": "application/json" },
-    body,
-  });
-  assert.equal(r.status, 400);
 });

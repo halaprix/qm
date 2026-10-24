@@ -19,7 +19,7 @@ function fakeCore(): DiscordCoreClient {
     waitRun: async () => ({ status: "ok", reply: "done" }),
     streamSnapshot: () => null,
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     discordUserIdsFor: () => [],
     reportRunEditRef: async () => {},
     ackRunDelivery: async () => {},
@@ -633,7 +633,7 @@ function guildHarness(opts: {
       return { status: "silent" };
     },
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async (events: unknown[]) => {
       ingested.push(events);
     },
@@ -1110,7 +1110,7 @@ test("a member removed from the guild between hydrations is dropped from the cac
       return { status: "silent" };
     },
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1211,7 +1211,7 @@ test("a member added to the cache while the fetch is pending is still cached aft
       return { status: "silent" };
     },
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1296,7 +1296,7 @@ test("a rejected fetch prunes nothing", async () => {
   const core = {
     ...fakeCore(),
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},
@@ -1351,7 +1351,7 @@ test("a run in flight from a stopping connection is not delivered by the next co
     waitRun: () => waitRunPromise,
     reportRunEditRef: async () => {},
     linkedInternal: async () => false,
-    coreStatus: async () => ({ notInternal: false, overrideInternal: false }),
+    coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
     onContextRequest: () => () => {},

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
 import { messageRevision } from "../src/core/message-revisions.ts";
 import { sleep } from "../src/util/async.ts";
@@ -51,7 +51,6 @@ test("an edit the ingest path could not record is caught up at the end of the ne
       marks.map((m) => [m.action, m.ts, m.text]),
       [["edited", "t1", "hello there, edited"]],
     );
-    assert.equal(await built.sessions.tapeCoverage(session!.id), await built.sessions.latestEntrySeq(session!.id));
 
     await sleep(60);
     const asked: number[] = [];

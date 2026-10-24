@@ -1,6 +1,6 @@
 import { SandboxProvisionCleanupError } from "../src/sandbox/sandbox.ts";
 import { pollProcess } from "../src/sandbox/process-poll.ts";
-import { test, after, beforeEach } from "node:test";
+import { test, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,9 @@ import { mintCapabilityToken, EGRESS_PROXY_AUD } from "../src/auth/capability-to
 import { installFakeE2b, type FakeE2b } from "./support/fake-e2b.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 import { E2bSandboxGoneError } from "../src/sandbox/e2b-client.ts";
+import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
+import { singleProcessDeps } from "./support/single-process.ts";
+import { createMemorySnapshotStore } from "../src/sandbox/home-snapshot.ts";
 
 let fake: FakeE2b;
 let sandbox: Sandbox;
@@ -26,6 +29,9 @@ const scopeName = (): string => sandboxScopeName("qmt", scope);
 
 function make(extra: Record<string, unknown> = {}): Sandbox {
   return createE2bSandbox(createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "e2b-ws-"))), {
+    snapshots: createMemorySnapshotStore(),
+    store: createMemoryMap(),
+    ...singleProcessDeps(),
     client: fake.client,
     namePrefix: "qmt",
     ...extra,
@@ -46,7 +52,7 @@ const nativeClient = (): typeof fake.client => ({
     return { state: current.state, expiresAtMs: Date.now() + 60_000, onTimeout: "pause" };
   },
 });
-after(() => fake?.cleanup());
+afterEach(() => fake.cleanup());
 
 test("provision runs commands with env and cwd", async () => {
   const h = await sandbox.provision(layers, { env: { MY_VAR: "v1" } });
@@ -55,6 +61,12 @@ test("provision runs commands with env and cwd", async () => {
   assert.equal(r.code, 0);
   assert.match(r.stdout, /workspace/);
   assert.match(r.stdout, /VAR=v1/);
+});
+
+test("two cores provisioning the same stopped computer create one sandbox", async () => {
+  const advisoryLock = createMemoryAdvisoryLock();
+  await Promise.all([make({ advisoryLock }).provision(layers), make({ advisoryLock }).provision(layers)]);
+  assert.equal(fake.createdCount(scopeName()), 1);
 });
 
 test("an already-aborted signal never executes a command", async () => {

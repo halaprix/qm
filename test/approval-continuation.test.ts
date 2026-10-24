@@ -10,8 +10,6 @@ test("the continuation drops delivery-time fields and keeps the conversation", (
     redeliveryKey: "r",
     approval: { requestId: "x", approved: true },
     relayInput: {},
-    intakePreambleMs: 1,
-    clientSentAt: 2,
     actor: { externalId: "discord:1" },
     conversation: { kind: "channel", threadRef: "discord:th:t1" },
     deliveryTarget: "t1",

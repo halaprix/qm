@@ -74,19 +74,36 @@ export function providerBaseUrl(provider: string): string | undefined {
   return (PROVIDER_IDS as readonly string[]).includes(provider) ? configured[provider as ProviderId] : undefined;
 }
 
-export function modelGatewayRequest<T extends { id: string; baseUrl: string; api?: string }>(
+export class ModelUnavailableError extends Error {
+  readonly status = 404;
+  readonly type = "model_unavailable";
+  constructor(modelId: string, label = "Model") {
+    super(`${label} is unavailable: ${modelId}`);
+    this.name = "ModelUnavailableError";
+  }
+}
+
+export class GatewayModelUnavailableError extends ModelUnavailableError {
+  constructor(modelId: string) {
+    super(modelId, "Gateway model");
+    this.name = "GatewayModelUnavailableError";
+  }
+}
+
+export function modelGatewayRequest<T extends { id: string; baseUrl: string; api?: string; compat?: object }>(
   config: ModelGatewayTransportConfig | undefined,
   model: T,
 ): { model: T; target: string; apiKey: string; headers: Record<string, string> } | undefined {
   const target = config?.models[model.id];
   if (!target || !config) {
     if (isGatewayModelId(model.id) || config?.reservedModelIds?.has(model.id))
-      throw new Error(`Gateway model is unavailable: ${model.id}`);
+      throw new GatewayModelUnavailableError(model.id);
     return undefined;
   }
   return {
     model: {
       ...model,
+      compat: { ...model.compat, sendSessionAffinityHeaders: true },
       baseUrl: isGatewayModelId(model.id)
         ? `${config.url.replace(/\/v1$/, "")}${model.api === "anthropic-messages" ? "" : "/v1"}`
         : config.url,

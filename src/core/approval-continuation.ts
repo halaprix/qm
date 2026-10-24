@@ -17,8 +17,6 @@ export function approvalContinuation(request: Record<string, unknown> | undefine
     redeliveryKey: _redeliveryKey,
     approval: _approval,
     relayInput: _relayInput,
-    intakePreambleMs: _intakePreambleMs,
-    clientSentAt: _clientSentAt,
     ...turn
   } = request;
   return turn;

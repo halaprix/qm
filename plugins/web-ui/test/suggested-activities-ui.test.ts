@@ -1,27 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 import type { Agent } from "@earendil-works/pi-agent-core";
 import type { ComposerSurface, ConvCtx } from "../src/conv-types.ts";
 import type { SuggestedActivity } from "../../chassis/src/suggested-activities.ts";
-
-test("suggested prompts stay in regular docks but move into multiview chat areas", () => {
-  const chat = readFileSync(new URL("../src/chat.ts", import.meta.url), "utf8");
-  const activeChat = chat.slice(chat.indexOf("const emptyChat ="));
-  const stack = activeChat.slice(activeChat.indexOf('<div class="message-stack'), activeChat.indexOf("</section>"));
-  const dock = chat.slice(
-    chat.indexOf('<div class="chat-bottom-dock">'),
-    chat.indexOf("transcriptViewport.afterRender()"),
-  );
-  assert.match(stack, /ctx\.pane \? suggestions : nothing/);
-  const composerIndex = dock.indexOf("ctx.composer.composerForm(agent)");
-  const suggestionsIndex = dock.indexOf("ctx.pane ? nothing : suggestions");
-  assert.notEqual(composerIndex, -1);
-  assert.notEqual(suggestionsIndex, -1);
-  assert.ok(composerIndex < suggestionsIndex);
-});
 
 test("activity selection fills and persists an editable draft without sending or overwriting work", async () => {
   const dom = new JSDOM('<!doctype html><div id="app"></div><main></main>', {
@@ -104,7 +87,11 @@ test("activity selection fills and persists an editable draft without sending or
     const agent = { state: agentState } as unknown as Agent;
     const draw = () =>
       render(
-        html`${suggestedActivities(appState.me.suggestedActivities, (activity: SuggestedActivity) => composer!.fillSuggestedPrompt(activity.prompt, agent), Boolean(composer!.state.draft || composer!.state.attachments.length))}${composer!.composerForm(agent)}`,
+        html`${suggestedActivities(appState.me.suggestedActivities, {
+          onSelect: (activity: SuggestedActivity) => composer!.fillSuggestedPrompt(activity.prompt, agent),
+          redraw: draw,
+          collapsed: Boolean(composer!.state.draft || composer!.state.attachments.length),
+        })}${composer!.composerForm(agent)}`,
         host,
       );
     const ctx = {
@@ -120,6 +107,7 @@ test("activity selection fills and persists an editable draft without sending or
         },
         activePendingApprovals: () => [],
         hasUnresolvedApproval: () => false,
+        turnRuntime: () => null,
         hasLiveRun: () => false,
         isStopping: () => false,
         drawActiveChat: draw,

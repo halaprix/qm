@@ -592,7 +592,7 @@ test("read_thread preserves threadTs on messages for thread targets so whats_new
     botUserId: () => "999",
   });
   await fulfill(req({ conversationTarget: "t1", viewer: "ana@acme.com", count: 10 }));
-  const result = (outcomes[0]?.outcome as { result: { messages: Array<{ ts: string; threadTs?: string }> } }).result;
+  const result = (outcomes[0]!.outcome as { result: { messages: Array<{ ts: string; threadTs?: string }> } }).result;
   assert.equal(result.messages[0]?.threadTs, "t1");
   assert.equal(result.messages[1]?.threadTs, "t1");
   const destTarget = "t1";

@@ -4,7 +4,6 @@ import { createSurfaceCoreClient, type SurfaceCoreClient, type SurfaceCoreClient
 
 interface CoreStatus {
   notInternal: boolean;
-  overrideInternal: boolean;
 }
 
 export interface DiscordCoreClient extends SurfaceCoreClient {
@@ -35,13 +34,7 @@ export function createDiscordCoreClient(deps: SurfaceCoreClientDeps): DiscordCor
     async coreStatus(discordUserId) {
       await deps.identity.refresh();
       const alias = discordExternalId(discordUserId);
-      const canonical = canonicalPerson(alias);
-      return {
-        overrideInternal:
-          deps.identity.classify(alias, true).type === "internal" ||
-          deps.identity.classify(canonical, true).type === "internal",
-        notInternal: deps.identity.classify(alias, false).type !== "internal",
-      };
+      return { notInternal: deps.identity.classify(alias, false).type !== "internal" };
     },
     discordUserIdsFor(principalId) {
       return linkedDiscordUserIds(principalId);

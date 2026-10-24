@@ -1,13 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
-  FileUploadError,
-  createDirectFileUploads,
-  multipartChecksum,
-  FILE_UPLOAD_PART_SIZE,
-} from "../src/files/direct-file-upload.ts";
-import type { FileUpload, FileUploadStore } from "../src/files/file-upload-store.ts";
+import { createDirectFileUploads, multipartChecksum, FILE_UPLOAD_PART_SIZE } from "../src/files/direct-file-upload.ts";
+import { FileUploadError, type FileUpload, type FileUploadStore } from "../src/files/file-upload-store.ts";
 import { createMemoryFileArtifactStore } from "../src/files/file-artifact-store.ts";
 import { createMemoryDurableByteStore } from "../src/files/durable-byte-store.ts";
 import { scopeId } from "../src/types.ts";
@@ -29,6 +24,20 @@ function fixture() {
       if (!row || !from.includes(row.state)) return false;
       row.state = to;
       return true;
+    },
+    async touch(id, at) {
+      const row = rows.get(id);
+      if (row?.state !== "pending") return false;
+      row.lastActivityAt = at;
+      return true;
+    },
+    async active(actorId, now) {
+      return [...rows.values()].filter(
+        (r) =>
+          r.actorId === actorId &&
+          !["complete", "aborted", "failed"].includes(r.state) &&
+          !(r.state === "pending" && r.expiresAt <= now),
+      );
     },
     async expired(now) {
       return [...rows.values()].filter(
@@ -115,11 +124,29 @@ function fixture() {
     loseResponse: () => {
       loseCompleteResponse = true;
     },
-    advance: () => {
-      time += 25 * 60 * 60 * 1000;
+    advance: (ms = 25 * 60 * 60 * 1000) => {
+      time += ms;
     },
   };
 }
+
+test("idle uploads keep their slot until the 24h cap; signing records last activity", async () => {
+  const hour = 60 * 60 * 1000;
+  const f = fixture();
+  const row = await f.service.begin(f.input);
+  f.advance(23 * hour);
+  await f.service.sign(row.id, 1);
+  assert.equal((await f.store.get(row.id))!.lastActivityAt, row.createdAt + 23 * hour);
+  assert.deepEqual(
+    (await f.service.list("U1")).map((r) => r.id),
+    [row.id],
+  );
+  f.advance(hour);
+  await assert.rejects(f.service.sign(row.id, 1), /expired/);
+  assert.deepEqual(await f.service.list("U1"), []);
+  await f.service.sweep();
+  assert.equal((await f.store.get(row.id))!.state, "aborted");
+});
 
 test("signed parts bind the exact size, checksum, upload and number; unpublished parts are invisible", async () => {
   const f = fixture();

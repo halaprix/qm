@@ -1,7 +1,8 @@
-import { codeChallengeS256, generateCodeVerifier } from "../connectors/oauth.ts";
-import { CODEX_OAUTH_ISSUER, codexOAuthJwtAccountIdFromToken } from "../harness/codex-auth-file.ts";
+import { codeChallengeS256, generateCodeVerifier, oauthFailure } from "../connectors/oauth.ts";
+import { chatgptAccountIdFromToken, tokenExpiry } from "./chatgpt-auth-file.ts";
 import type { UserOAuthTokens } from "./user-model-credential-store.ts";
 
+const CHATGPT_ISSUER = "https://auth.openai.com";
 const CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CHATGPT_SCOPE = "openid profile email offline_access";
 
@@ -11,26 +12,8 @@ const CLAUDE_TOKEN = "https://console.anthropic.com/v1/oauth/token";
 const CLAUDE_REDIRECT = "https://platform.claude.com/oauth/code/callback";
 const CLAUDE_SCOPE = "org:create_api_key user:profile user:inference";
 
-function decodeJwtClaims(jwt: string | undefined): Record<string, unknown> | undefined {
-  if (!jwt) return undefined;
-  const part = jwt.split(".")[1];
-  if (!part) return undefined;
-  try {
-    return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
 function chatgptAccountId(tokens: { idToken?: string; accessToken: string }): string | undefined {
-  return codexOAuthJwtAccountIdFromToken(tokens.idToken) ?? codexOAuthJwtAccountIdFromToken(tokens.accessToken);
-}
-
-function tokenExpiry(raw: { expires_in?: number; access_token?: string }): number | undefined {
-  if (typeof raw.expires_in === "number") return Date.now() + raw.expires_in * 1000;
-  const claims = decodeJwtClaims(raw.access_token);
-  const exp = claims?.exp;
-  return typeof exp === "number" ? exp * 1000 : undefined;
+  return chatgptAccountIdFromToken(tokens.idToken) ?? chatgptAccountIdFromToken(tokens.accessToken);
 }
 
 export interface ChatGPTDevicePrompt {
@@ -42,7 +25,7 @@ export interface ChatGPTDevicePrompt {
 }
 
 export async function refreshChatGPTTokens(refreshToken: string): Promise<UserOAuthTokens> {
-  const res = await fetch(`${CODEX_OAUTH_ISSUER}/oauth/token`, {
+  const res = await fetch(`${CHATGPT_ISSUER}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({
@@ -53,7 +36,7 @@ export async function refreshChatGPTTokens(refreshToken: string): Promise<UserOA
     }),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`chatgpt refresh failed (${res.status})`);
+  if (!res.ok) throw await oauthFailure("chatgpt refresh", res);
   const raw = (await res.json()) as {
     access_token?: string;
     refresh_token?: string;
@@ -105,7 +88,7 @@ export async function completeClaudeLogin(pastedCode: string, verifier: string):
     }),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`claude token exchange failed (${res.status})`);
+  if (!res.ok) throw await oauthFailure("claude token exchange", res);
   const raw = (await res.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
   if (!raw.access_token) throw new Error("claude token response missing access_token");
   return {
@@ -122,7 +105,7 @@ export async function refreshClaudeTokens(refreshToken: string): Promise<UserOAu
     body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: CLAUDE_CLIENT_ID }),
     signal: AbortSignal.timeout(15_000),
   });
-  if (!res.ok) throw new Error(`claude refresh failed (${res.status})`);
+  if (!res.ok) throw await oauthFailure("claude refresh", res);
   const raw = (await res.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
   if (!raw.access_token) throw new Error("claude refresh missing access_token");
   return {

@@ -18,13 +18,14 @@ export interface AuditLog {
   tail(opts: {
     limit: number;
     scopeLabel?: ScopeId;
-    action?: string;
+    action?: string | readonly string[];
     since?: number;
     resourceContains?: string;
   }): Promise<readonly AuditEvent[]>;
-
-  tallyByResource?(action: string): Promise<ReadonlyMap<string, number>>;
 }
+
+export const SECURITY_FLAGGED = "security_posture.flagged";
+export const SECURITY_TOOL_RESULT_QUARANTINE = "security_posture.tool_result_quarantine";
 
 const MAX = 50000;
 
@@ -48,15 +49,10 @@ export function createAuditLog(): AuditLog {
         .list({ limit: MAX, ...(scopeLabel ? { scopeId: scopeLabel } : {}) })
         .filter(
           (e) =>
-            (action === undefined || e.action === action) &&
+            (action === undefined || [action].flat().includes(e.action)) &&
             (since === undefined || e.at >= since) &&
             (resourceContains === undefined || e.resource.includes(resourceContains)),
         )
         .slice(0, limit),
-    async tallyByResource(action) {
-      const out = new Map<string, number>();
-      for (const e of sink.all()) if (e.action === action) out.set(e.resource, (out.get(e.resource) ?? 0) + 1);
-      return out;
-    },
   };
 }

@@ -2,6 +2,7 @@ import { choiceGroup, settingStatus, saveFooter } from "./setting-controls.ts";
 import { html, render, nothing } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { live } from "lit/directives/live.js";
+import { slackMark } from "../../web-ui/src/slack-mark.ts";
 import { repeat } from "lit/directives/repeat.js";
 import {
   states,
@@ -72,38 +73,6 @@ cards["card-external-slack"] = () => {
           ],
         ],
       )}
-    </div>
-    ${saveFooter(s, "Apply", !s.available)}
-  </section>`;
-};
-cards["card-internal-member-overrides"] = () => {
-  const s = states.get("internal-member-overrides")!;
-  return html`<section
-    class=${classMap({ card: true, "sv-slack-settings": true, "setting-row": true, hidden: !s.available, dirty: s.dirty })}
-    id="card-internal-member-overrides"
-  >
-    <div class="head">
-      <h2 id="internal-member-overrides-title">Internal member overrides</h2>
-      <p id="internal-member-overrides-help">
-        Treat listed Slack users as internal members, including guests and people missing from the directory. This
-        grants internal-member access, not just permission to mention the agent. Rooms containing only internal members
-        may use organization credentials. Add only trusted colleagues. Enter one Slack user ID or Slack-profile email
-        per line (commas also accepted).
-      </p>
-    </div>
-    <div class="body">
-      <textarea
-        id="internal-member-overrides"
-        .value=${s.draft.text || ""}
-        @input=${(e: Event) => s.change({ text: (e.target as HTMLTextAreaElement).value })}
-        rows="4"
-        aria-labelledby="internal-member-overrides-title"
-        aria-describedby="internal-member-overrides-help internal-member-overrides-count"
-        spellcheck="false"
-        placeholder="contractor@example.com&#10;U0123ABCDE"
-        style="width: 100%; max-width: 560px; font-family: var(--mono, monospace)"
-      ></textarea>
-      <small class="muted" id="internal-member-overrides-count">${overrideCount(s)}</small>
     </div>
     ${saveFooter(s, "Apply", !s.available)}
   </section>`;
@@ -225,8 +194,22 @@ cards["card-connectors"] = () => {
       </div>
       <label style="display: block; margin-bottom: 8px"
         >Connector
-        <select id="conn-provider" style="width: 100%"></select
-      ></label>
+        <select
+          id="conn-provider"
+          style="width: 100%"
+          ?disabled=${Boolean(s.editing)}
+          @change=${(e: Event) => s.change("provider", (e.target as HTMLSelectElement).value)}
+        >
+          ${repeat(
+            s.catalog,
+            (c) => c.provider,
+            (c) =>
+              html`<option value=${c.provider} .selected=${c.provider === s.draft.provider}>
+                ${context.connectorName(c.provider) + (c.configured ? " (configured)" : "")}
+              </option>`,
+          )}
+        </select></label
+      >
       <div id="conn-guide" class="hint" style="margin: 0 0 12px">${connectorGuide()}</div>
       <label style="display: block; margin-bottom: 8px"
         >Client ID
@@ -300,24 +283,7 @@ cards["card-slack-installation"] = () => {
             title=${d.configured && d.source === "admin" ? "Remove your current connection before switching to the hosted app." : ""}
             @click=${() => s.start()}
           >
-            <svg width="20" height="20" viewBox="0 0 127 127" aria-hidden="true" focusable="false">
-              <path
-                d="M27.2 80c0 7.3-5.9 13.2-13.2 13.2C6.7 93.2.8 87.3.8 80c0-7.3 5.9-13.2 13.2-13.2h13.2V80zm6.6 0c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2v33c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V80z"
-                fill="#E01E5A"
-              />
-              <path
-                d="M47 27c-7.3 0-13.2-5.9-13.2-13.2C33.8 6.5 39.7.6 47 .6c7.3 0 13.2 5.9 13.2 13.2V27H47zm0 6.7c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H13.9C6.6 60.1.7 54.2.7 46.9c0-7.3 5.9-13.2 13.2-13.2H47z"
-                fill="#36C5F0"
-              />
-              <path
-                d="M99.9 46.9c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H99.9V46.9zm-6.6 0c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V13.8C66.9 6.5 72.8.6 80.1.6c7.3 0 13.2 5.9 13.2 13.2v33.1z"
-                fill="#2EB67D"
-              />
-              <path
-                d="M80.1 99.8c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V99.8h13.2zm0-6.6c-7.3 0-13.2-5.9-13.2-13.2 0-7.3 5.9-13.2 13.2-13.2h33.1c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H80.1z"
-                fill="#ECB22E"
-              />
-            </svg>
+            ${slackMark(20)}
             <span id="slack-installation-start-label">${d.configured ? "Re-add to Slack" : "Add to Slack"}</span>
           </button>
           <button
@@ -554,10 +520,6 @@ cards["card-discord-installation"] = () => {
     </div>
   </section>`;
 };
-function overrideCount(s: SlackSetting) {
-  const n = s.collect().members!.length;
-  return n ? n + " override" + (n === 1 ? "" : "s") : "No overrides configured.";
-}
 function openConnector(connector?: Parameters<typeof connectors.edit>[0]) {
   connectors.edit(connector);
   document.getElementById("conn-client-id")?.focus();
@@ -727,7 +689,6 @@ export function mountCards() {
       const key = (
         {
           "card-external-slack": "external-slack-participants",
-          "card-internal-member-overrides": "internal-member-overrides",
           "card-channel-header-pin-default": "channel-header-pin-default",
           "card-ack-emoji": "ack-emoji",
         } as Record<string, string>

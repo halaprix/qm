@@ -44,7 +44,6 @@ export async function listAdminArtifacts(ctx: ApiCtx): Promise<void> {
         schedule: c.schedule,
         runtime: c.runtime,
         loopId: c.loopId,
-        runAs: c.runAs,
         unattendedGrants: c.unattendedGrants,
         destination: c.destination,
         createdAt: c.createdAt,
@@ -138,6 +137,11 @@ export async function putAdminCronDestination(ctx: ApiCtx): Promise<void> {
   if (typeof body !== "object" || body === null || !("destination" in body)) {
     return sendJson(res, 400, { error: "bad_request", message: "destination is required; use null to clear" });
   }
+  if ((cron.unattendedGrants?.length ?? 0) > 0)
+    return sendJson(res, 409, {
+      error: "conflict",
+      message: "this cron carries unattended admin read grants, so only its owner can change where it delivers",
+    });
   const destination = (body as { destination: unknown }).destination;
   if (destination !== null && !isAdminCronDestination(destination)) {
     return sendJson(res, 400, {

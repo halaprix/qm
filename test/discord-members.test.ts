@@ -13,7 +13,7 @@ const member = (userId: string, roleIds: string[] = [], isBot = false) => ({
   isBot,
 });
 
-const defaultCore = async () => ({ notInternal: false, overrideInternal: false });
+const defaultCore = async () => ({ notInternal: false });
 
 afterEach(() => installPrincipalLinks(null));
 
@@ -50,18 +50,12 @@ test("everyone else, bots included, is a guest", async () => {
 });
 
 test("a deactivated user with the internal role is a guest reader and is refused as a DM recipient", async () => {
-  const deactCore = async (id: string) => ({ notInternal: id === "2", overrideInternal: false });
+  const deactCore = async (id: string) => ({ notInternal: id === "2" });
   const deactivatedRoleHolder = await classifyMember(member("2", ["r-staff"]), cfg, notLinked, deactCore);
   assert.equal(deactivatedRoleHolder.isExternalGuest, true);
 
   const normalRoleHolder = await classifyMember(member("3", ["r-staff"]), cfg, notLinked, deactCore);
   assert.equal(normalRoleHolder.isExternalGuest, undefined);
-});
-
-test("an admin override to internal makes a member internal even without roles", async () => {
-  const overrideCore = async (id: string) => ({ notInternal: false, overrideInternal: id === "4" });
-  const overridden = await classifyMember(member("4", []), cfg, notLinked, overrideCore);
-  assert.equal(overridden.isExternalGuest, undefined);
 });
 
 function identity(internal: Set<string>) {

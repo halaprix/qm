@@ -188,7 +188,6 @@ When personal notices are enabled (the default):
 - **Attachment limits**: Bot uploads cap at 10 MiB per file (`DISCORD_UPLOAD_LIMIT_BYTES`) and 10 files per message (`DISCORD_MAX_FILES`).
 - **Emoji reactions**: Unicode emojis only. Custom guild emoji names are ignored.
 - **Cross-channel reach**: The agent can post in its current channel/thread or DM linked individuals, but cannot reach across into other Discord channels.
-- **No agent requests**: Personal agent hand-offs (`[[ask-agent: …]]`) are a Slack-specific adapter directive and are not available on Discord.
 - **No directory sync**: Discord members are not synced into the QM org directory table. Membership and roles are evaluated live against Discord Gateway cache. Discord-only users cannot be reached by name in directory lookups unless linked.
 - **Core ambient triggers**: Core ambient proactive wakeups are disabled for Discord; ambient responses occur only within staked threads.
 - **Snowflake comparison in history tools**: `whats_new` compares message ids as strings, which is wrong only when one channel mixes older 17/18-digit ids with newer 19-digit ids.

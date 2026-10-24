@@ -389,8 +389,7 @@ test("the deploy role can run and inspect only stack-scoped deployment canaries"
 
   const inspect = policy.match(/Sid\s*= "InspectDeploymentCanaries"([\s\S]*?)\n\s*\},/)?.[1] ?? "";
   assert.match(inspect, /ecs:DescribeTasks/);
-  assert.match(inspect, /ecs:GetTaskProtection/);
-  assert.doesNotMatch(policy, /ecs:UpdateTaskProtection/);
+  assert.doesNotMatch(mainTf, /TaskProtection/);
   assert.match(inspect, /task\/\$\{var\.cluster_name\}\/\*/);
   assert.doesNotMatch(inspect, /Resource\s*= "\*"/);
 });
@@ -677,7 +676,7 @@ test("AWS module reuses account OIDC, guards account and passes configured task 
     /Sid\s*= "ManageDeploymentLayers"[\s\S]*"s3:GetObject", "s3:PutObject"[\s\S]*deployment\/layers\/\*/,
   );
   assert.match(mainTf, /Sid\s*= "InspectGithubOidcProvider"[\s\S]*iam:GetOpenIDConnectProvider/);
-  assert.match(mainTf, /"ecs:GetTaskProtection", "ecs:UpdateTaskProtection", "ecs:DescribeTasks"/);
+  assert.match(mainTf, /Action {3}= \["ecs:DescribeTasks"\]\n\s+Resource = "arn:aws:ecs:/);
   assert.match(mainTf, /task\/\$\{var\.cluster_name\}\/\*/);
   assert.match(mainTf, /"lambda:RunMicrovm"[\s\S]*"lambda:CreateMicrovmAuthToken"/);
   assert.match(mainTf, /"lambda:ListMicrovmImages"/);
@@ -764,7 +763,7 @@ test("AWS ECS services wait until target groups are attached to the ALB", () => 
   const service = mainTf.match(/resource "aws_ecs_service" "service" \{([\s\S]*?)\n\}/)?.[1] ?? "";
   assert.match(
     service,
-    /depends_on\s*= \[aws_lb_listener\.public, aws_lb_listener_rule\.production, aws_iam_role_policy_attachment\.ecs_load_balancer\]/,
+    /depends_on\s*= \[aws_lb_listener\.public, aws_lb_listener_rule\.production, aws_lb_listener\.egress_proxy, aws_iam_role_policy_attachment\.ecs_load_balancer\]/,
   );
 });
 
@@ -774,7 +773,7 @@ test("AWS ECS services use native blue-green rollouts with rollback signals and 
   assert.match(versions, /version\s*= ">= 6\.6, < 7\.0"/);
   assert.match(
     service,
-    /deployment_configuration \{[\s\S]*strategy\s*= "BLUE_GREEN"[\s\S]*bake_time_in_minutes = var\.ecs_blue_green_bake_minutes/,
+    /deployment_configuration \{[\s\S]*strategy\s*= .*"BLUE_GREEN"[\s\S]*bake_time_in_minutes = .*var\.ecs_blue_green_bake_minutes/,
   );
   assert.match(
     service,
@@ -791,7 +790,7 @@ test("AWS ECS services use native blue-green rollouts with rollback signals and 
   assert.match(service, /sigint_rollback = true/);
   assert.match(
     mainTf,
-    /portMappings = \[\{ name = each\.key, containerPort = each\.value\.internal_port, appProtocol = "http" \}\]/,
+    /portMappings = \[merge\(\{ name = each\.key, containerPort = each\.value\.internal_port \}, contains\(keys\(local\.egress_proxy\), each\.key\) \? \{\} : \{ appProtocol = "http" \}\)\]/,
   );
 });
 

@@ -24,11 +24,13 @@ export function createApprovalStore(
     if (!request || !type) return;
     const actorId = approvalDeliveryRecipient(request.actor);
     if (!actorId) return;
+    const threadTs = request.conversation?.kind === "dm" ? request.slackSource?.replyThreadTs : undefined;
     await deliveries.enqueue({
       destination: {
         ...principalDestination(actorId, actorId),
         type,
         commandApprovalId: id,
+        ...(threadTs ? { threadTs } : {}),
         ...(request.slackSource
           ? { slackAccountId: request.slackSource.accountId, slackTeamId: request.slackSource.teamId }
           : {}),

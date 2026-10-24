@@ -1,13 +1,13 @@
 import "./support/auto-fake-sprites.ts";
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
-import * as mockHarness from "../src/harness/mock-harness.ts";
+import * as mockHarness from "./support/mock-harness.ts";
 import { testConfig } from "./support/test-config.ts";
 import type { TurnRequest } from "../src/types.ts";
 import type { HarnessTurnInput } from "../src/harness/harness.ts";
 
 let exercise: (turn: HarnessTurnInput) => Promise<void>;
-mock.module("../src/harness/mock-harness.ts", {
+mock.module("./support/mock-harness.ts", {
   namedExports: {
     ...mockHarness,
     createMockHarness: () => {
@@ -20,7 +20,7 @@ mock.module("../src/harness/mock-harness.ts", {
     },
   },
 });
-const { buildApp } = await import("../src/wiring.ts");
+const { buildApp } = await import("./support/build-app.ts");
 
 for (const scenario of [
   { name: "human DM", enabled: true },
@@ -75,7 +75,7 @@ for (const scenario of [
   });
 }
 
-for (const action of ["read", "react", "post"] as const) {
+for (const action of ["read", "react", "post", "delegated-read"] as const) {
   test(`surface ${action} defers early acknowledgement until the parsed action`, async () => {
     const built = buildApp(testConfig({ workers: 1 }));
     let release!: () => void;
@@ -91,7 +91,11 @@ for (const action of ["read", "react", "post"] as const) {
       turn.onDelta?.("Building the website now.");
       turn.onToolCallStart?.("slack");
       assert.equal((await built.deliveries.pending("slack")).length, 0);
-      await turn.emit({ type: "tool_call", payload: { tool: "slack", action }, scopeLabel: turn.scopeLabel });
+      await turn.emit({
+        type: "tool_call",
+        payload: { tool: "slack", callId: `slack-${action}`, action: action === "delegated-read" ? "read" : action },
+        scopeLabel: turn.scopeLabel,
+      });
       started();
       await block;
     };
@@ -103,6 +107,7 @@ for (const action of ["read", "react", "post"] as const) {
         actor: { externalId: "U1" },
         conversation: { kind: "dm", threadRef: `surface-${action}` },
         text: "Build a website",
+        ...(action === "delegated-read" ? { spawned: true, sessionSenderId: "child", delegatingRunId: "parent" } : {}),
         surfaceTools: true,
         addressed: true,
         deliveryTarget: "D1",
@@ -112,7 +117,7 @@ for (const action of ["read", "react", "post"] as const) {
       const deliveries = await built.deliveries.pending("slack");
       assert.deepEqual(
         deliveries.map((delivery) => delivery.text),
-        action === "post" ? [] : ["Building the website now."],
+        action === "post" || action === "delegated-read" ? [] : ["Building the website now."],
       );
       release();
       await built.runs.waitFor(queued.runId!, 5000);

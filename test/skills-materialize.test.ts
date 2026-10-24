@@ -1,8 +1,16 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { parseSeedSkill } from "../src/skills/seed.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CapabilityUnsupportedError, type Sandbox, type SandboxHandle } from "../src/sandbox/sandbox.ts";
 import type { SkillFile, SkillResolution } from "../src/skills/skill-store.ts";
-import { materializeSkillTree, renderSkillBody, safeSkillDirName } from "../src/skills/materialize.ts";
+import {
+  materializeSkillTree,
+  rankedSkills,
+  renderSkillBody,
+  safeSkillDirName,
+  skillsIndex,
+} from "../src/skills/materialize.ts";
 import { computeBundleHash, type SkillBundle } from "../src/skills/skill-bundle-store.ts";
 
 const handle: SandboxHandle = { id: "h", rootDir: "/workspace" };
@@ -147,4 +155,78 @@ test("a pack bundle may ship a root SKILL.md of its own", async () => {
     bundle("s1", [{ path: "SKILL.md", content: "pack readme" }]),
   ]);
   assert.equal(files.get(`${root}/.packs/s1/SKILL.md`), "pack readme");
+});
+
+const names = (index: string) => [...index.matchAll(/\*\*([^*]+)\*\*/g)].map((m) => m[1]);
+
+test("skills index lists every skill in a message-independent order, visibly used ones first", () => {
+  const skills = Array.from({ length: 20 }, (_, i) => res(`skill-${String(i).padStart(2, "0")}`, "body"));
+  for (const r of skills) r.skill!.manifest.description = "General task";
+  skills[19]!.skill!.manifest.description = "Prepare telescope observations";
+  skills[18]!.skill!.lastUsedAt = Number.MAX_SAFE_INTEGER;
+  const duplicate = structuredClone(skills[0]!);
+  duplicate.skill!.manifest.description = "shadowed description";
+  const visible = [...skills, duplicate, { skill: null, shadowed: [] }];
+  const index = skillsIndex(visible, [], ["skill-17"]);
+  const shown = names(index);
+  assert.equal(shown.length, 20);
+  assert.deepEqual(shown.slice(0, 3), ["skill-17", "skill-00", "skill-01"]);
+  assert.doesNotMatch(index, /shadowed description|lastUsedAt|shortened|omitted/);
+  assert.match(index, /- \*\*skill-19\*\* — Prepare telescope observations/);
+  assert.match(index, /skills action read/);
+  assert.equal(rankedSkills(visible).length, 20);
+  assert.deepEqual(
+    rankedSkills(visible, "telescope", [], true).map((r) => r.skill!.manifest.name),
+    ["skill-19"],
+  );
+  assert.deepEqual(rankedSkills(visible, "unmatched", [], true), []);
+  assert.equal(skillsIndex([{ skill: null, shadowed: [] }]), "");
+});
+
+test("an index over budget shortens descriptions, then drops them, then leaves trailing skills out", () => {
+  const skills = Array.from({ length: 30 }, (_, i) => {
+    const r = res(`skill-${String(i).padStart(2, "0")}`, "body");
+    r.skill!.manifest.description = `${"word ".repeat(40)}end`;
+    return r;
+  });
+  const body = (index: string) => index.split("\n").slice(2);
+  const full = skillsIndex(skills);
+  assert.doesNotMatch(full, /shortened|omitted/);
+
+  const shortened = skillsIndex(skills, [], [], 4_000);
+  assert.ok(body(shortened).join("\n").length <= 4_000);
+  assert.match(shortened, /30 descriptions are shortened/);
+  assert.deepEqual(names(shortened), names(full));
+  assert.ok(body(shortened).every((line) => /^- \*\*skill-\d+\*\* — word.*…$/.test(line)));
+
+  const namesOnly = skillsIndex(skills, [], [], 1_000);
+  assert.match(namesOnly, /Descriptions are omitted to fit the list\./);
+  assert.deepEqual(names(namesOnly), names(full));
+  assert.ok(body(namesOnly).every((line) => /^- \*\*skill-\d+\*\*$/.test(line)));
+
+  const truncated = skillsIndex(skills, [], ["skill-29"], 200);
+  assert.match(truncated, /and 17 skills are left out; find them with skills action search/);
+  assert.deepEqual(names(truncated).slice(0, 2), ["skill-29", "skill-00"]);
+  assert.equal(names(truncated).length, 13);
+});
+
+test("the bundled skills fit the default index budget with full descriptions", () => {
+  const entries = readdirSync(new URL("../skills-seed/", import.meta.url), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => {
+      const path = new URL(`../skills-seed/${entry.name}/SKILL.md`, import.meta.url);
+      try {
+        const manifest = parseSeedSkill(readFileSync(path, "utf8"));
+        const result = res(manifest.name, manifest.body);
+        result.skill!.manifest = manifest;
+        return [result];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+    });
+  const index = skillsIndex(entries);
+  assert.equal(names(index).length, entries.length);
+  assert.match(index, /\*\*google-workspace\*\*/);
+  assert.doesNotMatch(index, /shortened|omitted|left out/);
 });

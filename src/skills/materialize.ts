@@ -6,6 +6,7 @@ import { assertSafeSkillName } from "./skill-name.ts";
 import type { ScopeId } from "../types.ts";
 
 export const SKILLS_DIR = "skills";
+export const SKILLS_ROOT = ".agent-skills";
 
 export function safeSkillDirName(name: string): string {
   return assertSafeSkillName(name);
@@ -91,26 +92,97 @@ export async function materializeSkillTree(
   for (const e of entries) await sandbox.writeFile(handle, e.path, e.content);
 }
 
-export function skillsIndex(resolved: SkillResolution[], provenanceScopes: readonly ScopeId[] = []): string {
+export function rankedSkills(
+  resolved: SkillResolution[],
+  query = "",
+  usedNames: readonly string[] = [],
+  onlyMatches = false,
+): SkillResolution[] {
+  const tokens = (text: string) =>
+    new Set(
+      [...new Intl.Segmenter("en", { granularity: "word" }).segment(text.toLowerCase())]
+        .filter((part) => part.isWordLike)
+        .map((part) => part.segment),
+    );
+  const ignored = new Set(
+    "a an and are as at be by can do for from have help i in is it me my of on or please that the this to today use want what with you your".split(
+      " ",
+    ),
+  );
+  const words = [...tokens(query)].filter((word) => !ignored.has(word));
+  const unique = new Map<string, SkillResolution>();
+  for (const entry of resolved) {
+    if (entry.skill && !unique.has(entry.skill.manifest.name)) unique.set(entry.skill.manifest.name, entry);
+  }
+  return [...unique.values()]
+    .map((entry) => {
+      const skill = entry.skill!;
+      const text = tokens(`${skill.manifest.name} ${skill.manifest.description}`);
+      return {
+        entry,
+        relevance: words.filter((word) => text.has(word)).length,
+        used: usedNames.includes(skill.manifest.name) ? 1 : 0,
+      };
+    })
+    .filter(({ relevance }) => !onlyMatches || relevance > 0)
+    .sort(
+      (a, b) =>
+        b.relevance - a.relevance ||
+        b.used - a.used ||
+        a.entry.skill!.manifest.name.localeCompare(b.entry.skill!.manifest.name),
+    )
+    .map(({ entry }) => entry);
+}
+
+const SKILLS_INDEX_BUDGET = 12_000;
+const MIN_DESCRIPTION = 60;
+
+function fitDescriptions(heads: string[], descriptions: string[], budget: number): number {
+  const size = (cap: number) =>
+    heads.reduce((sum, head, i) => sum + head.length + 1 + Math.min(descriptions[i]!.length, cap) + 4, 0);
+  let low = 0;
+  let high = Math.max(0, ...descriptions.map((d) => d.length));
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (size(mid) <= budget) low = mid;
+    else high = mid - 1;
+  }
+  return low;
+}
+
+export function skillsIndex(
+  resolved: SkillResolution[],
+  provenanceScopes: readonly ScopeId[] = [],
+  usedNames: readonly string[] = [],
+  budget = SKILLS_INDEX_BUDGET,
+): string {
   const provenance = new Set(provenanceScopes);
-  const items = resolved
-    .filter((r) => r.skill)
-    .sort((a, b) => {
-      const [x, y] = [a.skill!.manifest.name, b.skill!.manifest.name];
-      if (x < y) return -1;
-      if (x > y) return 1;
-      return 0;
-    });
+  const items = rankedSkills(resolved, "", usedNames);
   if (!items.length) return "";
-  const lines = items.map((r) => {
-    const m = r.skill!.manifest;
-    const shadow = r.shadowed.length ? " (shadows a broader-scope skill of the same name)" : "";
+  const heads = items.map((r) => {
     const source = provenance.has(r.skill!.scopeId) ? ` [from ${r.skill!.scopeId}]` : "";
-    return `- **${m.name}**${source} — ${m.description}${shadow}`;
+    return `- **${r.skill!.manifest.name}**${source}`;
   });
+  const descriptions = items.map((r) => r.skill!.manifest.description.trim());
+  const cap = fitDescriptions(heads, descriptions, budget);
+  let lines: string[];
+  let note = "";
+  const shortened = descriptions.filter((d) => d.length > cap).length;
+  if (cap >= MIN_DESCRIPTION || !shortened) {
+    lines = heads.map((head, i) => {
+      const d = descriptions[i]!;
+      return `${head} — ${d.length > cap ? `${d.slice(0, cap).trimEnd()}…` : d}`;
+    });
+    if (shortened) note = ` ${shortened} descriptions are shortened; skills action read shows the full text.`;
+  } else {
+    let used = 0;
+    lines = heads.filter((head) => (used += head.length + 1) <= budget);
+    const omitted = items.length - lines.length;
+    note = ` Descriptions are omitted to fit the list${omitted ? `, and ${omitted} skills are left out; find them with skills action search` : ""}.`;
+  }
   return [
     "## Skills",
-    'Load a skill with the skills tool before relying on it: skills({ action: "read", name }) returns its instructions without starting a sandbox. When a skill ships scripts or supporting files, the same call syncs them into a directory that lives for this turn and names it; run and read them there.',
+    `If the task matches a skill's description, or uses a connected app or service a skill covers, read that skill in full with skills action read before acting.${note}`,
     ...lines,
   ].join("\n");
 }

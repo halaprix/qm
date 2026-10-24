@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { computeRetention } from "../src/admin/retention.ts";
 import { createInsecureTestServer } from "../src/api/server.ts";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 
@@ -47,6 +47,8 @@ test("computeRetention: DAU/WAU/MAU, cohorts, new-vs-returning, and channel appr
   assert.deepEqual(report.perUser.turns, { p50: 1, p95: 4 });
 
   assert.equal(report.cohorts.length, 3);
+  for (const cohort of report.cohorts) assert.equal(new Date(`${cohort.week}T00:00:00Z`).getUTCDay(), 1);
+  assert.equal(report.cohorts[2]!.week, "1972-09-25");
   assert.deepEqual(report.cohorts[1]!.retained, [100, 0, 0, 0, 100]);
   assert.equal(report.cohorts[1]!.size, 1);
   assert.equal(report.cohorts[2]!.size, 3);

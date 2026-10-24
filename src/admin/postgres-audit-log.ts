@@ -2,6 +2,7 @@ import { createPgPool } from "../persistence/pg-pool.ts";
 import type { ScopeId } from "../types.ts";
 import type { AuditEvent, AuditLog } from "../audit/audit-log.ts";
 import { reportFailureAs } from "../util/errors.ts";
+import { likeContains } from "../persistence/like.ts";
 
 function rowToEvent(r: Record<string, unknown>): AuditEvent {
   return {
@@ -98,15 +99,15 @@ export function createPostgresAuditLog(connectionString: string): AuditLog {
       }
       if (action !== undefined) {
         params.push(action);
-        conds.push(`action = $${params.length}`);
+        conds.push(typeof action === "string" ? `action = $${params.length}` : `action = ANY($${params.length})`);
       }
       if (since !== undefined) {
         params.push(since);
         conds.push(`at >= $${params.length}`);
       }
       if (resourceContains !== undefined) {
-        params.push(`%${resourceContains}%`);
-        conds.push(`resource LIKE $${params.length}`);
+        params.push(likeContains(resourceContains));
+        conds.push(`resource LIKE $${params.length} ESCAPE '\\'`);
       }
       const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
       params.push(limit);
@@ -115,14 +116,6 @@ export function createPostgresAuditLog(connectionString: string): AuditLog {
         params,
       );
       return rows.map(rowToEvent);
-    },
-    async tallyByResource(action) {
-      await Promise.allSettled(pendingWrites);
-      const rows = await q(
-        `SELECT resource, count(*)::bigint AS n FROM audit_log WHERE action = $1 GROUP BY resource`,
-        [action],
-      );
-      return new Map(rows.map((r) => [String(r.resource), Number(r.n)]));
     },
   };
 }

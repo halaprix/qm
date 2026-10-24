@@ -73,7 +73,11 @@ export async function startSlackPlugin(
   const APP_TOKEN = cfg.appToken;
   const SLACK_API_URL = cfg.apiUrl ? normalizeSlackApiUrl(cfg.apiUrl) : undefined;
   const TRUSTED_FILE_HOST = SLACK_API_URL ? new URL(SLACK_API_URL).hostname : undefined;
-  const CLIENT_OPTIONS = { ...NO_RETRY, ...(SLACK_API_URL ? { slackApiUrl: SLACK_API_URL } : {}) } as const;
+  const CLIENT_OPTIONS = {
+    ...NO_RETRY,
+    attachOriginalToWebAPIRequestError: false,
+    ...(SLACK_API_URL ? { slackApiUrl: SLACK_API_URL } : {}),
+  } as const;
   const IDENTITY_TOKENS: Record<string, string | undefined> = {
     copilot: cfg.copilotBotToken,
   };
@@ -125,22 +129,6 @@ export async function startSlackPlugin(
         });
     }
     return ackOverrideCache.names;
-  }
-
-  const INTERNAL_OVERRIDES_CACHE_MS = 60_000;
-  let internalOverridesCache: { members: ReadonlySet<string>; fetchedAt: number } | undefined;
-  async function internalOverrides(): Promise<ReadonlySet<string>> {
-    if (internalOverridesCache && Date.now() - internalOverridesCache.fetchedAt < INTERNAL_OVERRIDES_CACHE_MS) {
-      return internalOverridesCache.members;
-    }
-    try {
-      const members = new Set(await core.internalMemberOverrides());
-      internalOverridesCache = { members, fetchedAt: Date.now() };
-      return members;
-    } catch (err) {
-      swallow("slack: internal-member-overrides read", err);
-      return internalOverridesCache?.members ?? new Set();
-    }
   }
 
   const EXTERNAL_PARTICIPANTS_CACHE_MS = 30_000;
@@ -231,7 +219,6 @@ export async function startSlackPlugin(
     core,
     ids,
     coreSingleton: CORE_SINGLETON && !cfg.externalAccess,
-    internalOverrides,
     ...(cfg.userSnapshotTtlMs ? { userSnapshotTtlMs: cfg.userSnapshotTtlMs } : {}),
     ...(cfg.channelMembersTtlMs ? { channelMembersTtlMs: cfg.channelMembersTtlMs } : {}),
     ...(cfg.maxPrivateChannels ? { maxPrivateChannels: cfg.maxPrivateChannels } : {}),
@@ -280,7 +267,7 @@ export async function startSlackPlugin(
     externalParticipantsEnabled,
     ...(cfg.recentMessages ? { recentMessages: cfg.recentMessages } : {}),
   });
-  const approvals = createApprovals({ core, flow, directory, threads, ids, externalAccess: !!cfg.externalAccess });
+  const approvals = createApprovals({ core, flow, directory, threads, externalAccess: !!cfg.externalAccess });
   registerKeychainApprovalActions(app, { core, directory, webUiPublicUrl: cfg.webUiPublicUrl });
   registerDeployAccessActions(app, { core, directory });
   const ensureHeader = createSurfaceHeaderEnsurer({
@@ -347,9 +334,12 @@ export async function startSlackPlugin(
     ...(cfg.externalAccess ? { externalAccess: cfg.externalAccess } : {}),
     continuePrivate: (runId, task) => continueInPrivate(core, runId, task, (id) => slackAccountClients.get(id)),
     onEngaged: (runId, channel, threadTs) => {
-      void core.sessionStatus?.start(statusClient, statusAccount(), runId, channel, threadTs).finally(() => {
-        void reconcileStatus();
-      });
+      void core.sessionStatus
+        ?.start(statusClient, statusAccount(), runId, channel, threadTs)
+        .catch(swallowAs("slack: session status start", undefined))
+        .finally(() => {
+          void reconcileStatus();
+        });
     },
     onSettled: () => {
       void reconcileStatus();
@@ -361,7 +351,6 @@ export async function startSlackPlugin(
     directory,
     mirror,
     serializer,
-    approvals,
     ackEmoji,
     ackEmojiCandidates: ackEmojiOverride,
     ids,
@@ -383,7 +372,7 @@ export async function startSlackPlugin(
       threadTs?: string;
       text?: string;
       senderSlackId?: string;
-      isDirectMessage?: boolean;
+      isDirectMessage: boolean;
     },
   ): void => {
     void (async () => {
@@ -392,19 +381,20 @@ export async function startSlackPlugin(
         try {
           const actor = await directory.classifyActor(client, msg.senderSlackId);
           if (actor.externalId.includes("@")) senderEmail = actor.externalId;
-        } catch {
+        } catch (e) {
+          swallow("slack: classify inbox message sender", e);
           senderEmail = undefined;
         }
       }
       await core.inboxSlackMessage({
         channel: msg.channel,
         ts: msg.ts,
-        ...(msg.isDirectMessage !== undefined ? { isDirectMessage: msg.isDirectMessage } : {}),
+        isDirectMessage: msg.isDirectMessage,
         ...(msg.threadTs ? { threadTs: msg.threadTs } : {}),
         ...(msg.text ? { text: msg.text } : {}),
         ...(senderEmail ? { senderEmail } : {}),
       });
-    })().catch(() => {});
+    })().catch((e) => swallow("slack: forward message to inbox", e));
   };
   registerSlackEvents(app, {
     handler,
@@ -543,6 +533,7 @@ export async function startSlackPlugin(
           followerRetry.unref?.();
         }
       })
+      .catch(swallowAs("slack: delivery drain", undefined))
       .finally(() => {
         deliveriesPollInFlight = false;
         if (deliveriesPollAgain) {
@@ -565,7 +556,10 @@ export async function startSlackPlugin(
   const serviceContextRequest = (r: SurfaceContextRequest): void => {
     if (stopped || !r?.id || contextRequestsInFlight.has(r.id)) return;
     contextRequestsInFlight.add(r.id);
-    void surfaceContext.fulfillSurfaceContext(app.client, r).finally(() => contextRequestsInFlight.delete(r.id));
+    void surfaceContext
+      .fulfillSurfaceContext(app.client, r)
+      .catch(swallowAs("slack: context request fulfillment", undefined))
+      .finally(() => contextRequestsInFlight.delete(r.id));
   };
   let unsubscribeContextRequests = (): void => {};
   if (CORE_SINGLETON) {

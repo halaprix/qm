@@ -39,7 +39,7 @@ function classifier(
     cfg,
     hydrator: { allReady: () => allReady },
     linkedInternal: async (id) => id === "3",
-    coreStatus: async (id) => ({ notInternal: notInternal(id), overrideInternal: false }),
+    coreStatus: async (id) => ({ notInternal: notInternal(id) }),
   });
 }
 

@@ -3,6 +3,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { contextSummaryPayload } from "../sessions/session-store.ts";
 import type { SessionEntry } from "../types.ts";
 import { compactTranscript, validateCompactSummary } from "./context-compaction.ts";
+import { providerTurnError } from "./provider-error.ts";
 
 type StreamFn = NonNullable<Parameters<typeof generateSummary>[9]>;
 
@@ -16,6 +17,7 @@ const SUMMARY_INSTRUCTIONS = [
   "Keep goals, constraints, decisions, open tasks, and facts that cannot be re-derived inline.",
   "Preserve necessary facts from tool results inline. For details that can be re-derived, cite the tool call.",
   "Preserve timestamps on time-sensitive facts. An interrupted tool call has an unknown outcome.",
+  "Name every shared file listed as (files: name [file id]) with its file id; its contents are no longer inline.",
   "Do not include secrets or credentials. Keep the summary under 8,000 characters.",
 ].join("\n");
 
@@ -42,6 +44,7 @@ export async function summarizeHistory(
     async (summaryModel, context, options) => {
       const stream = await streamFn(summaryModel, context, options);
       const result = await stream.result();
+      if (result.stopReason === "error") throw providerTurnError(result);
       if (result.stopReason !== "stop") {
         throw new Error(
           `Compaction did not complete (${result.stopReason}): ${result.errorMessage ?? "incomplete summary"}`,

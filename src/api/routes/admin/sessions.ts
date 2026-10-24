@@ -9,31 +9,22 @@ import {
 } from "../../../types.ts";
 import {
   sessionCategory,
-  transcriptEntries,
   type LlmRequestRecord,
   type SessionCategory,
   type SessionSummary,
 } from "../../../sessions/session-store.ts";
-import { createTranscriptSource } from "../../../harness/tape-projection.ts";
-import { swallowAs } from "../../../util/errors.ts";
+import { createTranscriptSource } from "../../../sessions/transcript-source.ts";
 import { sendJson } from "../../http.ts";
 import { audit, requireScopedAdmin } from "../shared.ts";
 import { type ApiCtx } from "../route.ts";
 import { requireScopedResource } from "./common.ts";
-import {
-  cronWakeOrigin,
-  deliveryOrigin,
-  parseSessionWakeRef,
-  sessionKind,
-  sessionOrigin,
-  type AdminSessionOrigin,
-} from "./origins.ts";
+import { activityCounts, scopeActivity } from "./scope-activity.ts";
+import { deliveryOrigin, parseSessionWakeRef, sessionKind, sessionOrigin, type AdminSessionOrigin } from "./origins.ts";
 
 const SESSIONS_PAGE_LIMIT_MAX = 200;
 const SESSIONS_PAGE_LIMIT_DEFAULT = 50;
 const TRANSCRIPT_LIMIT_MAX = 50000;
 const TRANSCRIPT_LIMIT_DEFAULT = 500;
-
 async function displayNameForPrincipal(app: App, deps: ServerDeps, principalId: string): Promise<string> {
   return (await app.directoryMember(principalId))?.displayName?.trim() || principalId;
 }
@@ -171,83 +162,32 @@ export async function listAdminSessions(ctx: ApiCtx): Promise<void> {
   const originFilter: AdminSessionOrigin | undefined =
     originParam === "cron" || originParam === "other_background" ? originParam : undefined;
   const cronId = url.searchParams.get("cron") || undefined;
-  const stats = (await deps.sessions?.scopeSessionStats(scope, orgWide, categoryFilter, originFilter, cronId)) ?? {
-    total: 0,
-    turns: 0,
-    byType: {},
-    byTypeAll: {},
-    totalByCategory: { conversation: 0, background: 0, all: 0 },
-    crons: 0,
-  };
   const limit = Math.min(
     SESSIONS_PAGE_LIMIT_MAX,
-    Math.max(1, Number(url.searchParams.get("limit")) || SESSIONS_PAGE_LIMIT_DEFAULT),
+    Math.max(1, Math.floor(Number(url.searchParams.get("limit"))) || SESSIONS_PAGE_LIMIT_DEFAULT),
   );
-  if (originFilter === "cron" && !cronId) {
-    const groups = (await deps.sessions?.scopeCronGroups(scope, orgWide)) ?? [];
-    const deliveredByCron =
-      deps.deliveries && groups.length
-        ? await deps.deliveries
-            .sentRunCountsByCron(groups.map((g) => g.cronId))
-            .catch(swallowAs("api: admin cron delivered counts failed", null))
-        : null;
-    const cronLookup = groups.length ? new Map((await app.listCrons()).map((c) => [c.id, c])) : undefined;
-    const crons = await Promise.all(
-      groups.map(async (g) => ({
-        ...g,
-        ...(deliveredByCron ? { deliveredRuns: deliveredByCron.get(g.cronId) ?? 0 } : {}),
-        origin: await cronWakeOrigin(
-          app,
-          {
-            trigger: "cron",
-            sourceId: g.cronId,
-            fireKey: `agent:main:cron:${g.cronId}`,
-            fireSlot: null,
-            monologue: true,
-          },
-          scope,
-          g.scopeId,
-          cronLookup,
-        ),
-      })),
-    );
-    return sendJson(res, 200, {
-      scopeId: scope,
-      crons,
-      total: groups.length,
-      totalByCategory: stats.totalByCategory,
-      totalByType: stats.byTypeAll,
-      distinctCrons: stats.crons,
-      category,
-      turns: stats.turns,
-      byType: stats.byType,
-      limit,
-      offset: 0,
-    });
-  }
-  const total = stats.total;
-  const lastOffset = total ? Math.floor((total - 1) / limit) * limit : 0;
   const cursorParam = url.searchParams.get("cursor");
   const cursorMatch = cursorParam ? /^(\d+)~(.+)$/.exec(cursorParam) : null;
   const before = cursorMatch ? { lastActivity: Number(cursorMatch[1]), id: cursorMatch[2]! } : undefined;
-  const offset = before ? 0 : Math.min(Math.max(0, Number(url.searchParams.get("offset")) || 0), lastOffset);
-  const summaries =
-    (await deps.sessions?.scopeSessionSummaries(scope, orgWide, {
-      limit,
-      offset,
-      ...(before ? { before } : {}),
-      ...(categoryFilter ? { category: categoryFilter } : {}),
-      ...(originFilter ? { origin: originFilter } : {}),
-      ...(cronId ? { cronId } : {}),
-    })) ?? [];
-  const categories = new Map(summaries.map((s) => [s.id, sessionCategory(s.origin)]));
-  const background = summaries.filter((s) => categories.get(s.id) === "background");
-  const sentCounts =
-    deps.deliveries && background.length
-      ? await deps.deliveries
-          .sentCountsBySourceSessions(background.map((s) => ({ sessionId: s.id, threadRef: s.threadRef })))
-          .catch(swallowAs("api: admin sessions sent counts failed", null))
-      : null;
+  const disconnected = new AbortController();
+  res.once("close", () => disconnected.abort());
+  const fetched =
+    (await deps.sessions
+      ?.scopeSessionSummaries(scope, orgWide, {
+        limit: limit + 1,
+        signal: disconnected.signal,
+        ...(before ? { before } : {}),
+        ...(categoryFilter ? { category: categoryFilter } : {}),
+        ...(originFilter ? { origin: originFilter } : {}),
+        ...(cronId ? { cronId } : {}),
+      })
+      .catch((error: unknown) => {
+        if (disconnected.signal.aborted) return null;
+        throw error;
+      })) ?? [];
+  if (disconnected.signal.aborted) return;
+  const summaries = fetched.slice(0, limit);
+  const last = fetched.length > limit ? summaries[summaries.length - 1] : undefined;
   const fireResults = await cronFireResults(app, summaries);
   const pageCronIds = new Set<string>(cronId ? [cronId] : []);
   for (const s of summaries) {
@@ -262,14 +202,14 @@ export async function listAdminSessions(ctx: ApiCtx): Promise<void> {
       const result = cronRow ? fireResults.get(s.threadRef) || s.lastMessage || s.firstMessage : undefined;
       return {
         ...s,
-        category: categories.get(s.id)!,
+        category: sessionCategory(s.origin),
         kind: sessionKind(s),
         origin: await sessionOrigin(app, s, scope, cronLookup),
-        ...(sentCounts && categories.get(s.id) === "background" ? { delivered: sentCounts.get(s.id) ?? 0 } : {}),
         ...(result ? { result } : {}),
       };
     }),
   );
+  const activity = scopeActivity(deps.sessions);
   return sendJson(res, 200, {
     scopeId: scope,
     sessions,
@@ -283,18 +223,10 @@ export async function listAdminSessions(ctx: ApiCtx): Promise<void> {
           ),
         }
       : {}),
-    total,
-    totalByCategory: stats.totalByCategory,
-    totalByType: stats.byTypeAll,
-    distinctCrons: stats.crons,
     category,
-    turns: stats.turns,
-    byType: stats.byType,
     limit,
-    offset,
-    ...(summaries.length === limit
-      ? { nextCursor: `${summaries[summaries.length - 1]!.lastActivity}~${summaries[summaries.length - 1]!.id}` }
-      : {}),
+    ...(last ? { nextCursor: `${last.lastActivity}~${last.id}` } : {}),
+    ...(activity ? { counts: activityCounts(activity, scope, orgWide), countsAsOf: activity.asOf } : {}),
   });
 }
 
@@ -325,19 +257,14 @@ export async function getAdminSession(ctx: ApiCtx): Promise<void> {
   if (!scoped) return;
   const { actor, scope, record: session } = scoped;
   audit(deps, { principalId: actor.id, action: "session.read", resource: id, scopeLabel: session.scopeId });
-  const want = Math.max(1, Number(url.searchParams.get("limit")) || TRANSCRIPT_LIMIT_DEFAULT);
+  const want = Math.max(1, Math.floor(Number(url.searchParams.get("limit"))) || TRANSCRIPT_LIMIT_DEFAULT);
   const all = want >= TRANSCRIPT_LIMIT_MAX;
   const limit = Math.min(want, TRANSCRIPT_LIMIT_MAX);
   const raw = deps.sessions
     ? (await createTranscriptSource(deps.sessions).forRender(id, all ? undefined : { limit: limit + 1 })).entries
     : [];
   const hasMore = !all && raw.length > limit;
-  const entries = await labelTranscriptEntries(
-    app,
-    deps,
-    session,
-    transcriptEntries(hasMore ? raw.slice(raw.length - limit) : raw),
-  );
+  const entries = await labelTranscriptEntries(app, deps, session, hasMore ? raw.slice(raw.length - limit) : raw);
   const recipientDeliveries = deps.deliveries
     ? await deps.deliveries.listByRecipientThread(session.threadRef, { limit: 100 })
     : [];

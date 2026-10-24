@@ -1,3 +1,4 @@
+import { isSessionTurn } from "../core/turn-origin.ts";
 import { replayableRequest } from "../core/orchestrator/turn-helpers.ts";
 import {
   createSlackSessionStatus,
@@ -14,7 +15,7 @@ import type { StagedEnvelope } from "../slack/envelope-staging.ts";
 import { resolveBranding } from "../resolution/branding.ts";
 import type { App } from "./app.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
-import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
+import type { LeaderLease } from "../persistence/leader-lease.ts";
 import type { Delivery, ScopeId, SurfaceContextRequest, TurnRequest } from "../types.ts";
 import { scopeId } from "../types.ts";
 import type { MemoryService } from "../memory/memory-service.ts";
@@ -23,10 +24,8 @@ import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts
 import type { OrgBranding, ScopedConfigStore } from "../resolution/config-store.ts";
 import type { BlobTransferStore } from "../persistence/blob-transfer.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
-import type { MetricsSink } from "../admin/metrics-sink.ts";
 import type { RunStore } from "../runs/run-store.ts";
 import type { TurnStream } from "../runs/turn-stream.ts";
-import type { TaskStore } from "../tasks/task-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { swallowAs } from "../util/errors.ts";
 import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
@@ -36,28 +35,8 @@ import type { ConversationEvent } from "../loops/sources/adapter.ts";
 import { slackConversationRef } from "../loops/sources/slack.ts";
 import { createSurfaceCoreClient, type SurfaceCoreClient, type SurfaceCoreClientDeps } from "./surface-core-client.ts";
 
-export interface SlackAgentRequestContext {
-  requestId: string;
-  requesterId: string | undefined;
-  targetUserId: string;
-  targetDisplayName?: string;
-  originChannel: string;
-  originConversationKind?: "dm" | "channel" | "group";
-  originThreadTs?: string;
-  originThreadOnly: boolean;
-  originChannelName?: string;
-  originStatusTs?: string;
-  dmChannel: string;
-  dmMessageTs?: string;
-  task: string;
-  originAgentLabel: string;
-  targetAgentLabel: string;
-  createdAt: number;
-  approvalRequestIds?: string[];
-}
-
 interface DirectoryPush {
-  members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string }>;
+  members?: Array<{ principalId: string; displayName: string; type: "internal"; slackId?: string; avatarUrl?: string }>;
   channels?: Array<{ channelId: string; name: string; isPrivate?: boolean; isExternal?: boolean }>;
   channelMembers?: Array<{ channelId: string; principalId: string }>;
   channelRosterIds?: string[];
@@ -83,7 +62,6 @@ export interface SlackCoreClient extends Omit<
   taskAcknowledgements?: TaskAcknowledgements;
   sessionStatus?: SlackSessionStatus;
   externalSlackParticipants(): Promise<boolean>;
-  internalMemberOverrides(): Promise<string[]>;
   ackEmojiOverride(): Promise<string[] | null>;
   publishEmojiCatalog(emoji: Record<string, string>): Promise<void>;
   surfaceHeaderFacts(scope: ScopeId): Promise<{ agentLabel?: string; modelName: string }>;
@@ -93,11 +71,6 @@ export interface SlackCoreClient extends Omit<
   rememberSurfaceHistory?(events: IngestEvent[]): Promise<void>;
   noteSurfaceHistoryGap?(container: string, note: string): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
-  reportTurnMetrics(runId: string, patch: { deliverMs?: number; slackInflightMs?: number }): Promise<void>;
-  putAgentRequest(requestId: string, record: SlackAgentRequestContext): Promise<void>;
-  getAgentRequest(requestId: string): Promise<SlackAgentRequestContext | null>;
-  takeAgentRequest(requestId: string): Promise<SlackAgentRequestContext | null>;
-  agentRequestForApproval(approvalRequestId: string): Promise<SlackAgentRequestContext | null>;
   pushDirectory(body: DirectoryPush): Promise<boolean>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
   holdEnvelopeReplay<T>(account: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
@@ -111,7 +84,7 @@ export interface SlackCoreClient extends Omit<
     threadTs?: string;
     text?: string;
     senderEmail?: string;
-    isDirectMessage?: boolean;
+    isDirectMessage: boolean;
   }): Promise<void>;
 }
 
@@ -141,65 +114,21 @@ export interface SlackCoreClientDeps extends SurfaceCoreClientDeps {
   blobTransfer: BlobTransferStore;
   deliveries: DeliveryStore;
   errors?: ErrorLog;
-  metrics: MetricsSink;
   runs: RunStore;
   turnStream: TurnStream;
-  tasks: TaskStore;
-  agentRequests: DurableMap<SlackAgentRequestContext>;
   pickAckEmoji?(text: string, candidates: readonly string[]): Promise<string | undefined>;
   ackPicks?: AckEmojiPickStore;
   ackModelId?: () => string | undefined;
   brandingDefault?: OrgBranding;
-  leaderLease?: LeaderLease;
+  leaderLease: LeaderLease;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
   surfaceCache?: SurfaceCache;
   memory?: MemoryService;
   inboxEvent?(event: ConversationEvent): Promise<void>;
 }
 
-const AGENT_REQUEST_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-
-function agentRequestExpired(record: SlackAgentRequestContext): boolean {
-  return Date.now() - record.createdAt > AGENT_REQUEST_TTL_MS;
-}
-
-export type AgentRequestStore = Pick<
-  SlackCoreClient,
-  "putAgentRequest" | "getAgentRequest" | "takeAgentRequest" | "agentRequestForApproval"
->;
-
-export function createAgentRequestStore(map: DurableMap<SlackAgentRequestContext>): AgentRequestStore {
-  return {
-    async putAgentRequest(requestId, record) {
-      await map.put(requestId, record);
-      await (async () => {
-        for (const [id, existing] of await map.entries()) {
-          if (agentRequestExpired(existing)) await map.delete(id);
-        }
-      })().catch(swallowAs("agent-requests: expired sweep", undefined));
-    },
-
-    async getAgentRequest(requestId) {
-      const record = await map.get(requestId);
-      return record && !agentRequestExpired(record) ? record : null;
-    },
-
-    async takeAgentRequest(requestId) {
-      const record = await map.take(requestId);
-      return record && !agentRequestExpired(record) ? record : null;
-    },
-
-    async agentRequestForApproval(approvalRequestId) {
-      for (const [, record] of await map.entries()) {
-        if (record.approvalRequestIds?.includes(approvalRequestId) && !agentRequestExpired(record)) return record;
-      }
-      return null;
-    },
-  };
-}
-
 export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClient {
-  const lease = deps.leaderLease ?? createNoopLeaderLease();
+  const lease = deps.leaderLease;
   const orgScope: ScopeId = scopeId("org", configOrgId());
 
   return {
@@ -223,16 +152,12 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       return (await deps.config.getExternalSlackParticipantsDurable(orgScope)) === true;
     },
 
-    async internalMemberOverrides() {
-      return deps.config.getInternalMemberOverridesDurable();
-    },
-
     async ackEmojiOverride() {
       return await deps.config.getAckEmojiDurable(orgScope);
     },
 
     async publishEmojiCatalog(emoji) {
-      deps.config.setSlackEmojiCatalog(orgScope, emoji);
+      await deps.config.setSlackEmojiCatalog(orgScope, emoji);
     },
 
     async surfaceHeaderFacts(scope) {
@@ -274,16 +199,15 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
     async privateContinuationSource(runId) {
       const run = await deps.runs.get(runId);
-      if (!run?.request.externalSlack || run.request.origin.kind !== "human" || run.request.actor.type !== "internal")
+      if (
+        !run?.request.externalSlack ||
+        run.request.origin.kind !== "human" ||
+        isSessionTurn(run.request) ||
+        run.request.actor.type !== "internal"
+      )
         return null;
       return replayableRequest(run.request);
     },
-
-    async reportTurnMetrics(runId, patch) {
-      await deps.metrics.updateByRunId(runId, patch);
-    },
-
-    ...createAgentRequestStore(deps.agentRequests),
 
     async pushDirectory(body) {
       if (body.workspaceUrl) await deps.app.setDirectoryWorkspaceUrl(body.workspaceUrl);
@@ -357,7 +281,7 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
           ...(pick.latencyMs != null ? { latencyMs: pick.latencyMs } : {}),
           createdAt: Date.now(),
         })
-        .catch(() => {});
+        .catch(swallowAs("slack: record ack emoji pick", undefined));
     },
   };
 }

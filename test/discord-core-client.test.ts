@@ -126,26 +126,4 @@ describe("discord core client identity links", () => {
     await identity.deactivate(discordExternalId("direct-deact"));
     assert.equal((await client.coreStatus("direct-deact")).notInternal, true);
   });
-
-  it("admin override to internal is recognized and not notInternal", async () => {
-    const links: PrincipalLinkService = createPrincipalLinkService();
-    installPrincipalLinks(links);
-    const overrides = new Set(["discord:overridden", "canonical-overridden@example.test"]);
-    const identity = createIdentityService(undefined, {
-      principalLinks: links,
-      isOverridden: (id) => overrides.has(id.trim().toLowerCase()),
-    });
-    const client = createDiscordCoreClient(createDeps(identity));
-
-    await links.link({
-      principalId: discordExternalId("linked-override"),
-      canonicalId: "canonical-overridden@example.test",
-      evidence: "admin link",
-      linkedBy: "admin",
-    });
-    assert.equal((await client.coreStatus("linked-override")).overrideInternal, true);
-    assert.equal((await client.coreStatus("overridden")).overrideInternal, true);
-    assert.equal((await client.coreStatus("overridden")).notInternal, false);
-    assert.equal((await client.coreStatus("not-overridden")).overrideInternal, false);
-  });
 });

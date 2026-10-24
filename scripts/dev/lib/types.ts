@@ -99,12 +99,12 @@ export interface StatusReport {
   webEnabled?: boolean;
   slackEnabled: boolean;
   watch: boolean;
-  turnsLive: boolean;
   publicApiUrl: string | null;
   children: Record<string, ChildStatus & { slack?: SlackHealth }>;
 }
 
-export type DevSandboxBackend = "local" | "sprites" | "smolmachines" | "e2b" | "porter" | "agent37" | "superserve";
+export type DevSandboxBackend =
+  "local" | "sprites" | "smolmachines" | "e2b" | "porter" | "agent37" | "superserve" | "do-managed-agents";
 export type DevSandboxChoice = DevSandboxBackend | "auto";
 
 export interface BootSpec {
@@ -126,4 +126,11 @@ export interface LeaseInfo {
   meta: Record<string, string>;
   heartbeat: { pid: number; at: number; phase: string } | null;
   state: Record<string, unknown> | null;
+}
+
+export interface CanaryReply {
+  ok: boolean;
+  code?: "unconfigured";
+  rttMs?: number;
+  reason?: string;
 }

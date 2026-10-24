@@ -15,18 +15,14 @@ export let context: Context;
 export function configure(value: Context) {
   context = value;
 }
-const splitIds = (raw: string, sep: RegExp = /[\s,]+/) =>
+const splitIds = (raw: string) =>
   String(raw || "")
-    .split(sep)
+    .split(/[\s,]+/)
     .map((s) => s.trim())
     .filter(Boolean);
 export class SlackSetting extends SettingState {
   scope = "";
   collect() {
-    if (this.key === "internal-member-overrides")
-      return {
-        members: [...new Set(splitIds(this.draft.text, /[\n,]/).map((x) => x.toLowerCase()))],
-      };
     if (this.key === "ack-emoji") return { names: [...(this.draft.names || [])] };
     return { on: !!this.draft.on };
   }
@@ -38,7 +34,6 @@ export class SlackSetting extends SettingState {
     this.scope = scope;
     this.available = available;
     this.draft = { on: !!value };
-    if (this.key === "internal-member-overrides") this.draft = { text: (value || []).join("\n") };
     if (this.key === "ack-emoji") this.draft = { names: [...(value || [])] };
     this.baseline = JSON.stringify(this.collect());
     this.message = "";
@@ -48,16 +43,12 @@ export class SlackSetting extends SettingState {
   }
 }
 export const states = new Map(
-  ["external-slack-participants", "internal-member-overrides", "channel-header-pin-default", "ack-emoji"].map((key) => [
-    key,
-    new SlackSetting(key),
-  ]),
+  ["external-slack-participants", "channel-header-pin-default", "ack-emoji"].map((key) => [key, new SlackSetting(key)]),
 );
 export const { owns, collect, capture, commit, status, statusKey } = settingRegistry(states);
 export function loadScope(data: any, scope: string) {
   for (const [key, field] of Object.entries({
     "external-slack-participants": "externalSlackParticipants",
-    "internal-member-overrides": "internalMemberOverrides",
     "channel-header-pin-default": "channelHeaderPinDefault",
     "ack-emoji": "ackEmoji",
   }))
@@ -141,7 +132,8 @@ export class ConnectorsState {
         "err",
       );
     this.list = result.data.connectors || [];
-    if (!this.editor) this.draft.provider = this.catalog[0]?.provider || "";
+    if (!this.editing && !this.catalog.some((c) => c.provider === this.draft.provider))
+      this.draft.provider = this.catalog[0]?.provider || "";
     this.render();
   }
   async save() {

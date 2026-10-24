@@ -14,6 +14,9 @@ import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts";
 import { createIdentityService } from "../src/identity/identity-service.ts";
 import { loadConfig } from "../src/config.ts";
+import { createNoopLeaderLease } from "../src/persistence/leader-lease.ts";
+import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
 
 if (!process.env.SPRITES_TOKEN) {
   console.error("set SPRITES_TOKEN (mint one with `sprite login`)");
@@ -52,7 +55,11 @@ print("PHASE: image saved diffusion-out.png", flush=True)
 `;
 
 const ws = createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "monitor-smoke-")));
-const sb = createSpritesSandbox(ws, loadConfig().spritesSandbox);
+const sb = createSpritesSandbox(ws, {
+  ...loadConfig().spritesSandbox,
+  initializationStore: createMemoryMap(),
+  advisoryLock: createMemoryAdvisoryLock(),
+});
 if (!supportsProcessSessions(sb)) throw new Error("Sprites sandbox does not advertise process sessions");
 
 const scope = scopeId("personal", "qm-monitor-smoke");
@@ -89,6 +96,7 @@ const monitorBroker = createMonitorBroker({
 
 const wakes: TurnRequest[] = [];
 const poller = createMonitorPoller({
+  leaderLease: createNoopLeaderLease(),
   monitors,
   processes: registry,
   sandbox: sb,
@@ -119,7 +127,7 @@ try {
   await sb.writeFile(h, "diffusion.py", DIFFUSION_PY);
 
   console.log(`[${ts()}] background-start the diffusion job (ttl 60min) …`);
-  const s = await broker.start(h, "bash job.sh", 60 * 60_000);
+  const s = await broker.start(h, "bash job.sh", "Image generation smoke test", 60 * 60_000);
   ok(!!s.processId && s.status.state === "running", `job ${s.processId} is running`);
   console.log("    early output:", JSON.stringify(s.output.trim().split("\n").slice(0, 2)));
 

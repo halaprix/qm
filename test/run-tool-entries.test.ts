@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import type { TurnRequest } from "../src/types.ts";
 import { testConfig } from "./support/test-config.ts";
 
@@ -32,7 +32,7 @@ async function settled(built: ReturnType<typeof buildApp>, runId: string) {
   throw new Error(`run ${runId} did not settle`);
 }
 
-test("a run's tool entries are read from the session tape, bounded by its turn and its viewer", async () => {
+test("a run's tool entries are read from the session, bounded by its turn and its viewer", async () => {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "run-tools-")) }));
   built.runtime.start();
   try {

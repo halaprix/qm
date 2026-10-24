@@ -7,7 +7,6 @@ import { MAX_BLOB_BYTES } from "../persistence/blob-transfer.ts";
 import type { RunStore } from "../runs/run-store.ts";
 import { isTerminal } from "../runs/run-store.ts";
 import type { GoalView, TurnStream } from "../runs/turn-stream.ts";
-import type { TaskStore, TaskStatus } from "../tasks/task-store.ts";
 import type {
   ActorAssertion,
   Delivery,
@@ -22,7 +21,7 @@ import type {
 import { swallowAs } from "../util/errors.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
-import { createNoopLeaderLease, type LeaderLease } from "../persistence/leader-lease.ts";
+import type { LeaderLease } from "../persistence/leader-lease.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import type { IngestEvent } from "../surface-cache/surface-cache.ts";
@@ -32,7 +31,6 @@ interface SurfaceRunHooks {
   onReplying?(): void;
   onFirstBlock?(text: string): void;
   onSurfacePosted?(): void;
-  onTasks?(tasks: Array<{ id: string; title: string; status: TaskStatus }>): void | Promise<void>;
   onGoal?(goal: GoalView): void | Promise<void>;
 }
 
@@ -41,6 +39,7 @@ export type CoreTurnBody = Omit<TurnRequest, "surface">;
 interface StoredApprovalView extends Omit<PendingApproval, "reason"> {
   createdAt?: number;
   reason?: string;
+  sessionId?: string;
   request?: Record<string, unknown>;
 }
 
@@ -87,11 +86,10 @@ export interface SurfaceCoreClientDeps {
   app: App;
   runs: RunStore;
   turnStream: TurnStream;
-  tasks: TaskStore;
   blobTransfer: BlobTransferStore;
   identity: IdentityService;
   deliveries: DeliveryStore;
-  leaderLease?: LeaderLease;
+  leaderLease: LeaderLease;
   errors?: ErrorLog;
   keychainApprovals?: KeychainApprovals;
 }
@@ -100,7 +98,7 @@ const RUN_FALLBACK_POLL_MS = 1_000;
 const RUN_STALL_BUDGET_MS = 300_000;
 
 export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: string): SurfaceCoreClient {
-  const lease = deps.leaderLease ?? createNoopLeaderLease();
+  const lease = deps.leaderLease;
   const terminalWaiters = new Map<string, Set<() => void>>();
   deps.runs.onTerminal((run) => {
     for (const wake of terminalWaiters.get(run.id) ?? []) wake();
@@ -163,7 +161,6 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
       });
       let lastProgressAt = Date.now();
       let lastMark = "";
-      let taskSnapshot = "";
       let goalSnapshot = "";
       const emitGoal = async (): Promise<void> => {
         if (!hooks.onGoal) return;
@@ -173,19 +170,6 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
         if (next === goalSnapshot) return;
         goalSnapshot = next;
         await hooks.onGoal(goal);
-      };
-      const emitTasks = async (): Promise<void> => {
-        if (!hooks.onTasks) return;
-        const tasks = (await deps.tasks.list({ originRunId: runId })).map(({ id, title, status }) => ({
-          id,
-          title,
-          status,
-        }));
-        if (!tasks.length) return;
-        const next = JSON.stringify(tasks);
-        if (next === taskSnapshot) return;
-        taskSnapshot = next;
-        await hooks.onTasks(tasks);
       };
       try {
         for (;;) {
@@ -201,13 +185,11 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
             if (deps.turnStream.surfacePosted(runId)) signalSurface();
             if (isTerminal(run.status)) {
               const view = await deps.app.getRun(runId);
-              await emitTasks().catch(swallowAs("surface-core-client: terminal task refresh", undefined));
               await emitGoal().catch(swallowAs("surface-core-client: terminal goal refresh", undefined));
               if (view?.surfacePosted) signalSurface();
               return (view?.result as TurnResult | null | undefined) ?? null;
             }
             signalReplying(run.deliveryState?.replying === true);
-            await emitTasks();
             await emitGoal().catch(swallowAs("surface-core-client: goal refresh", undefined));
             const fb = deps.turnStream.firstBlock(runId);
             if (fb?.closed) signalFirstBlock(fb.text);
@@ -277,6 +259,7 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
         requestId: record.requestId,
         ...(record.createdAt !== undefined ? { createdAt: record.createdAt } : {}),
         command: record.command,
+        sessionId: record.sessionId,
         ...(record.reason !== undefined ? { reason: record.reason } : {}),
         ...(record.purpose !== undefined ? { purpose: record.purpose } : {}),
         ...(record.summary !== undefined ? { summary: record.summary } : {}),

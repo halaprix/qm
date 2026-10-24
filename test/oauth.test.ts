@@ -30,6 +30,8 @@ const env = {
   GITHUB_OAUTH_CLIENT_SECRET: "ghsecret",
   X_OAUTH_CLIENT_ID: "xid",
   X_OAUTH_CLIENT_SECRET: "xsecret",
+  LINEAR_OAUTH_CLIENT_ID: "lid",
+  LINEAR_OAUTH_CLIENT_SECRET: "lsec",
 } as NodeJS.ProcessEnv;
 
 const resolve = createSecretClientResolver(createEnvSecretSource(env));
@@ -325,6 +327,25 @@ test("Notion exchanges via HTTP Basic + JSON body and does not refresh", async (
   );
 });
 
+test("Linear refreshes via the standard refresh_token grant", async () => {
+  const fetchImpl: FetchLike = async (u, init) => {
+    assert.equal(u, PROVIDERS.linear!.tokenUrl);
+    assert.match(init.body, /grant_type=refresh_token/);
+    assert.match(init.body, /refresh_token=rt-old/);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: "lin-new", refresh_token: "rt-new", expires_in: 86399 }),
+    };
+  };
+  const fresh = await makeRefresh({ resolveClient: resolve, fetchImpl })("api.linear.app", {
+    accessToken: "lin-old",
+    refreshToken: "rt-old",
+  });
+  assert.equal(fresh.accessToken, "lin-new");
+  assert.equal(fresh.refreshToken, "rt-new");
+});
+
 test("scopesFor: BYO client scopes override the provider default", async () => {
   const byo: ResolvedClient = { id: "x", secret: "y", clientRef: "org:default-org:google", scopes: ["only.this"] };
   assert.deepEqual(scopesFor(PROVIDERS.google!, byo), ["only.this"]);
@@ -484,6 +505,48 @@ test("X refresh captures the ROTATED refresh token (single-use) — the connecti
   assert.equal(fresh.accessToken, "xat2");
   assert.equal(fresh.refreshToken, "new-rt", "the rotated refresh token replaces the old one");
   assert.equal(fresh.expiresAt, 5_000 + 7200_000);
+});
+
+test("token failures keep the provider's error detail", async () => {
+  const failing =
+    (status: number, json: () => Promise<unknown>): FetchLike =>
+    async () => ({ ok: false, status, json });
+  await assert.rejects(
+    exchangeCode("google", "code", "https://app/cb", {
+      client: await googleClient(),
+      fetchImpl: failing(400, async () => ({ error: "invalid_grant", error_description: "Code expired" })),
+      now: 1_000,
+    }),
+    /token exchange failed \(400\): invalid_grant: Code expired$/,
+  );
+  await assert.rejects(
+    makeRefresh({
+      resolveClient: resolve,
+      fetchImpl: failing(401, async () => ({ reason: "Invalid client_id or client_secret", error: "invalid_client" })),
+      now: () => 1_000,
+    })("api.x.com", { accessToken: "old", refreshToken: "rt", expiresAt: 0 }),
+    /x token refresh failed \(401\): invalid_client: Invalid client_id or client_secret$/,
+  );
+  await assert.rejects(
+    exchangeCode("google", "code", "https://app/cb", {
+      client: await googleClient(),
+      fetchImpl: failing(401, async () => ({
+        error: { code: "refresh_token_reused", message: "Refresh token already used" },
+      })),
+      now: 1_000,
+    }),
+    /token exchange failed \(401\): refresh_token_reused: Refresh token already used$/,
+  );
+  await assert.rejects(
+    exchangeCode("google", "code", "https://app/cb", {
+      client: await googleClient(),
+      fetchImpl: failing(502, async () => {
+        throw new SyntaxError("Unexpected token <");
+      }),
+      now: 1_000,
+    }),
+    /token exchange failed \(502\)$/,
+  );
 });
 
 test("oauth flow store — a short opaque state resolves once, then expires", async () => {

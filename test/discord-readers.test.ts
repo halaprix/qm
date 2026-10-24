@@ -5,7 +5,7 @@ import { classifyMember, type DiscordMemberFacts } from "../src/discord/members.
 
 const BOT = "999";
 const cfg = { allowUserIds: new Set(["1", "2"]), internalRoleIds: new Set<string>() };
-const defaultCoreStatus = async () => ({ notInternal: false, overrideInternal: false });
+const defaultCoreStatus = async () => ({ notInternal: false });
 const classify = (m: DiscordMemberFacts) => classifyMember(m, cfg, async () => false, defaultCoreStatus);
 const facts = (userId: string, isBot = false): DiscordMemberFacts => ({
   userId,
@@ -24,7 +24,6 @@ test("a deactivated user with the internal role is a guest reader", async () => 
       async () => false,
       async (id) => ({
         notInternal: id === "deactivated",
-        overrideInternal: false,
       }),
     );
   const r = await channelReaders({
