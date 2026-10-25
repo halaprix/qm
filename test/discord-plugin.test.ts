@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { EventEmitter } from "node:events";
-import { ChannelType, Events } from "discord.js";
-import { createDiscordPlugin, DISCORD_DELIVERY_POLL_MS, DISCORD_LOGIN_RETRY_BASE_MS } from "../src/discord/index.ts";
+import { ChannelType, Events, GatewayIntentBits, MessageType, Partials, PermissionFlagsBits } from "discord.js";
+import { principalEntitledToScope } from "../src/resolution/context-filter.ts";
+import { scopeId, type Principal } from "../src/types.ts";
+import { createDiscordPlugin, DISCORD_CLIENT_OPTIONS, DISCORD_DELIVERY_POLL_MS } from "../src/discord/index.ts";
+import { DISCORD_RETRY_BASE_MS } from "../src/discord/config.ts";
+import { ACK_REACTION_DELAY_MS } from "../src/surfaces/ack-presenter.ts";
+import { DISCORD_DIRECTORY_SYNC_MS } from "../src/discord/directory.ts";
 import type { DiscordPluginConfig } from "../src/discord/config.ts";
 import type { DiscordCoreClient } from "../src/api/discord-core-client.ts";
 
@@ -12,6 +17,21 @@ const cfg: DiscordPluginConfig = {
   guildIds: new Set(),
   internalRoleIds: new Set(),
 };
+
+function fakeClient({ emitReady = false, ...over }: { emitReady?: boolean } & Record<string, unknown> = {}) {
+  const client = new EventEmitter();
+  return Object.assign(client, {
+    user: { id: "999", tag: "bot#1", username: "qm" },
+    login: async () => {
+      if (emitReady) queueMicrotask(() => client.emit("clientReady", client));
+      return "ok";
+    },
+    destroy: async () => {},
+    channels: { cache: new Map(), fetch: async () => null },
+    guilds: { cache: new Map(), fetch: async () => null },
+    ...over,
+  });
+}
 
 function fakeCore(): DiscordCoreClient {
   return {
@@ -23,6 +43,7 @@ function fakeCore(): DiscordCoreClient {
     discordUserIdsFor: () => [],
     reportRunEditRef: async () => {},
     ackRunDelivery: async () => {},
+    linkPrivateThread: async () => {},
   } as unknown as DiscordCoreClient;
 }
 
@@ -33,10 +54,7 @@ test("stop drains in-flight handle before calling client.destroy", async () => {
     inFlightResolve = r;
   });
 
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#0001" },
-    login: async () => "ok",
+  const client = fakeClient({
     destroy: async () => {
       events.push("client.destroy");
     },
@@ -53,7 +71,7 @@ test("stop drains in-flight handle before calling client.destroy", async () => {
   } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, slowCore, {
-    clientFactory: () => fakeClient as never,
+    clientFactory: () => client as never,
     drainTimeoutMs: 5000,
   });
 
@@ -77,13 +95,13 @@ test("stop drains in-flight handle before calling client.destroy", async () => {
     },
   };
 
-  emitter.emit("messageCreate", fakeMessage);
+  client.emit("messageCreate", fakeMessage);
 
   await new Promise((r) => setTimeout(r, 10));
 
   const stopPromise = plugin.stop();
 
-  emitter.emit("messageCreate", {
+  client.emit("messageCreate", {
     ...fakeMessage,
     id: "m2",
     content: "hello 2",
@@ -102,10 +120,7 @@ test("plugin is restartable and creates a new client on each start", async () =>
 
   const factory = () => {
     const id = ++clientCount;
-    const emitter = new EventEmitter();
-    return Object.assign(emitter, {
-      user: { id: "999", tag: "bot#0001" },
-      login: async () => "ok",
+    return fakeClient({
       destroy: async () => {
         destroyed.push(id);
       },
@@ -136,15 +151,7 @@ test("start during stop drain immediately creates a new client that survives the
 
   const clientFactory = () => {
     const id = ++clientSeq;
-    const emitter = new EventEmitter();
-    const clientRecord = {
-      id,
-      emitter,
-      destroyed: false,
-      loggedIn: false,
-    };
-    createdClients.push(clientRecord);
-    return Object.assign(emitter, {
+    const emitter = fakeClient({
       user: { id: `bot-${id}`, tag: `bot#000${id}` },
       login: async () => {
         clientRecord.loggedIn = true;
@@ -155,7 +162,15 @@ test("start during stop drain immediately creates a new client that survives the
         clientRecord.destroyed = true;
         events.push(`destroy:${id}`);
       },
-    }) as never;
+    });
+    const clientRecord = {
+      id,
+      emitter,
+      destroyed: false,
+      loggedIn: false,
+    };
+    createdClients.push(clientRecord);
+    return emitter as never;
   };
 
   const slowCore = {
@@ -218,10 +233,7 @@ test("a second stop while draining waits for the same drain", async () => {
     finishSlowMessage = r;
   });
 
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#0001" },
-    login: async () => "ok",
+  const client = fakeClient({
     destroy: async () => {
       events.push("client.destroy");
     },
@@ -238,7 +250,7 @@ test("a second stop while draining waits for the same drain", async () => {
   } as unknown as DiscordCoreClient;
 
   const plugin = createDiscordPlugin(cfg, slowCore, {
-    clientFactory: () => fakeClient as never,
+    clientFactory: () => client as never,
     drainTimeoutMs: 5000,
   });
 
@@ -262,7 +274,7 @@ test("a second stop while draining waits for the same drain", async () => {
     },
   };
 
-  emitter.emit("messageCreate", fakeMessage);
+  client.emit("messageCreate", fakeMessage);
   await new Promise((r) => setTimeout(r, 10));
 
   let secondStopResolved = false;
@@ -296,17 +308,16 @@ test("second stop does not settle before second client drain even if previous de
   const emitters: EventEmitter[] = [];
   const factory = () => {
     const id = ++clientSeq;
-    const emitter = new EventEmitter();
-    emitters.push(emitter);
-    return Object.assign(emitter, {
+    const client = fakeClient({
       user: { id: `bot-${id}`, tag: `bot#000${id}` },
-      login: async () => "ok",
       destroy: async () => {
         if (id === 1) {
           throw new Error("first client destroy failed");
         }
       },
-    }) as never;
+    });
+    emitters.push(client);
+    return client as never;
   };
 
   const core = {
@@ -380,10 +391,9 @@ test("a failed login retries with a new client", async () => {
 
     const factory = () => {
       const id = ++clientSeq;
-      const emitter = new EventEmitter();
       const record = { id, destroyed: false, loggedIn: false };
       createdClients.push(record);
-      return Object.assign(emitter, {
+      return fakeClient({
         user: { id: `bot-${id}`, tag: `bot#000${id}` },
         login: async () => {
           if (id === 1) {
@@ -405,7 +415,7 @@ test("a failed login retries with a new client", async () => {
     assert.equal(createdClients[0]!.destroyed, true);
     assert.equal(createdClients[0]!.loggedIn, false);
 
-    mock.timers.tick(DISCORD_LOGIN_RETRY_BASE_MS);
+    mock.timers.tick(DISCORD_RETRY_BASE_MS);
     await Promise.resolve();
 
     assert.equal(createdClients.length, 2);
@@ -427,10 +437,9 @@ test("stop cancels a pending login retry so a restart connects at once", async (
 
     const factory = () => {
       const id = ++clientSeq;
-      const emitter = new EventEmitter();
       const record = { id, destroyed: false, loggedIn: false };
       createdClients.push(record);
-      return Object.assign(emitter, {
+      return fakeClient({
         user: { id: `bot-${id}`, tag: `bot#000${id}` },
         login: async () => {
           throw new Error("login failed");
@@ -450,7 +459,7 @@ test("stop cancels a pending login retry so a restart connects at once", async (
     assert.equal(createdClients.length, 2);
     await plugin.stop();
 
-    mock.timers.tick(DISCORD_LOGIN_RETRY_BASE_MS * 2);
+    mock.timers.tick(DISCORD_RETRY_BASE_MS * 2);
     await Promise.resolve();
 
     assert.equal(createdClients.length, 2);
@@ -470,14 +479,12 @@ test("c1 login rejection after stop and start does not schedule a retry or creat
 
     const factory = () => {
       const id = ++clientSeq;
-      const emitter = new EventEmitter();
-      return Object.assign(emitter, {
+      return fakeClient({
         user: { id: `bot-${id}`, tag: `bot#000${id}` },
         login: async () => {
           if (id === 1) return await login1Promise;
           return "ok";
         },
-        destroy: async () => {},
       }) as never;
     };
 
@@ -503,7 +510,7 @@ test("c1 login rejection after stop and start does not schedule a retry or creat
 
     assert.equal(setTimeoutSpy.mock.calls.length, 0);
 
-    mock.timers.tick(DISCORD_LOGIN_RETRY_BASE_MS * 2);
+    mock.timers.tick(DISCORD_RETRY_BASE_MS * 2);
     for (let i = 0; i < 10; i++) await Promise.resolve();
 
     assert.equal(clientSeq, 2);
@@ -515,29 +522,66 @@ test("c1 login rejection after stop and start does not schedule a retry or creat
   }
 });
 
+interface HistoryRow {
+  id: string;
+  content: string;
+  author: { id: string; username: string; bot: boolean; globalName: string | null };
+}
+
+const historyRow = (r: HistoryRow) => ({
+  ...r,
+  mentions: { users: new Map() },
+  attachments: new Map(),
+  reactions: { cache: new Map() },
+});
+const historyMap = (rows: HistoryRow[] = []) => new Map(rows.map((r) => [r.id, historyRow(r)]));
+
 function guildHarness(opts: {
   authorRoles: string[];
   viewers: Array<{ id: string; roles: string[]; bot?: boolean }>;
   hydrationFails?: boolean;
   submitResult?: (b: Record<string, unknown>) => Promise<Record<string, unknown>>;
   extraGuild?: { id: string; members: Array<{ id: string; roles: string[] }> };
+  parentHistory?: HistoryRow[];
+  threadHistory?: HistoryRow[];
+  threadOwnerId?: string;
+  threadStarter?: HistoryRow;
+  threadHistoryFails?: boolean;
+  allowUserIds?: string[];
+  watermarks?: Array<{ container: string; lastTs: string }>;
+  backfillRows?: Array<Record<string, unknown>>;
+  threadMessages?: Map<string, unknown>;
+  threadLastMessageId?: string;
+  directoryGate?: () => Promise<void> | undefined;
+  probeGate?: Promise<void>;
+  activeThreads?: Array<{ id: string; type: ChannelType; parentId: string }>;
 }) {
+  const gapNotes: Array<{ channelId: string; note: string }> = [];
+  const threadDeletes: string[] = [];
   const submitted: Array<Record<string, unknown>> = [];
+  const links: Array<{ threadId: string; parentId: string; submittedBefore: number }> = [];
   const ingested: unknown[][] = [];
   let historyFetchCount = 0;
+  const fetchCalls: Array<{ channel: string; limit?: number; before?: string; after?: string }> = [];
+  const reactions: string[] = [];
+  const messageStub = {
+    react: async (e: string) => void reactions.push(`+${e}`),
+    reactions: { resolve: (e: string) => ({ users: { remove: async () => void reactions.push(`-${e}`) } }) },
+  };
   const threads: string[] = [];
   const channelPosts: string[] = [];
   const threadPosts: string[] = [];
   const acked: string[] = [];
   const pendingRows: Array<Record<string, unknown>> = [];
+  const directoryPushes: unknown[][] = [];
   let enqueued: () => void = () => {};
-  const emitter = new EventEmitter();
   const member = (id: string, roles: string[], bot = false) => ({
     id,
     displayName: `u${id}`,
     user: { id, bot, globalName: null, username: `u${id}` },
     roles: { cache: new Map(roles.map((r) => [r, { id: r }])) },
     guild: { id: "900" },
+    displayAvatarURL: () => `https://cdn.example/${id}.png`,
   });
   const cache = new Map(opts.viewers.map((v) => [v.id, member(v.id, v.roles, v.bot)]));
   const guild = {
@@ -550,17 +594,27 @@ function guildHarness(opts: {
       },
     },
     roles: { cache: new Map() },
+    channels: {
+      fetchActiveThreads: async () => ({ threads: new Map((opts.activeThreads ?? []).map((t) => [t.id, t])) }),
+    },
   };
   const parent = {
     id: "c1",
     guild,
     isThread: () => false,
     isTextBased: () => true,
+    send: async () => ({ id: "p1" }),
     permissionsFor: () => ({ has: () => true }),
+    isDMBased: () => false,
+    lastMessageId: null,
     messages: {
-      fetch: async () => {
+      fetch: async (o: { limit?: number; before?: string; after?: string } | string) => {
+        if (typeof o === "string") return messageStub;
+        fetchCalls.push({ channel: "c1", ...o });
+        if (opts.backfillRows && o.limit === 100 && !o.before)
+          return new Map(opts.backfillRows.map((m) => [m.id as string, m]));
         historyFetchCount += 1;
-        return new Map();
+        return historyMap(opts.parentHistory);
       },
     },
   };
@@ -570,8 +624,16 @@ function guildHarness(opts: {
     parent,
     guild,
     name: "deploy it",
+    ownerId: opts.threadOwnerId ?? "999",
+    delete: async () => void threadDeletes.push("t1"),
+    fetchStarterMessage: async () => {
+      if (!opts.threadStarter) throw new Error("no starter");
+      return historyRow(opts.threadStarter);
+    },
     isThread: () => true,
     isTextBased: () => true,
+    isDMBased: () => false,
+    lastMessageId: opts.threadLastMessageId ?? null,
     send: async (o: { content?: string } | string) => {
       const text = typeof o === "string" ? o : (o.content ?? "");
       threadPosts.push(text);
@@ -579,9 +641,18 @@ function guildHarness(opts: {
     },
     sendTyping: async () => {},
     messages: {
-      fetch: async () => {
+      fetch: async (o: { limit?: number; before?: string; after?: string } | string) => {
+        if (typeof o === "string") return messageStub;
+        fetchCalls.push({ channel: "t1", ...o });
+        if (o.limit === 2) {
+          await opts.probeGate;
+          return opts.threadMessages ?? new Map();
+        }
+        if (opts.backfillRows && o.limit === 100 && !o.before)
+          return new Map(opts.backfillRows.map((m) => [m.id as string, m]));
         historyFetchCount += 1;
-        return new Map();
+        if (opts.threadHistoryFails && o.before) throw new Error("missing access");
+        return historyMap(opts.threadHistory);
       },
     },
   };
@@ -599,13 +670,8 @@ function guildHarness(opts: {
         roles: { cache: new Map() },
       }
     : null;
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
-    login: async () => {
-      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
+  const emitter = fakeClient({
+    emitReady: true,
     channels: {
       cache: channelsCache,
       fetch: async (id: string) => (id === "c1" ? parent : thread),
@@ -632,6 +698,8 @@ function guildHarness(opts: {
       if (opts.submitResult) return await opts.submitResult(b);
       return { status: "silent" };
     },
+    linkPrivateThread: async (threadId: string, parentId: string) =>
+      void links.push({ threadId, parentId, submittedBefore: submitted.length }),
     linkedInternal: async () => false,
     coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async (events: unknown[]) => {
@@ -643,7 +711,14 @@ function guildHarness(opts: {
     },
     onContextRequest: () => () => {},
     pendingContextRequests: async () => [],
+    channelWatermarks: async () => opts.watermarks ?? [],
+    noteSurfaceHistoryGap: async (channelId: string, note: string) => void gapNotes.push({ channelId, note }),
     holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
+    holdDirectorySync: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
+    syncDirectory: async (members: unknown[]) => {
+      await opts.directoryGate?.();
+      directoryPushes.push(members);
+    },
     claimDeliveries: async (type: string) => (type === "discord" ? pendingRows.splice(0) : []),
     ackDelivery: async (id: string) => void acked.push(id),
     reportDeliveryUndeliverable: async () => {},
@@ -682,12 +757,15 @@ function guildHarness(opts: {
   const plugin = createDiscordPlugin(
     {
       botToken: "t",
-      allowUserIds: new Set(),
+      allowUserIds: new Set(opts.allowUserIds ?? []),
       guildIds: new Set(extraGuild ? ["900", extraGuild.id] : ["900"]),
       internalRoleIds: new Set(["staff"]),
     },
     core,
-    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+    {
+      clientFactory: () => emitter as never,
+      drainTimeoutMs: 1000,
+    },
   );
   const settle = () => new Promise((r) => setTimeout(r, 20));
   return {
@@ -702,11 +780,68 @@ function guildHarness(opts: {
     settle,
     acked,
     pendingRows,
+    directoryPushes,
     enqueue: () => enqueued(),
     ingested,
     historyFetchCount: () => historyFetchCount,
+    fetchCalls,
+    reactions,
+    gapNotes,
+    threadDeletes,
+    links,
+    core,
   };
 }
+
+test("once members are hydrated the guild's internal humans are pushed to the directory with avatars", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [
+      { id: "111", roles: ["staff"] },
+      { id: "222", roles: [] },
+      { id: "333", roles: ["staff"], bot: true },
+    ],
+  });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.directoryPushes, [
+    [{ principalId: "discord:111", displayName: "u111", type: "internal", avatarUrl: "https://cdn.example/111.png" }],
+  ]);
+});
+
+test("stopping the plugin waits for an in-flight periodic directory push", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let pushes = 0;
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    directoryGate: () => (++pushes > 1 ? gate : undefined),
+  });
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  await h.plugin.start();
+  await h.settle();
+  assert.equal(pushes, 1);
+  t.mock.timers.tick(DISCORD_DIRECTORY_SYNC_MS);
+  await h.settle();
+  assert.equal(pushes, 2);
+  let stopped = false;
+  const stopping = h.plugin.stop().then(() => (stopped = true));
+  await h.settle();
+  assert.equal(stopped, false);
+  release();
+  await stopping;
+  assert.equal(h.directoryPushes.length, 2);
+});
+
+test("a failed hydration pushes nothing to the directory", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }], hydrationFails: true });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.directoryPushes, []);
+});
 
 test("a staff mention in a private channel opens a thread and submits a channel turn with its audience", async () => {
   const h = guildHarness({
@@ -730,6 +865,99 @@ test("a staff mention in a private channel opens a thread and submits a channel 
     (body.conversation.audience as Array<{ externalId: string }>).map((a) => a.externalId),
     ["discord:111", "discord:112"],
   );
+});
+
+test("a private thread is linked to its parent when it is created, before any turn in it", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit(Events.ThreadCreate, { id: "t2", type: ChannelType.PrivateThread, parentId: "c1", guildId: "900" });
+  h.emitter.emit(Events.ThreadCreate, { id: "t3", type: ChannelType.PublicThread, parentId: "c1", guildId: "900" });
+  h.emitter.emit(Events.ThreadCreate, { id: "t4", type: ChannelType.PrivateThread, parentId: "c9", guildId: "901" });
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.links, [{ threadId: "t2", parentId: "c1", submittedBefore: 0 }]);
+  assert.equal(h.submitted.length, 0);
+});
+
+test("on ready every active private thread in a configured guild is linked to its parent", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    activeThreads: [
+      { id: "t5", type: ChannelType.PrivateThread, parentId: "c1" },
+      { id: "t6", type: ChannelType.PublicThread, parentId: "c1" },
+    ],
+  });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.links, [{ threadId: "t5", parentId: "c1", submittedBefore: 0 }]);
+});
+
+test("a private thread is its own scope whose audience is its members, and its scope is not entitled from the parent or a public sibling thread", async () => {
+  const viewers = [
+    { id: "111", roles: ["staff"] },
+    { id: "112", roles: ["staff"] },
+    { id: "113", roles: ["staff"] },
+  ];
+  const links: Array<Array<{ threadId: string; parentId: string; submittedBefore: number }>> = [];
+  const turnIn = async (threadType: ChannelType | null) => {
+    const h = guildHarness({ authorRoles: ["staff"], viewers });
+    Object.assign(h.thread, {
+      type: threadType ?? ChannelType.PublicThread,
+      members: { fetch: async () => new Map([["111", {}]]) },
+    });
+    Object.assign(h.thread.parent, {
+      name: "eng",
+      permissionsFor: () => ({ has: (p: unknown) => p !== PermissionFlagsBits.ManageThreads }),
+    });
+    await h.plugin.start();
+    await h.settle();
+    h.emitter.emit(
+      "messageCreate",
+      threadType === null ? h.message : inThread(h, { id: "1300000000000000009", content: "<@999> status?" }),
+    );
+    await h.settle();
+    await h.plugin.stop();
+    links.push(h.links);
+    return (
+      h.submitted[0] as {
+        conversation: {
+          kind: "channel";
+          channelRef: string;
+          channelName?: string;
+          audience: Array<{ externalId: string }>;
+        };
+      }
+    ).conversation;
+  };
+  const priv = await turnIn(ChannelType.PrivateThread);
+  const pub = await turnIn(ChannelType.PublicThread);
+  const parent = await turnIn(null);
+  assert.equal(priv.channelRef, "t1");
+  assert.equal("parentChannelRef" in priv, false);
+  assert.deepEqual(
+    links.map((l) => [...new Set(l.map((x) => JSON.stringify(x)))]),
+    [[JSON.stringify({ threadId: "t1", parentId: "c1", submittedBefore: 0 })], [], []],
+  );
+  assert.equal(priv.channelName, "deploy it");
+  assert.equal(pub.channelName, "eng");
+  assert.deepEqual(
+    priv.audience.map((a) => a.externalId),
+    ["discord:111"],
+  );
+  assert.equal(pub.channelRef, "c1");
+  assert.equal(parent.channelRef, "c1");
+  assert.deepEqual(
+    parent.audience.map((a) => a.externalId),
+    ["discord:111", "discord:112", "discord:113"],
+  );
+  const reader = { id: "p-113", type: "internal" } as Principal;
+  const org = scopeId("org", "o1");
+  const privateLabel = scopeId("channel", "t1");
+  assert.equal(principalEntitledToScope(reader, privateLabel, scopeId("channel", pub.channelRef), org), false);
+  assert.equal(principalEntitledToScope(reader, privateLabel, scopeId("channel", parent.channelRef), org), false);
 });
 
 test("guild turns use mode spine and never post model output directly to the channel", async () => {
@@ -904,13 +1132,8 @@ test("a guildId-null message from a group DM channel submits no turn", async () 
       return { status: "queued", runId: "r1" };
     },
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#0001" },
-    login: async () => "ok",
-    destroy: async () => {},
-  });
-  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 5000 });
+  const client = fakeClient();
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 5000 });
   await plugin.start();
   const groupDmMessage = {
     id: "m1",
@@ -926,7 +1149,7 @@ test("a guildId-null message from a group DM channel submits no turn", async () 
       send: async () => ({ edit: async () => {}, delete: async () => {} }),
     },
   };
-  emitter.emit("messageCreate", groupDmMessage);
+  client.emit("messageCreate", groupDmMessage);
   await new Promise((r) => setTimeout(r, 10));
   await plugin.stop();
   assert.deepEqual(submitted, []);
@@ -1004,7 +1227,10 @@ test("an explicit mention in a thread the bot never marked does not fetch stake 
   await h.settle();
   await h.plugin.stop();
   assert.equal(h.submitted.length, 1);
-  assert.equal(h.historyFetchCount(), 0);
+  assert.deepEqual(
+    h.fetchCalls.filter((c) => c.before === undefined),
+    [],
+  );
 });
 
 test("the bot's own message in a configured guild thread is mirrored with no history fetch", async () => {
@@ -1122,21 +1348,15 @@ test("a member removed from the guild between hydrations is dropped from the cac
     readBlob: async () => Buffer.from(""),
     readFileArtifact: async () => Buffer.from(""),
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
-    login: async () => {
-      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
+  const client = fakeClient({
+    emitReady: true,
     channels: { cache: new Map([["c1", parent]]), fetch: async () => parent },
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
     { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
-    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+    { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const mention = (id: string) => ({
@@ -1163,12 +1383,12 @@ test("a member removed from the guild between hydrations is dropped from the cac
   });
   await plugin.start();
   await settle();
-  emitter.emit("messageCreate", mention("m1"));
+  client.emit("messageCreate", mention("m1"));
   await settle();
   kicked = true;
-  emitter.emit("shardResume", 0, 0);
+  client.emit("shardResume", 0, 0);
   await settle();
-  emitter.emit("messageCreate", mention("m2"));
+  client.emit("messageCreate", mention("m2"));
   await settle();
   await plugin.stop();
   assert.equal(submitted.length, 2);
@@ -1223,21 +1443,15 @@ test("a member added to the cache while the fetch is pending is still cached aft
     readBlob: async () => Buffer.from(""),
     readFileArtifact: async () => Buffer.from(""),
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
-    login: async () => {
-      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
+  const client = fakeClient({
+    emitReady: true,
     channels: { cache: new Map([["c1", parent]]), fetch: async () => parent },
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
     { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
-    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+    { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
   const settle = () => new Promise((r) => setTimeout(r, 20));
   const mention = {
@@ -1265,7 +1479,7 @@ test("a member added to the cache while the fetch is pending is still cached aft
   await plugin.start();
   await settle();
   assert.equal(guild.members.cache.has("222"), true);
-  emitter.emit("messageCreate", mention);
+  client.emit("messageCreate", mention);
   await settle();
   await plugin.stop();
   assert.equal(submitted.length, 1);
@@ -1308,21 +1522,15 @@ test("a rejected fetch prunes nothing", async () => {
     readBlob: async () => Buffer.from(""),
     readFileArtifact: async () => Buffer.from(""),
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
-    login: async () => {
-      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
+  const client = fakeClient({
+    emitReady: true,
     channels: { cache: new Map([["c1", parent]]), fetch: async () => parent },
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
     { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
-    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+    { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
   const settle = () => new Promise((r) => setTimeout(r, 20));
   await plugin.start();
@@ -1386,19 +1594,12 @@ test("a run in flight from a stopping connection is not delivered by the next co
   };
   const emitters: EventEmitter[] = [];
   const factory = () => {
-    const emitter = new EventEmitter();
-    emitters.push(emitter);
-    const fakeClient = Object.assign(emitter, {
-      user: { id: "999", tag: "bot#1" },
-      login: async () => {
-        queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-        return "ok";
-      },
-      destroy: async () => {},
+    const client = fakeClient({
+      emitReady: true,
       channels: { cache: new Map(), fetch: async () => dmChannel },
-      guilds: { cache: new Map(), fetch: async () => null },
     });
-    return fakeClient as never;
+    emitters.push(client);
+    return client as never;
   };
   const plugin = createDiscordPlugin(dmCfg, core, { clientFactory: factory, drainTimeoutMs: 20 });
   const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -1437,17 +1638,14 @@ test("a ClientReady that fires after detach starts no delivery subscription or p
       return () => {};
     },
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
   let fireReady: (() => void) | null = null;
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
+  const client = fakeClient({
     login: async () => {
-      fireReady = () => emitter.emit("clientReady", fakeClient);
+      fireReady = () => client.emit("clientReady", client);
       return "ok";
     },
-    destroy: async () => {},
   });
-  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 20 });
   await plugin.start();
   await plugin.stop();
   fireReady!();
@@ -1548,14 +1746,8 @@ function continuationHarness(opts: { members: Array<{ id: string; roles: string[
     holdDeliveryDispatch: async <T>(fn: (lost: Promise<void>) => Promise<T>) => fn(new Promise(() => {})),
   } as unknown as DiscordCoreClient;
 
-  const emitter = new EventEmitter();
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
-    login: async () => {
-      queueMicrotask(() => emitter.emit("clientReady", fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
+  const client = fakeClient({
+    emitReady: true,
     channels: {
       cache: channelsMap,
       fetch: async (id: string) => channelsMap.get(id) ?? null,
@@ -1566,12 +1758,12 @@ function continuationHarness(opts: { members: Array<{ id: string; roles: string[
   const plugin = createDiscordPlugin(
     { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
-    { clientFactory: () => fakeClient as never, drainTimeoutMs: 1000 },
+    { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
 
   const settle = () => new Promise((r) => setTimeout(r, 40));
   const click = () => {
-    emitter.emit(Events.InteractionCreate, {
+    client.emit(Events.InteractionCreate, {
       isButton: () => true,
       customId: `qm:cmd:once:${DID}`,
       user: { id: "111" },
@@ -1614,6 +1806,26 @@ test("interaction button for guild-thread continuation allows streaming when all
   assert.equal(h.threadEdits.at(-1), "deploying now");
 });
 
+test("a lookupChannel context request goes to the channel lookup, not the conversation reader", async () => {
+  const fulfilled: unknown[] = [];
+  const core = {
+    ...fakeCore(),
+    onDeliveryEnqueued: () => () => {},
+    discordUserIdsFor: () => ["u1"],
+    onContextRequest: () => () => {},
+    pendingContextRequests: async () => [
+      { id: "cr-1", source: "discord", createdAt: 0, status: "pending", query: { lookupChannel: "ops", viewer: "v" } },
+    ],
+    fulfillContextRequest: async (_id: string, outcome: unknown) => void fulfilled.push(outcome),
+  } as unknown as DiscordCoreClient;
+  const client = fakeClient({ emitReady: true });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 20 });
+  await plugin.start();
+  await new Promise((r) => setTimeout(r, 40));
+  await plugin.stop();
+  assert.deepEqual(fulfilled, [{ result: { messages: [] } }]);
+});
+
 test("context requests lifecycle wires to ClientReady and unsubscribes on stop", async () => {
   let contextSubscriptions = 0;
   let contextUnsubscribed = 0;
@@ -1650,7 +1862,6 @@ test("context requests lifecycle wires to ClientReady and unsubscribes on stop",
     },
   } as unknown as DiscordCoreClient;
 
-  const emitter = new EventEmitter();
   const dmChannel = {
     id: "dm1",
     type: ChannelType.DM,
@@ -1671,8 +1882,8 @@ test("context requests lifecycle wires to ClientReady and unsubscribes on stop",
         ]),
     },
   };
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
+  const client = fakeClient({
+    emitReady: true,
     channels: {
       cache: new Map([["dm1", dmChannel]]),
       fetch: async () => dmChannel,
@@ -1681,14 +1892,9 @@ test("context requests lifecycle wires to ClientReady and unsubscribes on stop",
       cache: new Map(),
       fetch: async () => ({ members: { cache: new Map(), fetch: async () => new Map() } }),
     },
-    login: async () => {
-      queueMicrotask(() => emitter.emit(Events.ClientReady, fakeClient));
-      return "ok";
-    },
-    destroy: async () => {},
   });
 
-  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 20 });
   await plugin.start();
   await new Promise((r) => setTimeout(r, 40));
 
@@ -1737,7 +1943,6 @@ test("the same context request delivered by drain and live event fulfills only o
     },
   } as unknown as DiscordCoreClient;
 
-  const emitter = new EventEmitter();
   const dmChannel = {
     id: "dm1",
     type: ChannelType.DM,
@@ -1748,8 +1953,7 @@ test("the same context request delivered by drain and live event fulfills only o
       fetch: async () => new Map(),
     },
   };
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
+  const client = fakeClient({
     channels: {
       cache: new Map([["dm1", dmChannel]]),
       fetch: async () => dmChannel,
@@ -1760,15 +1964,14 @@ test("the same context request delivered by drain and live event fulfills only o
     },
     login: async () => {
       queueMicrotask(() => {
-        emitter.emit(Events.ClientReady, fakeClient);
+        client.emit(Events.ClientReady, client);
         listener?.(duplicateRequest);
       });
       return "ok";
     },
-    destroy: async () => {},
   });
 
-  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 20 });
   await plugin.start();
   await new Promise((r) => setTimeout(r, 50));
   await plugin.stop();
@@ -1791,21 +1994,1156 @@ test("a ClientReady that fires after detach starts no context subscription or dr
       return [];
     },
   } as unknown as DiscordCoreClient;
-  const emitter = new EventEmitter();
   let fireReady: (() => void) | null = null;
-  const fakeClient = Object.assign(emitter, {
-    user: { id: "999", tag: "bot#1" },
+  const client = fakeClient({
     login: async () => {
-      fireReady = () => emitter.emit("clientReady", fakeClient);
+      fireReady = () => client.emit("clientReady", client);
       return "ok";
     },
-    destroy: async () => {},
   });
-  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => fakeClient as never, drainTimeoutMs: 20 });
+  const plugin = createDiscordPlugin(cfg, core, { clientFactory: () => client as never, drainTimeoutMs: 20 });
   await plugin.start();
   await plugin.stop();
   fireReady!();
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(subscriptions, 0);
   assert.equal(drained, 0);
+});
+
+const ANA = { id: "111", username: "ana", bot: false, globalName: null };
+const BO = { id: "222", username: "bo", bot: false, globalName: null };
+const SELF = { id: "999", username: "qm", bot: true, globalName: null };
+const REACTION_TARGET_TEXT =
+  "Each message in the conversation above carries an id in brackets like `[~abc123]`. To react to one of those messages, pass that exact id, including the leading `~`, as the react action's `ts`.";
+const DISCORD_DETECT_GUIDANCE =
+  "Express the reaction as one Discord emoji short-name written WITH colons (e.g. `:pray:`), the one THIS persona would naturally reach for — common picks: `:pray:` (thanks), `:+1:` (got it), `:rocket:`/`:tada:` (a win), `:eyes:` (on it) — but choose whatever genuinely fits, not a fixed menu.";
+const HANDOFF_TEXT = "When work needs another person's own logins, files or memory, follow the `hand-off` skill.";
+
+function inThread(h: ReturnType<typeof guildHarness>, over: Record<string, unknown>) {
+  return {
+    ...h.message,
+    channelId: "t1",
+    channel: h.thread,
+    reply: async () => ({ id: "r2" }),
+    ...over,
+  };
+}
+
+test("a thread turn carries prior turns, overheard lines, detect context, header and gateway context from thread history", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [
+      { id: "111", roles: ["staff"] },
+      { id: "112", roles: ["staff"] },
+    ],
+    threadHistory: [
+      { id: "1300000000000000002", content: "Checking now", author: SELF },
+      { id: "1300000000000000001", content: "can you check the deploy?", author: ANA },
+      { id: "1300000000000000003", content: "also the <@!111> db", author: BO },
+    ],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", inThread(h, { id: "1300000000000000009", content: "<@999> and now?" }));
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.deepEqual(body.priorTurns, [
+    { role: "user", name: "ana", text: "[~9vkbjfeanyf5] can you check the deploy?" },
+    { role: "assistant", text: "[~9vkbjfeanyf6] Checking now" },
+    { role: "user", name: "bo", text: "[~9vkbjfeanyf7] also the @u111 db" },
+  ]);
+  assert.deepEqual(body.overheard, [
+    { ts: "1300000000000000001", role: "user", name: "ana", text: "can you check the deploy?" },
+    { ts: "1300000000000000002", role: "self", text: "Checking now" },
+    { ts: "1300000000000000003", role: "user", name: "bo", text: "also the @u111 db" },
+  ]);
+  assert.equal(body.detectContext, "ana: can you check the deploy?\nbo: also the @u111 db");
+  assert.equal(
+    body.conversationHeader,
+    "You are in a channel. People here: you, @u111 (<@111>), @u112 (<@112>). You are replying in a thread you started.",
+  );
+  assert.deepEqual(body.gatewayContext, {
+    location: "channel c1",
+    details: { channel: "c1", thread_id: "t1" },
+    instructions: `${REACTION_TARGET_TEXT}\n\n${HANDOFF_TEXT}`,
+    reactionGuidance: DISCORD_DETECT_GUIDANCE,
+  });
+  assert.deepEqual(
+    h.fetchCalls.filter((c) => c.channel === "t1" && c.before !== undefined),
+    [{ channel: "t1", limit: 100, before: "1300000000000000009" }],
+  );
+  assert.equal(body.text, "@qm and now?");
+});
+
+test("the first turn in a new thread reads the parent channel before the trigger and says it opened the thread", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    parentHistory: [{ id: "1300000000000000001", content: "the build is red", author: BO }],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", { ...h.message, id: "1300000000000000005" });
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.deepEqual(body.priorTurns, [{ role: "user", name: "bo", text: "[~9vkbjfeanyf5] the build is red" }]);
+  assert.match(String(body.conversationHeader), /You are replying in a thread you started\.$/);
+  assert.deepEqual(
+    h.fetchCalls.filter((c) => c.before !== undefined),
+    [{ channel: "c1", limit: 100, before: "1300000000000000005" }],
+  );
+});
+
+test("the thread starter leads the context and a thread someone else opened names its starter", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    threadOwnerId: "222",
+    threadStarter: { id: "1300000000000000000", content: "release 4.2 plan", author: BO },
+    threadHistory: [{ id: "1300000000000000001", content: "approved", author: ANA }],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", inThread(h, { id: "1300000000000000009", content: "<@999> ship it" }));
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.deepEqual(body.priorTurns, [
+    { role: "user", text: "bo: [~9vkbjfeanyf4] release 4.2 plan\nana: [~9vkbjfeanyf5] approved" },
+  ]);
+  assert.match(String(body.conversationHeader), /You are replying in a thread @bo started\.$/);
+  assert.equal(body.detectOpener, undefined);
+});
+
+test("a thread the bot opened exposes its starter text as the detect opener", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    threadStarter: { id: "1300000000000000000", content: "<@999> deploy it", author: ANA },
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", inThread(h, { id: "1300000000000000009", content: "<@999> status?" }));
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal((h.submitted[0] as Record<string, unknown>).detectOpener, "<@999> deploy it");
+});
+
+test("when history cannot be read the turn still goes out with a note and no turns", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    threadHistoryFails: true,
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", inThread(h, { id: "1300000000000000009", content: "<@999> status?" }));
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.equal(body.priorTurns, undefined);
+  assert.match(
+    String(body.conversationHeader),
+    /Discord context could not be read; earlier messages may be missing\.$/,
+  );
+});
+
+test("a channel a guest can read gets no history read at all", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [
+      { id: "111", roles: ["staff"] },
+      { id: "300", roles: [] },
+    ],
+    threadHistory: [{ id: "1300000000000000001", content: "private chatter", author: ANA }],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", inThread(h, { id: "1300000000000000009", content: "<@999> status?" }));
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.equal(body.priorTurns, undefined);
+  assert.equal(body.overheard, undefined);
+  assert.equal(body.conversationHeader, undefined);
+  assert.deepEqual(
+    h.fetchCalls.filter((c) => c.before !== undefined),
+    [],
+  );
+});
+
+test("a DM turn sends the gateway context and no history", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    id: "d1",
+    channelId: "dm1",
+    guildId: null,
+    guild: null,
+    content: "hello",
+    mentions: { users: new Map() },
+    channel: {
+      type: ChannelType.DM,
+      isThread: () => false,
+      send: async () => ({ id: "s9", edit: async () => {}, delete: async () => {} }),
+      sendTyping: async () => {},
+    },
+  });
+  await h.settle();
+  await h.plugin.stop();
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.deepEqual(body.gatewayContext, {
+    location: "a direct message with the user",
+    details: { channel: "dm1" },
+    reactionGuidance: DISCORD_DETECT_GUIDANCE,
+  });
+  assert.equal(body.priorTurns, undefined);
+  assert.equal(h.fetchCalls.length, 0);
+});
+
+test("an allow-listed bot mention opens a bot-actor turn even when the bot is not in the member cache", async () => {
+  const h = guildHarness({
+    authorRoles: [],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    allowUserIds: ["555"],
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    author: { id: "555", username: "ciBot", bot: true, globalName: null },
+    member: { id: "555", displayName: "ciBot", user: { id: "555", bot: true }, roles: { cache: new Map() } },
+    content: "<@999> deploy failed",
+  });
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.submitted.length, 1);
+  const body = h.submitted[0]! as { botActor?: boolean; actor: { isBot?: boolean }; text: string };
+  assert.equal(body.botActor, true);
+  assert.equal(body.actor.isBot, true);
+  assert.equal(body.text, "@qm deploy failed");
+});
+
+test("a bot that is not allow-listed is an outside guest and submits nothing even when it mentions the bot", async () => {
+  const h = guildHarness({ authorRoles: [], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    author: { id: "556", username: "spam", bot: true, globalName: null },
+    member: { id: "556", displayName: "spam", user: { id: "556", bot: true }, roles: { cache: new Map() } },
+  });
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a human author never gets botActor", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", h.message);
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal("botActor" in (h.submitted[0] as object), false);
+});
+
+test("a reply to another message submits the referenced author and excerpt ahead of the text", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    reference: { messageId: "p1", type: 0 },
+    fetchReference: async () => ({
+      member: { displayName: "Bo" },
+      author: { globalName: null, username: "bo" },
+      content: "the build is red",
+    }),
+  });
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal((h.submitted[0] as { text: string }).text, "[in reply to Bo] the build is red\n@qm deploy it");
+});
+
+test("the new thread is named from the message without the bot mention", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const names: string[] = [];
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    startThread: async (o: { name: string }) => {
+      names.push(o.name);
+      return h.thread;
+    },
+  });
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(names, ["deploy it"]);
+});
+
+const EDIT_AT = 1_800_000_000_000;
+const MSG_ID = "1300000000000000001";
+const MSG_ID_CREATED_MS = 1_730_014_552_832;
+
+test("the real client asks for message partials and the message intents that deliver edits and deletes", () => {
+  assert.ok(DISCORD_CLIENT_OPTIONS.partials?.includes(Partials.Message));
+  assert.ok(DISCORD_CLIENT_OPTIONS.partials?.includes(Partials.Channel));
+  assert.ok((DISCORD_CLIENT_OPTIONS.intents as GatewayIntentBits[]).includes(GatewayIntentBits.GuildMessages));
+});
+
+async function emitAndSettle(h: ReturnType<typeof guildHarness>, event: string, ...args: unknown[]) {
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit(event, ...args);
+  await h.settle();
+  await h.plugin.stop();
+}
+
+test("an edit of a mention message is mirrored with its edit time and new text", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageUpdate", h.message, {
+    ...h.message,
+    id: MSG_ID,
+    content: "<@999> deploy it now",
+    editedTimestamp: EDIT_AT,
+  });
+  assert.equal(h.ingested.length, 1);
+  const e = (h.ingested[0] as Array<Record<string, unknown>>)[0]!;
+  assert.equal(e.container, "c1");
+  assert.equal(e.ts, MSG_ID);
+  assert.equal(e.text, "<@999> deploy it now");
+  assert.equal(e.editedAt, EDIT_AT);
+  assert.equal(e.createdAt, MSG_ID_CREATED_MS);
+  assert.equal(e.deleted, undefined);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("an embed-only update carries no edit time and is not mirrored", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageUpdate", h.message, { ...h.message, id: MSG_ID, editedTimestamp: null });
+  assert.deepEqual(h.ingested, []);
+});
+
+test("an edit of an unrelated message in a configured guild is not mirrored", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageUpdate", h.message, {
+    ...h.message,
+    id: MSG_ID,
+    content: "lunch?",
+    mentions: { users: new Map() },
+    editedTimestamp: EDIT_AT,
+  });
+  assert.deepEqual(h.ingested, []);
+});
+
+test("an edit in an unconfigured guild is dropped", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageUpdate", h.message, {
+    ...h.message,
+    id: MSG_ID,
+    guildId: "777",
+    editedTimestamp: EDIT_AT,
+  });
+  assert.deepEqual(h.ingested, []);
+});
+
+test("an edit of a message in a staked thread is mirrored without a mention", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", h.message);
+  await h.settle();
+  h.emitter.emit(
+    "messageUpdate",
+    h.message,
+    inThread(h, { id: MSG_ID, content: "fixed typo", mentions: { users: new Map() }, editedTimestamp: EDIT_AT }),
+  );
+  await h.settle();
+  await h.plugin.stop();
+  const edits = h.ingested.flat().filter((e) => (e as { editedAt?: number }).editedAt !== undefined);
+  assert.equal(edits.length, 1);
+  assert.equal((edits[0] as { container: string }).container, "t1");
+});
+
+test("a partial update is fetched before it is mirrored, and a failed fetch is swallowed", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const full = { ...h.message, id: MSG_ID, content: "<@999> v2", editedTimestamp: EDIT_AT };
+  await emitAndSettle(h, "messageUpdate", h.message, { partial: true, guildId: "900", fetch: async () => full });
+  assert.equal(h.ingested.length, 1);
+  assert.equal((h.ingested[0] as Array<{ text: string }>)[0]!.text, "<@999> v2");
+
+  const g = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(g, "messageUpdate", g.message, {
+    partial: true,
+    guildId: "900",
+    fetch: async () => {
+      throw new Error("Unknown Message");
+    },
+  });
+  assert.deepEqual(g.ingested, []);
+});
+
+test("a partial update from a guild that is not configured is never fetched", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  let fetched = 0;
+  await emitAndSettle(h, "messageUpdate", h.message, {
+    partial: true,
+    guildId: "777",
+    fetch: async () => (fetched++, { ...h.message, guildId: "777", editedTimestamp: EDIT_AT }),
+  });
+  assert.equal(fetched, 0);
+  assert.deepEqual(h.ingested, []);
+});
+
+test("deleting a cached mention message mirrors a tombstone for its container and id", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageDelete", { ...h.message, id: MSG_ID, partial: false });
+  assert.deepEqual(h.ingested, [[{ container: "c1", ts: MSG_ID, deleted: true, kind: "channel" }]]);
+});
+
+test("deleting the bot's own cached message marks the tombstone as self", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageDelete", {
+    ...h.message,
+    id: MSG_ID,
+    partial: false,
+    author: SELF,
+    content: "done",
+    mentions: { users: new Map() },
+  });
+  assert.deepEqual(h.ingested, [[{ container: "c1", ts: MSG_ID, deleted: true, kind: "channel", self: true }]]);
+});
+
+test("deleting an unrelated cached message mirrors nothing", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(h, "messageDelete", {
+    ...h.message,
+    partial: false,
+    content: "lunch?",
+    mentions: { users: new Map() },
+  });
+  assert.deepEqual(h.ingested, []);
+});
+
+test("deleting an uncached message in a configured guild mirrors a tombstone, elsewhere nothing", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const partial = { partial: true, id: MSG_ID, channelId: "c1", guildId: "900", author: null };
+  await emitAndSettle(h, "messageDelete", partial);
+  assert.deepEqual(h.ingested, [[{ container: "c1", ts: MSG_ID, deleted: true, kind: "channel" }]]);
+
+  const g = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await emitAndSettle(g, "messageDelete", { ...partial, guildId: "777" });
+  await emitAndSettle(g, "messageDelete", { ...partial, guildId: null });
+  assert.deepEqual(g.ingested, []);
+});
+
+test("a bulk delete mirrors a tombstone for each message", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const rows = ["1300000000000000001", "1300000000000000002"].map((id) => ({
+    partial: true,
+    id,
+    channelId: "c1",
+    guildId: "900",
+    author: null,
+  }));
+  await emitAndSettle(h, "messageDeleteBulk", new Map(rows.map((r) => [r.id, r])));
+  assert.deepEqual(
+    h.ingested.flat().map((e) => (e as { ts: string }).ts),
+    ["1300000000000000001", "1300000000000000002"],
+  );
+});
+
+const DEFAULT_ACK_CHARS = ["👀", "🔍", "⏳", "🔭", "🫡"];
+function gatedSubmit() {
+  const gates: Array<() => void> = [];
+  return {
+    submit: () => new Promise<Record<string, unknown>>((r) => gates.push(() => r({ status: "silent" }))),
+    release: () => gates.splice(0).forEach((open) => open()),
+  };
+}
+const flush = async () => {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+};
+
+async function startWithMockedTimeouts(h: ReturnType<typeof guildHarness>) {
+  await h.plugin.start();
+  await h.settle();
+  mock.timers.enable({ apis: ["setTimeout"] });
+}
+
+async function stopWithRealTimeouts(h: ReturnType<typeof guildHarness>) {
+  mock.timers.reset();
+  await h.plugin.stop();
+}
+
+test("a slow prompted guild turn reacts on the trigger message and removes the same reaction when it settles", async () => {
+  const gate = gatedSubmit();
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: gate.submit,
+  });
+  await startWithMockedTimeouts(h);
+  h.emitter.emit("messageCreate", h.message);
+  await flush();
+  mock.timers.tick(ACK_REACTION_DELAY_MS);
+  await flush();
+  gate.release();
+  await flush();
+  await stopWithRealTimeouts(h);
+  assert.equal(h.reactions.length, 2);
+  const [added, removed] = h.reactions as [string, string];
+  assert.ok(DEFAULT_ACK_CHARS.includes(added.slice(1)));
+  assert.equal(added[0], "+");
+  assert.equal(removed, `-${added.slice(1)}`);
+});
+
+test("a fast turn never reacts", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+  });
+  await startWithMockedTimeouts(h);
+  h.emitter.emit("messageCreate", h.message);
+  await flush();
+  mock.timers.tick(ACK_REACTION_DELAY_MS);
+  await flush();
+  await stopWithRealTimeouts(h);
+  assert.deepEqual(h.reactions, []);
+});
+
+test("an unprompted follow-up gets no acknowledgement reaction even when it runs long", async () => {
+  const gate = gatedSubmit();
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: gate.submit,
+  });
+  await startWithMockedTimeouts(h);
+  h.emitter.emit("messageCreate", h.message);
+  await flush();
+  mock.timers.tick(ACK_REACTION_DELAY_MS);
+  await flush();
+  gate.release();
+  await flush();
+  h.reactions.length = 0;
+  h.emitter.emit(
+    "messageCreate",
+    inThread(h, { id: "1300000000000000009", content: "no mention", mentions: { users: new Map() } }),
+  );
+  await flush();
+  mock.timers.tick(ACK_REACTION_DELAY_MS);
+  await flush();
+  gate.release();
+  await flush();
+  await stopWithRealTimeouts(h);
+  assert.equal(h.submitted.length, 2);
+  assert.deepEqual(h.reactions, []);
+});
+
+test("editing the mention out of a mirrored message still records the edit", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", { ...h.message, id: MSG_ID });
+  await h.settle();
+  h.emitter.emit("messageUpdate", h.message, {
+    ...h.message,
+    id: MSG_ID,
+    content: "never mind",
+    mentions: { users: new Map() },
+    editedTimestamp: EDIT_AT,
+  });
+  await h.settle();
+  await h.plugin.stop();
+  const edits = h.ingested.flat().filter((e) => (e as { editedAt?: number }).editedAt !== undefined);
+  assert.equal(edits.length, 1);
+  assert.equal((edits[0] as { text: string }).text, "never mind");
+});
+
+test("deleting a mirrored message whose mention was edited out still records the tombstone", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", { ...h.message, id: MSG_ID });
+  await h.settle();
+  h.emitter.emit("messageDelete", {
+    ...h.message,
+    id: MSG_ID,
+    partial: false,
+    content: "never mind",
+    mentions: { users: new Map() },
+  });
+  await h.settle();
+  await h.plugin.stop();
+  const tombstones = h.ingested.flat().filter((e) => (e as { deleted?: boolean }).deleted === true);
+  assert.deepEqual(tombstones, [{ container: "c1", ts: MSG_ID, deleted: true, kind: "channel" }]);
+});
+
+const REACTOR = { id: "111", partial: false, bot: false, username: "ana", globalName: null };
+
+function reactionEvent(
+  h: ReturnType<typeof guildHarness>,
+  over: { author?: typeof ANA; channel?: unknown; hasThread?: boolean; guildId?: string | null; thread?: unknown } = {},
+) {
+  const message: Record<string, unknown> = {
+    id: "1300000000000000001",
+    channelId: "t1",
+    guildId: over.guildId === undefined ? "900" : over.guildId,
+    guild: h.message.guild,
+    author: over.author ?? SELF,
+    content: "all deployed",
+    mentions: { users: new Map() },
+    attachments: new Map(),
+    reactions: { cache: new Map() },
+    channel: over.channel ?? h.thread,
+    hasThread: over.hasThread ?? false,
+    thread: over.thread,
+    partial: false,
+    startThread: async () => {
+      h.threads.push("t1");
+      return h.thread;
+    },
+  };
+  message.fetch = async () => message;
+  const emoji = { name: "👍", id: null };
+  return { reaction: { partial: false, emoji, message }, message };
+}
+
+const REACTION_TEXT = '[Discord reaction] u111 reacted with :+1: on your message: "all deployed".';
+
+test("a reaction on the bot's thread message becomes an unprompted turn that can still react", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: async () => ({ status: "react", reactions: ["tada"] }),
+  });
+  const { reaction } = reactionEvent(h);
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.equal(h.submitted.length, 1);
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.equal(body.text, REACTION_TEXT);
+  assert.equal(body.unprompted, true);
+  assert.equal(body.triggerTs, undefined);
+  assert.equal((body.gatewayContext as Record<string, unknown>).reactionGuidance, DISCORD_DETECT_GUIDANCE);
+  assert.deepEqual(h.reactions, ["+🎉"]);
+});
+
+test("a removed reaction says it was removed", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h);
+  await emitAndSettle(h, "messageReactionRemove", reaction, REACTOR);
+  assert.equal(
+    (h.submitted[0]! as Record<string, unknown>).text,
+    '[Discord reaction] u111 removed their :+1: reaction from your message: "all deployed".',
+  );
+});
+
+test("a reaction on someone else's message in a thread the bot has no stake in starts no turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h, { author: BO });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a reaction on a followed thread root starts a turn naming the root's author", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    threadHistory: [{ id: "1300000000000000005", content: "on it", author: SELF }],
+  });
+  const { reaction } = reactionEvent(h, { author: BO, channel: h.message.channel, hasThread: true, thread: h.thread });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.equal(
+    (h.submitted[0]! as Record<string, unknown>).text,
+    `[Discord reaction] u111 reacted with :+1: on bo's message: "all deployed".`,
+  );
+});
+
+test("a root with a thread the bot never spoke in starts no turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h, { author: BO, channel: h.message.channel, hasThread: true, thread: h.thread });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("the bot's own reaction starts no turn even when the bot is allow-listed as internal", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    allowUserIds: ["999"],
+  });
+  const { reaction } = reactionEvent(h);
+  await emitAndSettle(h, "messageReactionAdd", reaction, { ...REACTOR, id: "999", bot: true });
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a guest reactor in a DM starts no turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const dm = { id: "d1", type: ChannelType.DM, isThread: () => false, isTextBased: () => true };
+  const { reaction } = reactionEvent(h, { channel: dm, guildId: null });
+  await emitAndSettle(h, "messageReactionAdd", reaction, { ...REACTOR, id: "333", username: "zed" });
+  assert.deepEqual(h.submitted, []);
+});
+
+test("an internal reactor in a thread whose parent a guest can read starts no turn", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [
+      { id: "111", roles: ["staff"] },
+      { id: "444", roles: [] },
+    ],
+  });
+  const { reaction } = reactionEvent(h);
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a reaction in an unconfigured guild is dropped before any fetch", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction, message } = reactionEvent(h, { guildId: "777" });
+  let fetches = 0;
+  message.partial = true;
+  message.fetch = async () => {
+    fetches += 1;
+    return message;
+  };
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.equal(fetches, 0);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a reaction on the bot's top-level channel message opens a thread under it and runs a turn there", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h, { channel: h.message.channel });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual(h.threads, ["t1"]);
+  const body = h.submitted[0]! as { conversation: Record<string, unknown>; text: string };
+  assert.equal(body.conversation.threadRef, "discord:th:t1");
+  assert.equal(body.text, REACTION_TEXT);
+});
+
+test("a reaction on someone else's top-level channel message opens no thread", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h, { author: BO, channel: h.message.channel });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual([h.threads, h.submitted], [[], []]);
+});
+
+test("a reaction in a DM starts an unprompted dm turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const dmChannel = {
+    id: "d1",
+    type: ChannelType.DM,
+    isThread: () => false,
+    isTextBased: () => true,
+    send: async () => ({ id: "s9", edit: async () => {}, delete: async () => {} }),
+    sendTyping: async () => {},
+  };
+  const { reaction } = reactionEvent(h, { channel: dmChannel, guildId: null });
+  (reaction.message as Record<string, unknown>).channelId = "d1";
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  const body = h.submitted[0]! as Record<string, unknown>;
+  assert.equal((body.conversation as Record<string, unknown>).kind, "dm");
+  assert.equal(body.unprompted, true);
+  assert.equal(body.text, REACTION_TEXT);
+});
+
+for (const status of ["silent", "react"] as const) {
+  test(`a thread opened for a reaction is deleted when the turn ends ${status} with nothing to post`, async () => {
+    const h = guildHarness({
+      authorRoles: ["staff"],
+      viewers: [{ id: "111", roles: ["staff"] }],
+      submitResult: async () => (status === "react" ? { status, reactions: ["tada"] } : { status }),
+    });
+    const { reaction } = reactionEvent(h, { channel: h.message.channel });
+    await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+    assert.deepEqual([h.threads, h.threadDeletes], [["t1"], ["t1"]]);
+  });
+}
+
+test("a thread opened for a reaction stays when the turn has a reply to deliver", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: async () => ({ status: "ok", reply: "hi" }),
+  });
+  const { reaction } = reactionEvent(h, { channel: h.message.channel });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
+});
+
+test("removing a reaction from a top-level bot message opens no thread and runs no turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const { reaction } = reactionEvent(h, { channel: h.message.channel });
+  await emitAndSettle(h, "messageReactionRemove", reaction, REACTOR);
+  assert.deepEqual([h.threads, h.submitted], [[], []]);
+});
+
+test("when another reaction already opened the thread, the turn continues in it and does not delete it", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: async () => ({ status: "silent" }),
+  });
+  const { reaction, message } = reactionEvent(h, { channel: h.message.channel });
+  message.startThread = async () => {
+    throw Object.assign(new Error("thread exists"), { code: 160004 });
+  };
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.equal(h.submitted.length, 1);
+  assert.deepEqual([h.threads, h.threadDeletes], [[], []]);
+});
+
+test("the turn that created a reaction thread does not delete it after another reaction raced into it", async () => {
+  const releases: Array<() => void> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: () => new Promise((r) => releases.push(() => r({ status: "silent" }))),
+  });
+  const { reaction, message } = reactionEvent(h, { channel: h.message.channel });
+  let starts = 0;
+  message.startThread = async () => {
+    if (starts++ > 0) throw Object.assign(new Error("thread exists"), { code: 160004 });
+    h.threads.push("t1");
+    return h.thread;
+  };
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", reaction, REACTOR);
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", { ...reaction, emoji: { name: "🎉", id: null } }, REACTOR);
+  await h.settle();
+  assert.equal(releases.length, 2);
+  releases[0]!();
+  await h.settle();
+  releases[1]!();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
+});
+
+test("a thread another reaction resolves while the creating turn's empty probe is in flight is not deleted", async () => {
+  let release!: () => void;
+  const probeGate = new Promise<void>((resolve) => (release = resolve));
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: async () => ({ status: "silent" }),
+    probeGate,
+  });
+  const first = reactionEvent(h, { channel: h.message.channel });
+  const second = reactionEvent(h, { channel: h.message.channel, hasThread: true, thread: h.thread });
+  second.message.id = "1300000000000000002";
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", first.reaction, REACTOR);
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", second.reaction, REACTOR);
+  await h.settle();
+  release();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
+});
+
+test("a DM reaction whose channel is not a DM starts no turn", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  const notDm = { id: "d1", type: ChannelType.GuildText, isThread: () => false, isTextBased: () => true };
+  const { reaction } = reactionEvent(h, { channel: notDm, guildId: null });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("the client subscribes to guild and DM reaction events with reaction partials", () => {
+  const intents = DISCORD_CLIENT_OPTIONS.intents as GatewayIntentBits[];
+  assert.ok(intents.includes(GatewayIntentBits.GuildMessageReactions));
+  assert.ok(intents.includes(GatewayIntentBits.DirectMessageReactions));
+  assert.ok(DISCORD_CLIENT_OPTIONS.partials?.includes(Partials.Reaction));
+  assert.ok(DISCORD_CLIENT_OPTIONS.partials?.includes(Partials.User));
+});
+
+const BACKFILL_FLOOR_CLEAR = 60_000;
+const DISCORD_EPOCH_MS = 1_420_070_400_000;
+const recentId = (n: number): string =>
+  ((BigInt(Date.now() - BACKFILL_FLOOR_CLEAR - DISCORD_EPOCH_MS) << 22n) + BigInt(n)).toString();
+const WATERMARK = "1000000000000000";
+
+test("after the members hydrate, a mention that arrived while offline is caught up", async () => {
+  const id = recentId(7);
+  const rows: Array<Record<string, unknown>> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "c1", lastTs: WATERMARK }],
+    backfillRows: rows,
+  });
+  rows.push({ ...h.message, id });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.submitted.length, 1);
+  assert.equal((h.submitted[0] as { redeliveryKey: string }).redeliveryKey, `discord:${id}`);
+  assert.deepEqual(h.threads, ["t1"]);
+  const sweeps = h.fetchCalls.filter((c) => c.limit === 100 && !c.before);
+  assert.equal(sweeps.length, 1);
+  assert.equal(sweeps[0]!.channel, "c1");
+});
+
+test("a backfilled mention that already has a thread is not answered again", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "c1", lastTs: WATERMARK }],
+    backfillRows: rows,
+  });
+  rows.push({ ...h.message, id: recentId(8), hasThread: true });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.fetchCalls.filter((c) => c.limit === 100 && !c.before).length, 1);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a full backfill page notes a history gap on the parent channel", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "t1", lastTs: WATERMARK }],
+    backfillRows: Array.from({ length: 100 }, (_, i) => ({ id: recentId(i), hasThread: true })),
+  });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.gapNotes.length, 1);
+  assert.equal(h.gapNotes[0]!.channelId, "c1");
+  assert.match(h.gapNotes[0]!.note, /partly caught up/);
+});
+
+test("a backfilled unprompted message in a staked thread is mirrored only and starts no turn", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "t1", lastTs: WATERMARK }],
+    backfillRows: rows,
+  });
+  const id = recentId(9);
+  const row = {
+    ...h.message,
+    id,
+    channelId: "t1",
+    content: "following up",
+    mentions: { users: new Map() },
+    channel: h.thread,
+  };
+  rows.push({ ...row, id: recentId(8), author: { id: "999", username: "qm", bot: true, globalName: null } }, row);
+  await h.plugin.start();
+  await h.settle();
+  const caughtUp = h.ingested.flat().some((e) => (e as { ts?: string }).ts === id);
+  assert.deepEqual(h.submitted, []);
+  assert.ok(caughtUp);
+  h.emitter.emit("messageCreate", { ...row, id: recentId(10) });
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.submitted.length, 1);
+});
+
+test("a thread opened for a reaction is kept when it already has messages", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: async () => ({ status: "silent" }),
+    threadMessages: new Map([["m1", {}]]),
+  });
+  const { reaction } = reactionEvent(h, { channel: h.message.channel });
+  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
+});
+
+test("a thread opened for a reaction is kept once another turn has resolved it, even if that turn ends first", async () => {
+  const releases: Array<() => void> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    submitResult: () => new Promise((r) => releases.push(() => r({ status: "silent" }))),
+  });
+  const first = reactionEvent(h, { channel: h.message.channel });
+  const second = reactionEvent(h, { channel: h.message.channel, hasThread: true, thread: h.thread });
+  second.message.id = "1300000000000000002";
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", first.reaction, REACTOR);
+  await h.settle();
+  h.emitter.emit("messageReactionAdd", second.reaction, REACTOR);
+  await h.settle();
+  assert.equal(releases.length, 2);
+  releases[1]!();
+  await h.settle();
+  releases[0]!();
+  await h.settle();
+  assert.deepEqual(h.threadDeletes, []);
+  await h.plugin.stop();
+});
+
+test("a mention answered with the readers-unknown notice is not re-run when the session resumes", async () => {
+  const id = recentId(11);
+  const rows: Array<Record<string, unknown>> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "c1", lastTs: WATERMARK }],
+    backfillRows: rows,
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("shardReconnecting", 0);
+  h.emitter.emit("messageCreate", { ...h.message, id });
+  await h.settle();
+  assert.deepEqual(h.submitted, []);
+  rows.push({ ...h.message, id });
+  h.emitter.emit("shardResume", 0, 0);
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.channelPosts, [
+    "I can't confirm who can read this channel right now, so I won't answer here yet. Try again in a minute.",
+  ]);
+  assert.deepEqual(h.submitted, []);
+});
+
+test("a thread is fetched even when its cached last message id is not past the cursor", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "t1", lastTs: WATERMARK }],
+    threadLastMessageId: "1",
+  });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.fetchCalls.filter((c) => c.channel === "t1" && c.limit === 100 && !c.before).length, 1);
+});
+
+test("a mention noticed at the gates is not re-run even when an earlier mention set the in-process cursor", async () => {
+  const first = recentId(20);
+  const dropped = recentId(21);
+  const rows: Array<Record<string, unknown>> = [];
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    watermarks: [{ container: "c1", lastTs: dropped }],
+    backfillRows: rows,
+  });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", { ...h.message, id: first });
+  await h.settle();
+  h.emitter.emit("shardReconnecting", 0);
+  h.emitter.emit("messageCreate", { ...h.message, id: dropped });
+  await h.settle();
+  rows.push({ ...h.message, id: dropped });
+  h.emitter.emit("shardResume", 0, 0);
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(
+    h.submitted.map((x) => (x as { redeliveryKey: string }).redeliveryKey),
+    [`discord:${first}`],
+  );
+});
+
+const REACTION_THREAD_CASES: Array<{
+  label: string;
+  submitResult: () => Promise<Record<string, unknown>>;
+  waitRun?: () => Promise<unknown>;
+  threadMessages?: Map<string, unknown>;
+  deleted: boolean;
+}> = [
+  {
+    label: "a thread holding only the starter message counts as empty and is deleted",
+    submitResult: async () => ({ status: "silent" }),
+    threadMessages: new Map([["s0", { type: MessageType.ThreadStarterMessage }]]),
+    deleted: true,
+  },
+  {
+    label: "the turn ends refused",
+    submitResult: async () => ({ status: "refused", reason: "no" }),
+    deleted: true,
+  },
+  {
+    label: "the turn ends pending approval",
+    submitResult: async () => ({ status: "pending_approval" }),
+    deleted: false,
+  },
+  {
+    label: "the turn fails",
+    submitResult: async () => {
+      throw new Error("boom");
+    },
+    deleted: true,
+  },
+  {
+    label: "the run ends failed",
+    submitResult: async () => ({ status: "failed" }),
+    deleted: true,
+  },
+  {
+    label: "the run ends without a result",
+    submitResult: async () => ({ status: "queued", runId: "r1" }),
+    waitRun: async () => null,
+    deleted: true,
+  },
+  {
+    label: "the wait for its run throws",
+    submitResult: async () => ({ status: "queued", runId: "r1" }),
+    waitRun: async () => {
+      throw new Error("stall budget");
+    },
+    deleted: false,
+  },
+];
+
+test("a thread opened for a reaction is deleted or kept by how the turn ends", async () => {
+  for (const { label, submitResult, waitRun, threadMessages, deleted } of REACTION_THREAD_CASES) {
+    const h = guildHarness({
+      authorRoles: ["staff"],
+      viewers: [{ id: "111", roles: ["staff"] }],
+      submitResult,
+      ...(threadMessages ? { threadMessages } : {}),
+    });
+    if (waitRun) (h.core as unknown as { waitRun: () => Promise<unknown> }).waitRun = waitRun;
+    const { reaction } = reactionEvent(h, { channel: h.message.channel });
+    await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
+    assert.deepEqual([h.threads, h.threadDeletes], [["t1"], deleted ? ["t1"] : []], label);
+  }
+});
+
+test("a prompted message that stays unclassifiable is told readers are unknown only once", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [], hydrationFails: true });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", h.message);
+  h.emitter.emit("messageCreate", h.message);
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.channelPosts.length, 1);
+});
+
+test("a prompted message dropped for unknown readers is told so only once across replays", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("shardReconnecting", 0);
+  h.emitter.emit("messageCreate", h.message);
+  h.emitter.emit("messageCreate", h.message);
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.channelPosts.length, 1);
 });

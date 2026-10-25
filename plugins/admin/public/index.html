@@ -10066,27 +10066,8 @@
         return parts.join("\n\n");
       }
 
-      async function copyText(text) {
-        try {
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(text);
-            return true;
-          }
-        } catch {}
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        let ok = false;
-        try {
-          ok = document.execCommand("copy");
-        } catch {
-          ok = false;
-        }
-        document.body.removeChild(ta);
-        return ok;
+      function copyText(text) {
+        return governanceUI.shared.copyText(text);
       }
       function copyButton(label, getText) {
         const btn = document.createElement("button");

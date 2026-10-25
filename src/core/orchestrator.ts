@@ -58,7 +58,7 @@ import { turnDeliveryProvenance } from "../delivery/delivery-store.ts";
 import type { DirectoryStore, DirectoryChannel, DirectoryMember } from "../directory/directory-store.ts";
 import { resolveEnvironmentId } from "../environments/environment-store.ts";
 import type { GapPhase, Lease, LeaseAttempt } from "../sessions/session-store.ts";
-import { SESSION_BUSY_FIRE_TEXT, SESSION_BUSY_USER_TEXT } from "./failure-copy.ts";
+import { INTERNAL_ONLY_REFUSAL_REASON, SESSION_BUSY_FIRE_TEXT, SESSION_BUSY_USER_TEXT } from "./failure-copy.ts";
 import { CONFIG_DEFAULTS } from "../config.ts";
 import { acquireLeaseWithin, isOverheardEntry } from "../sessions/session-store.ts";
 import { supportsProcessSessions, supportsScopeProfile } from "../sandbox/sandbox.ts";
@@ -128,6 +128,7 @@ import { createToolContext, NeedsApproval, CommandDenied, type CommandCredential
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { artifactImageLoader } from "../harness/replay-images.ts";
 import { principalEntitledToScope } from "../resolution/context-filter.ts";
+import { ConfigConflictError } from "../resolution/config-store.ts";
 import { openSessionEntry, searchSessionEntries } from "../sessions/history-search.ts";
 import { createTranscriptSource } from "../sessions/transcript-source.ts";
 import { defaultPublishAudience } from "../resolution/publish-audience.ts";
@@ -685,7 +686,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           return {
             status: "refused",
             refusalKind: "internal_only",
-            reason: "internal-only: shared audience includes a non-internal participant",
+            reason: INTERNAL_ONLY_REFUSAL_REASON,
           };
         }
       }
@@ -708,7 +709,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
       }
 
-      const resolution = await deps.resolution.resolve(conversation, actor, external);
+      const resolution = await deps.resolution.resolve(conversation, actor, external).catch((e: unknown) => {
+        if (e instanceof ConfigConflictError) return e;
+        throw e;
+      });
+      if (resolution instanceof ConfigConflictError) return { status: "refused", reason: resolution.message };
       const scopeId = deps.resolution.scopeFor(conversation, actor);
       const isCurrentSharedScopeMember = withLiveTurnMembership(deps.isCurrentSharedScopeMember, {
         actorId: actor.id,
@@ -1079,7 +1084,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const frameVars: PromptVars = {
         botName,
         surfaceTool,
-        surfaceLabel: isWeb ? `the ${botName} web app` : labelForSurface(input.surface),
+        surfaceLabel: isWeb ? `the ${botName} web app` : labelForSurface(surfaceTool),
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind
         ],
@@ -1953,18 +1958,22 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (!acquired.lease) return acquired.refusal;
       const lease = acquired.lease;
       if (!ambientTurn) assignSessionTitle();
-      const trackRevisions = input.surface === "slack" && Boolean(deps.surfaceCache);
-      const revisionAnchor = trackRevisions ? await revisionAnchorAt(deps.sessions, session.id) : undefined;
+      const revisionTracking =
+        deps.surfaceCache && input.surface && surfaceCapabilities(input.surface)
+          ? { surface: input.surface, surfaceCache: deps.surfaceCache }
+          : undefined;
+      const revisionAnchor = revisionTracking ? await revisionAnchorAt(deps.sessions, session.id) : undefined;
       const catchUpMessageRevisions = async (): Promise<void> => {
-        if (!trackRevisions || !deps.surfaceCache) return;
+        if (!revisionTracking) return;
         await reconcileMessageRevisions({
+          ...revisionTracking,
           sessions: deps.sessions,
-          surfaceCache: deps.surfaceCache,
           lease,
           session,
           anchorAt: revisionAnchor,
           fallbackSince: leaseStart,
           ...(messageTs ? { triggerTs: messageTs } : {}),
+          ...(input.conversation.channelRef ? { channelRef: input.conversation.channelRef } : {}),
         }).catch(swallowAs("orchestrator: message revision catch-up", undefined));
       };
       let tailOwnsCleanup = false;
@@ -2406,7 +2415,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (ambientTurn) assignSessionTitle();
 
         if (input.runId) {
-          if ((input.surface === "slack" || input.surface === "monitor") && input.runLeaseToken) {
+          if ((surfaceCapabilities(input.surface) || input.surface === "monitor") && input.runLeaseToken) {
             await deps.runs
               ?.setDeliveryState(input.runId, input.runLeaseToken, { replying: true })
               .catch(swallowAs("orchestrator: persist reply engagement", false));

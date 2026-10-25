@@ -18,7 +18,6 @@ export function configure(value: Context) {
 const splitIds = (raw: string) =>
   String(raw || "")
     .split(/[\s,]+/)
-    .map((s) => s.trim())
     .filter(Boolean);
 export class SlackSetting extends SettingState {
   scope = "";
@@ -187,24 +186,41 @@ export class ConnectorsState {
   }
 }
 export const connectors = new ConnectorsState();
-export class SlackInstallationState {
+abstract class InstallationState {
   data: Record<string, any> = {};
-  editor = false;
-  guide = false;
-  botToken = "";
-  appToken = "";
-  revision = 0;
   busy = "";
   message = "";
   tone = "";
-  request = 0;
-  linkStarted = false;
   render = () => {};
   setStatus(message: string, tone: string) {
     this.message = message;
     this.tone = tone;
     this.render();
   }
+  abstract load(): Promise<void>;
+  protected async disconnect(prompt: string, path: string, failed: string, done: string) {
+    if (this.busy || !confirm(prompt)) return;
+    this.busy = "remove";
+    this.render();
+    try {
+      const result = await context.api("DELETE", path);
+      if (!result.ok) return this.setStatus(result.data?.message || failed, "err");
+      await this.load();
+      this.setStatus(done, "ok");
+    } finally {
+      this.busy = "";
+      this.render();
+    }
+  }
+}
+export class SlackInstallationState extends InstallationState {
+  editor = false;
+  guide = false;
+  botToken = "";
+  appToken = "";
+  revision = 0;
+  request = 0;
+  linkStarted = false;
   async load() {
     const request = ++this.request;
     const result = await context.api("GET", "/api/slack-installation");
@@ -274,25 +290,13 @@ export class SlackInstallationState {
       this.render();
     }
   }
-  async remove() {
-    if (
-      this.busy ||
-      !confirm(
-        "Disconnect this Slack app? QM will stop replying in Slack until you reconnect. The app will remain installed in your workspace.",
-      )
-    )
-      return;
-    this.busy = "remove";
-    this.render();
-    try {
-      const result = await context.api("DELETE", "/api/slack-installation");
-      if (!result.ok) return this.setStatus(result.data?.message || "Remove failed.", "err");
-      await this.load();
-      this.setStatus("Slack disconnected.", "ok");
-    } finally {
-      this.busy = "";
-      this.render();
-    }
+  remove() {
+    return this.disconnect(
+      "Disconnect this Slack app? QM will stop replying in Slack until you reconnect. The app will remain installed in your workspace.",
+      "/api/slack-installation",
+      "Remove failed.",
+      "Slack disconnected.",
+    );
   }
 }
 export const installation = new SlackInstallationState();
@@ -325,23 +329,13 @@ export const emoji = {
   },
 };
 
-class DiscordInstallationState {
-  data: Record<string, any> = {};
+class DiscordInstallationState extends InstallationState {
   botToken = "";
   oauthClientSecret = "";
   allowUserIds = "";
   guildIds = "";
   internalRoleIds = "";
   principalDeliveries = true;
-  busy = "";
-  message = "";
-  tone = "";
-  render = () => {};
-  setStatus(message: string, tone: string) {
-    this.message = message;
-    this.tone = tone;
-    this.render();
-  }
   async load() {
     const result = await context.api("GET", "/api/discord-installation");
     if (!result.ok) return this.setStatus(result.data?.message || "Failed to load Discord status.", "err");
@@ -379,18 +373,13 @@ class DiscordInstallationState {
       this.render();
     }
   }
-  async remove() {
-    if (this.busy || !confirm("Disconnect the Discord bot? QM stops answering on Discord until you reconnect.")) return;
-    this.busy = "remove";
-    try {
-      const result = await context.api("DELETE", "/api/discord-installation");
-      if (!result.ok) return this.setStatus(result.data?.message || "Disconnect failed.", "err");
-      await this.load();
-      this.setStatus("Discord disconnected.", "ok");
-    } finally {
-      this.busy = "";
-      this.render();
-    }
+  remove() {
+    return this.disconnect(
+      "Disconnect the Discord bot? QM stops answering on Discord until you reconnect.",
+      "/api/discord-installation",
+      "Disconnect failed.",
+      "Discord disconnected.",
+    );
   }
 }
 export const discordInstallation = new DiscordInstallationState();

@@ -1,4 +1,8 @@
 import { isSessionTurn } from "../turn-origin.ts";
+import { compareIds } from "../../surfaces/conversation.ts";
+import { DISCORD_MESSAGE_IDS, SLACK_MESSAGE_IDS, SLACK_TS } from "../../surfaces/message-ids.ts";
+import { DISCORD_SURFACE } from "../../discord/config.ts";
+import { SNOWFLAKE } from "../../util/snowflake.ts";
 import type {
   Conversation,
   DeliveryProvenance,
@@ -115,7 +119,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       recipient?: string;
       participants?: readonly string[];
     },
-    opts?: { mayOpenGroup?: boolean },
+    opts?: { mayOpenGroup?: boolean; mayReachDiscord?: boolean },
   ): Promise<{ ok: true; destination: Destination } | { ok: false; message: string }> => {
     if (
       !target ||
@@ -141,6 +145,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         resolveGroup: (parts) => deps.directory!.resolveGroupByParticipants(parts),
         groupMember: (g, p) => deps.directory!.groupMember(g, p),
         directoryMember: (p) => deps.directory!.get(p),
+        ...(opts?.mayReachDiscord && deps.discordLookup ? { discordLookup: deps.discordLookup } : {}),
         ...(deps.surfaceContext
           ? {
               openGroup: (parts: readonly string[]) =>
@@ -266,7 +271,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const f = await resolveFiles(files, sandboxId);
       if (!f.ok) return { ok: false, message: f.message };
       const sending = postText.trim().length > 0 || (f.attachments?.length ?? 0) > 0;
-      const d = await resolveDestination(target, { mayOpenGroup: sending });
+      const d = await resolveDestination(target, { mayOpenGroup: sending, mayReachDiscord: true });
       if (!d.ok) return { ok: false, message: d.message };
       const r0 = await enqueue(d.destination, postText, seq, f.attachments);
       if (!r0.ok) return r0;
@@ -332,10 +337,13 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!result) return { ok: false, message: "the surface didn't answer in time" };
       if (result.note && !result.messages?.length) return { ok: false, message: result.note };
       const msgs = (result.messages ?? []) as Array<{ ts?: string; threadTs?: string }>;
-      const since = opts?.since;
+      const codec = input.surface === DISCORD_SURFACE ? DISCORD_MESSAGE_IDS : SLACK_MESSAGE_IDS;
+      const since = opts?.since === undefined ? undefined : (codec.decode(opts.since) ?? opts.since);
+      if (since !== undefined && !SNOWFLAKE.test(since) && !SLACK_TS.test(since))
+        return { ok: false, message: `"since" must be a message id returned by whats_new or read_thread` };
       const self = new Set(result.selfTs);
       const newer = msgs.filter(
-        (m) => typeof m?.ts === "string" && (since === undefined || m.ts > since) && !self.has(m.ts),
+        (m) => typeof m?.ts === "string" && (since === undefined || compareIds(m.ts, since) > 0) && !self.has(m.ts),
       );
       const isDm = conversation.kind === "dm";
       const hereRoot = dest.target.slice(dest.target.lastIndexOf(":") + 1);
@@ -346,7 +354,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         else if (m.threadTs) otherRoots.add(m.threadTs);
       }
       const latest = msgs.reduce<string | undefined>(
-        (acc, m) => (typeof m?.ts === "string" && (!acc || m.ts > acc) ? m.ts : acc),
+        (acc, m) => (typeof m?.ts === "string" && (!acc || compareIds(m.ts, acc) > 0) ? m.ts : acc),
         undefined,
       );
       const coverage = await coverageForTurn();

@@ -101,3 +101,100 @@ test("a keychain ask that is no longer pending renders plain status text without
     assert.deepEqual(buttons(card), []);
   }
 });
+
+test("an over-long command is never shown or approvable from the card: link to the web and Deny only", async () => {
+  const command = `echo ${"x".repeat(2500)} TAIL`;
+  const render = createCardRenderer(
+    {
+      getApproval: async () => ({
+        requestId: "A1",
+        command,
+        reason: "long",
+        sessionId: "S 1",
+        grantModes: { session: true, always: true },
+      }),
+    } as never,
+    "https://qm.example.com/",
+  );
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.ok(card!.content!.length <= 2000);
+  assert.doesNotMatch(card!.content!, /xxxxxxxx/);
+  assert.match(card!.content!, /https:\/\/qm\.example\.com\/s\/S%201/);
+  assert.deepEqual(
+    buttons(card).map((b) => b.custom_id),
+    ["qm:cmd:deny:0f8fad5b-d9cb-469f-a165-70867728950e"],
+  );
+});
+
+test("an over-long command without a web url still refuses inline approval", async () => {
+  const render = createCardRenderer({
+    getApproval: async () => ({ requestId: "A1", command: "y".repeat(1801), reason: "long" }),
+  } as never);
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.match(card!.content!, /too long/);
+  assert.deepEqual(
+    buttons(card).map((b) => b.label),
+    ["Deny"],
+  );
+});
+
+test("an over-long command with a non-http web url falls back to plain text instead of a link", async () => {
+  const render = createCardRenderer(
+    {
+      getApproval: async () => ({ requestId: "A1", command: "y".repeat(1801), reason: "long", sessionId: "S1" }),
+    } as never,
+    "javascript:alert(1)//",
+  );
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.match(card!.content!, /this conversation in QM/);
+  assert.doesNotMatch(card!.content!, /javascript:/);
+});
+
+test("a command at the inline limit still renders in full with all buttons", async () => {
+  const command = "z".repeat(1800);
+  const render = createCardRenderer({
+    getApproval: async () => ({ requestId: "A1", command, reason: "edge" }),
+  } as never);
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.ok(card!.content!.includes(command));
+  assert.equal(buttons(card).length, 4);
+});
+
+test("an over-long screened-output release is capped the same way, since Discord shows its text inline", async () => {
+  const render = createCardRenderer({
+    getApproval: async () => ({ requestId: "A1", kind: "input", command: "q".repeat(2500), reason: "screen" }),
+  } as never);
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.ok(card!.content!.length <= 2000);
+  assert.doesNotMatch(card!.content!, /qqqqqqqq/);
+  assert.match(card!.content!, /Release screened output\?/);
+  assert.deepEqual(
+    buttons(card).map((b) => b.label),
+    ["Deny"],
+  );
+});
+
+test("a card whose summary and reason push the command past Discord's limit links to the web instead of cutting the command", async () => {
+  const command = "z".repeat(1700);
+  const render = createCardRenderer({
+    getApproval: async () => ({ requestId: "A1", command, summary: "s".repeat(250), reason: "r".repeat(200) }),
+  } as never);
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.ok(card!.content!.length <= 2000);
+  assert.doesNotMatch(card!.content!, /zzz/);
+  assert.deepEqual(
+    buttons(card).map((b) => b.label),
+    ["Deny"],
+  );
+});
+
+test("a long summary is clipped to 400 characters so the command and buttons still fit", async () => {
+  const render = createCardRenderer({
+    getApproval: async () => ({ requestId: "A1", command: "ls", summary: "s".repeat(3000), reason: "why" }),
+  } as never);
+  const card = await render(row({ commandApprovalId: "A1" }));
+  assert.ok(card!.content!.includes("s".repeat(400)));
+  assert.ok(!card!.content!.includes("s".repeat(401)));
+  assert.match(card!.content!, /```\nls\n```/);
+  assert.equal(buttons(card).length, 4);
+});

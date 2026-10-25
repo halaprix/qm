@@ -1,7 +1,23 @@
 import { orgId } from "../config.ts";
-import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE } from "../discord/config.ts";
+import {
+  DISCORD_DM_DELIVERY_TYPE,
+  DISCORD_SURFACE,
+  discordRevisionThreadRefs,
+  parseDiscordThreadRef,
+} from "../discord/config.ts";
+import { parseSlackThreadRef, slackThreadRefCandidates } from "../slack/message-gating.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { scopeId } from "../types.ts";
+
+interface RevisionScan {
+  container: string;
+  root?: string;
+}
+
+interface RevisionTracking {
+  threadRefsFor(event: { container: string; ts: string; sub?: string | null }): string[];
+  scansFor(threadRef: string, channelRef: string | undefined): RevisionScan[];
+}
 
 export interface SurfaceCapabilities {
   label: string;
@@ -10,6 +26,7 @@ export interface SurfaceCapabilities {
   approvalCardType: string | null;
   keychainCardInConversation: boolean;
   mentionHint: string;
+  revisions: RevisionTracking;
   externalParticipantsAllowed(config: ScopedConfigStore | undefined): Promise<boolean>;
 }
 
@@ -22,6 +39,13 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     keychainCardInConversation: true,
     mentionHint:
       " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping.",
+    revisions: {
+      threadRefsFor: (e) => slackThreadRefCandidates(e.container, e.ts, e.sub ?? undefined),
+      scansFor: (threadRef) => {
+        const ref = parseSlackThreadRef(threadRef);
+        return ref ? [ref] : [];
+      },
+    },
     externalParticipantsAllowed: async (config) =>
       config ? config.getExternalSlackParticipantsDurable(scopeId("org", orgId())) : false,
   },
@@ -32,7 +56,15 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     approvalCardType: DISCORD_DM_DELIVERY_TYPE,
     keychainCardInConversation: false,
     mentionHint:
-      " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with a Unicode emoji character, not a :name:.",
+      " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with an emoji character, a :shortcode:, or a custom server emoji as <:name:id>.",
+    revisions: {
+      threadRefsFor: (e) => discordRevisionThreadRefs(e.container, e.ts),
+      scansFor: (threadRef, channelRef) => {
+        const ref = parseDiscordThreadRef(threadRef);
+        if (!ref) return [];
+        return [{ container: ref.container }, ...(channelRef ? [{ container: channelRef, root: ref.container }] : [])];
+      },
+    },
     externalParticipantsAllowed: async () => false,
   },
 };

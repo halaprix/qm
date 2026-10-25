@@ -153,6 +153,8 @@ import { createPostgresDeliveryStore } from "./delivery/postgres-delivery-store.
 import { wireRunResultDeliveries } from "./delivery/run-result-delivery.ts";
 import { adminSessionUrl } from "./util/admin-links.ts";
 import { withWebTranscriptDeliveries } from "./delivery/web-transcript-delivery.ts";
+import { DISCORD_SURFACE } from "./discord/config.ts";
+import type { SurfacePull } from "./reach/reach.ts";
 import { createDiscordPrincipalRoute, withPrincipalRouting } from "./delivery/principal-routing.ts";
 import { createDirectoryStore, type DirectoryStore } from "./directory/directory-store.ts";
 import { createPostgresDirectoryStore } from "./directory/postgres-directory-store.ts";
@@ -314,7 +316,12 @@ import { selectableModelCatalog } from "./model/model-catalog.ts";
 import type { Harness } from "./harness/harness.ts";
 import { createSecurityScreenProxy, type SecurityScreener } from "./security/security-screener.ts";
 import { createMemoryStrategy } from "./memory/strategy.ts";
-import { createOrchestrator, egressClaimAllowingControlPlane, type OrchestratorDeps } from "./core/orchestrator.ts";
+import {
+  createOrchestrator,
+  egressClaimAllowingControlPlane,
+  type OrchestratorDeps,
+  type SurfaceContextPuller,
+} from "./core/orchestrator.ts";
 import {
   mintCapabilityToken,
   CAPABILITY_TTL_MS,
@@ -359,7 +366,7 @@ import { createSwarmStore, type SwarmStorage } from "./swarms/swarm-store.ts";
 import { createSwarmService } from "./swarms/swarm-service.ts";
 import { createSlackCoreClient, type SlackCoreClient } from "./api/slack-core-client.ts";
 import { createDiscordCoreClient, type DiscordCoreClient, linkedDiscordUserIds } from "./api/discord-core-client.ts";
-import { createSurfaceContextPuller } from "./api/surface-context-puller.ts";
+import { createSurfaceContextPuller, createTriggerContextPuller } from "./api/surface-context-puller.ts";
 import { createEngagedRegistry } from "./wake/engaged-registry.ts";
 import { createWakeSweep, type WakeSweep } from "./wake/sweep.ts";
 import {
@@ -418,7 +425,11 @@ import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
 import { sleep, withTimeout } from "./util/async.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
-import { createDiscordInstallationStore, type DiscordInstallationStore } from "./surfaces/discord-installation.ts";
+import {
+  createDiscordInstallationStore,
+  discordActive,
+  type DiscordInstallationStore,
+} from "./surfaces/discord-installation.ts";
 
 export interface Runtime {
   start(): void;
@@ -2046,7 +2057,16 @@ export function buildApp(
     },
   });
   const uiState = artifactMap<PersistedUiState>("web_ui_state");
+  const discordPull = async (
+    puller: SurfaceContextPuller | undefined,
+    query: Parameters<SurfacePull>[0],
+  ): ReturnType<SurfacePull> => {
+    if (!discordActive(await discordInstallation.status(), config.discordEnvironmentConfigured)) return null;
+    return (await puller?.pull(DISCORD_SURFACE, query)) ?? { messages: [], retry: true };
+  };
+  const discordLookup: SurfacePull = (query) => discordPull(orchestratorDeps.surfaceContext, query);
   const orchestratorDeps: OrchestratorDeps = {
+    discordLookup,
     installSharedCanvas: async (actorId, fileId, where) => {
       const canvas = await installSharedCanvas(uiState, actorId, await app.openFileForViewer(fileId, actorId));
       if (typeof canvas === "string") return canvas;
@@ -2259,6 +2279,7 @@ export function buildApp(
         })
     : undefined;
   const app = createApp({
+    discordLookup,
     teams,
     externalSlackPolicies: config.externalSlackPolicies,
     admittedWork,
@@ -2381,6 +2402,9 @@ export function buildApp(
     ...(harness.models.pickAckEmoji ? { pickAckEmoji: (t, c) => harness.models.pickAckEmoji!(t, c) } : {}),
   });
   const discordCore = createDiscordCoreClient({
+    config: configStore,
+    memory,
+    surfaceCache,
     app,
     runs,
     turnStream,
@@ -2521,6 +2545,10 @@ export function buildApp(
     },
     { intervalMs: config.reaperIntervalMs, leaderLease },
   );
+  const triggerPuller = createTriggerContextPuller(app);
+  const triggerDirectory = { ...directory, discordLookup: (query) => discordPull(triggerPuller, query) } satisfies {
+    discordLookup: SurfacePull;
+  };
   orchestratorDeps.surfaceContext = createSurfaceContextPuller(
     app,
     keychain
@@ -2546,7 +2574,7 @@ export function buildApp(
             idempotency,
             identity,
             run: (req) => app.turn(req),
-            directory,
+            directory: triggerDirectory,
             currentScopeMembers,
             sessions,
             resolveRecipient,
@@ -2561,7 +2589,14 @@ export function buildApp(
   const dropResolution = keychain
     ? (drop: DropResolution) =>
         fireDropResolution(
-          { deliveries, idempotency, identity, run: (req) => app.turn(req), directory, resolveRecipient },
+          {
+            deliveries,
+            idempotency,
+            identity,
+            run: (req) => app.turn(req),
+            directory: triggerDirectory,
+            resolveRecipient,
+          },
           drop,
         )
     : undefined;
@@ -2580,7 +2615,7 @@ export function buildApp(
       idempotency,
       identity,
       run: (req) => app.turn(req),
-      directory,
+      directory: triggerDirectory,
       currentScopeMembers,
       sessions,
       resolveRecipient,
@@ -2632,7 +2667,7 @@ export function buildApp(
     identity,
     run: (req) => app.turn(req),
     leaderLease,
-    directory,
+    directory: triggerDirectory,
     currentScopeMembers,
     sessions,
     resolveRecipient,
@@ -2705,7 +2740,7 @@ export function buildApp(
           idempotency,
           identity,
           run: (req) => app.turn(req),
-          directory,
+          directory: triggerDirectory,
           currentScopeMembers,
           sessions,
           resolveRecipient,
@@ -2726,7 +2761,7 @@ export function buildApp(
     idempotency,
     identity,
     run: (req) => app.turn(req),
-    directory,
+    directory: triggerDirectory,
     currentScopeMembers,
     resolveRecipient,
   });

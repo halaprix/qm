@@ -1,4 +1,5 @@
 import type { CoreTurnBody, SurfaceCoreClient } from "../api/surface-core-client.ts";
+import { INTERNAL_ONLY_REFUSAL_REASON } from "../core/failure-copy.ts";
 import type { TurnResult } from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
 import { toDiscordFiles, type DiscordFile } from "./attachments.ts";
@@ -26,7 +27,8 @@ const APPROVAL_TEXT = "This needs an approval before I can continue. Approve it 
 const APPROVAL_DM_TEXT =
   "This needs your approval — I sent you the buttons in a direct message. If they don't arrive, approve it in the QM web app";
 const STREAM_EDIT_INTERVAL_MS = 1500;
-const GUEST_REFUSAL = "internal-only: shared audience includes a non-internal participant";
+
+export type ReactHandler = (names: readonly string[]) => Promise<void>;
 
 export type TurnInput =
   | {
@@ -34,14 +36,16 @@ export type TurnInput =
       channel: ReplyChannel;
       body: CoreTurnBody;
       mode: "spine";
-      inFlightRuns: Set<string>;
       mayPost: () => Promise<boolean>;
+      onReact?: ReactHandler;
+      onNoReply?: () => Promise<void>;
     }
   | {
       core: SurfaceCoreClient;
       channel: ReplyChannel;
       body: CoreTurnBody;
       mode: "stream";
+      onReact?: ReactHandler;
       inFlightRuns: Set<string>;
       streamIntervalMs?: number;
       onAccepted?: () => Promise<void>;
@@ -57,8 +61,28 @@ function approvalText(result: TurnResult): string {
   return result.adminUrl ? `${APPROVAL_DM_TEXT}: ${result.adminUrl}` : `${APPROVAL_DM_TEXT}.`;
 }
 
+function lazyStatus(channel: ReplyChannel): StatusMessage {
+  let sent: Promise<StatusMessage> | undefined;
+  return {
+    id: "",
+    edit: async (content) => {
+      if (sent) await (await sent).edit(content);
+      else sent = channel.send(content);
+      await sent;
+    },
+    delete: async () => {
+      if (sent) await (await sent).delete();
+    },
+  };
+}
+
+async function notice(quiet: boolean, status: Pick<StatusMessage, "edit">, text: string): Promise<void> {
+  if (quiet) swallowAs("discord: unprompted turn stays quiet", undefined)(new Error(text));
+  else await status.edit(text);
+}
+
 export function refusalText(reason: string | undefined): string {
-  return reason === GUEST_REFUSAL ? REFUSED_GUEST_TEXT : `I can't do that: ${reason ?? "refused"}`;
+  return reason === INTERNAL_ONLY_REFUSAL_REASON ? REFUSED_GUEST_TEXT : `I can't do that: ${reason ?? "refused"}`;
 }
 
 async function streamRun(
@@ -67,6 +91,7 @@ async function streamRun(
   status: StatusMessage,
   intervalMs: number,
   mayPost: () => Promise<boolean>,
+  quiet: boolean,
 ): Promise<{ result: TurnResult | null; stoppedByGate: boolean }> {
   let shown = "";
   let stoppedByGate = false;
@@ -85,7 +110,7 @@ async function streamRun(
         if (!allowed) {
           stoppedByGate = true;
           clearInterval(timer);
-          await status.edit(REFUSED_STREAM_TEXT).catch(swallowAs("discord: refusal edit", undefined));
+          await notice(quiet, status, REFUSED_STREAM_TEXT).catch(swallowAs("discord: refusal edit", undefined));
           return;
         }
         shown = preview;
@@ -110,21 +135,28 @@ async function deliver(
   status: StatusMessage,
   channel: ReplyChannel,
   core: SurfaceCoreClient,
+  onReact: ReactHandler | undefined,
+  quiet: boolean,
 ): Promise<void> {
   if (!result || result.status === "failed") {
-    await status.edit(FAILURE_TEXT);
+    await notice(quiet, status, FAILURE_TEXT);
     return;
   }
   if (result.status === "silent") {
     await status.delete();
     return;
   }
+  if (result.status === "react") {
+    await onReact?.(result.reactions ?? []);
+    await status.delete();
+    return;
+  }
   if (result.status === "refused") {
-    await status.edit(refusalText(result.reason));
+    await notice(quiet, status, refusalText(result.reason));
     return;
   }
   if (result.status === "pending_approval") {
-    await status.edit(approvalText(result));
+    await notice(quiet, status, approvalText(result));
     return;
   }
   const { files, notes } = await toDiscordFiles(result.attachments ?? [], core);
@@ -141,7 +173,8 @@ async function deliver(
 
 async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise<void> {
   const { core, channel, body, inFlightRuns, mayPost, streamIntervalMs = STREAM_EDIT_INTERVAL_MS } = input;
-  const status = await channel.send(WORKING_TEXT);
+  const quiet = body.unprompted === true;
+  const status = quiet ? lazyStatus(channel) : await channel.send(WORKING_TEXT);
   let submitted = false;
   let settled = false;
   const settle = async (result: TurnResult) => {
@@ -165,27 +198,27 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
     if (runId) {
       inFlightRuns.add(runId);
       if (!(await mayPost())) {
-        await status.edit(REFUSED_STREAM_TEXT).catch(swallowAs("discord: refusal edit", undefined));
+        await notice(quiet, status, REFUSED_STREAM_TEXT).catch(swallowAs("discord: refusal edit", undefined));
         if (input.onSettled) await settle((await core.waitRun(runId)) ?? { status: "failed" });
         return;
       }
-      await core.reportRunEditRef(runId, status.id);
+      if (!quiet) await core.reportRunEditRef(runId, status.id);
     }
     const { result, stoppedByGate } = runId
-      ? await streamRun(core, runId, status, streamIntervalMs, mayPost)
+      ? await streamRun(core, runId, status, streamIntervalMs, mayPost, quiet)
       : { result: queued, stoppedByGate: false };
     await settle(result ?? { status: "failed" });
     if (stoppedByGate) return;
     if (!(await mayPost())) {
-      await status.edit(REFUSED_STREAM_TEXT);
+      await notice(quiet, status, REFUSED_STREAM_TEXT);
       return;
     }
-    await deliver(result, status, channel, core);
+    await deliver(result, status, channel, core, input.onReact, quiet);
     if (runId) await core.ackRunDelivery(runId);
   } catch (err) {
     swallowAs("discord: turn failed", undefined)(err);
     if (submitted) await settle({ status: "failed" });
-    await status.edit(FAILURE_TEXT).catch(swallowAs("discord: failure edit", undefined));
+    await notice(quiet, status, FAILURE_TEXT).catch(swallowAs("discord: failure edit", undefined));
   } finally {
     if (runId) inFlightRuns.delete(runId);
   }
@@ -193,28 +226,39 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
 
 async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<void> {
   const { core, channel, body, mayPost } = input;
+  const say = (text: string): Promise<void> => notice(body.unprompted === true, { edit: (t) => channel.send(t) }, text);
   const keepTyping = () => void channel.typing().catch(swallowAs("discord: typing", undefined));
-  keepTyping();
-  const timer = setInterval(keepTyping, TYPING_REFRESH_MS);
+  let timer: NodeJS.Timeout | undefined;
+  const startTyping = () => {
+    if (timer) return;
+    keepTyping();
+    timer = setInterval(keepTyping, TYPING_REFRESH_MS);
+  };
+  if (body.unprompted !== true) startTyping();
+  let keep = false;
   try {
     const queued = await core.submitTurn({ async: true, ...body });
     if (queued.steered) return;
-    const result = queued.status === "queued" && queued.runId ? await core.waitRun(queued.runId) : queued;
-    if (result?.status === "refused") {
-      const allowed = result.reason === GUEST_REFUSAL || (await mayPost());
-      await channel.send(allowed ? refusalText(result.reason) : REFUSED_STREAM_TEXT);
+    const runId = queued.status === "queued" ? queued.runId : undefined;
+    keep = runId !== undefined;
+    const result = runId ? await core.waitRun(runId, { onReplying: startTyping }) : queued;
+    keep = result?.status === "ok" || result?.status === "pending_approval";
+    if (result?.status === "react") {
+      if (await mayPost()) await input.onReact?.(result.reactions ?? []);
+    } else if (result?.status === "refused") {
+      const allowed = result.reason === INTERNAL_ONLY_REFUSAL_REASON || (await mayPost());
+      await say(allowed ? refusalText(result.reason) : REFUSED_STREAM_TEXT);
     } else if (result?.status === "pending_approval") {
       const allowed = await mayPost();
-      await channel.send(allowed ? approvalText(result) : REFUSED_STREAM_TEXT);
+      await say(allowed ? approvalText(result) : REFUSED_STREAM_TEXT);
     }
   } catch (err) {
     swallowAs("discord: spine turn failed", undefined)(err);
     const allowed = await mayPost().catch(() => false);
-    await channel
-      .send(allowed ? FAILURE_TEXT : REFUSED_STREAM_TEXT)
-      .catch(swallowAs("discord: failure post", undefined));
+    await say(allowed ? FAILURE_TEXT : REFUSED_STREAM_TEXT).catch(swallowAs("discord: failure post", undefined));
   } finally {
     clearInterval(timer);
+    if (!keep) await input.onNoReply?.();
   }
 }
 

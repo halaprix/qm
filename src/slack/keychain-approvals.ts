@@ -1,5 +1,6 @@
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
 import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
+import { isHttpUrl } from "../surfaces/approval-limits.ts";
 import type { Directory } from "./directory.ts";
 import { parseBlockAction, parseInteractionBody } from "./payloads.ts";
 import { updateSlackMessage } from "./messaging.ts";
@@ -16,10 +17,7 @@ export function keychainApprovalMessage(
 ): { text: string; blocks: Array<Record<string, unknown>> } {
   const { ask } = view;
   const place = `in ${escape(view.conversation).replaceAll("|", "&#124;")}`;
-  const origin =
-    originUrl && /^https?:\/\//.test(originUrl)
-      ? `<${originUrl.replaceAll("|", "%7C").replaceAll(">", "%3E")}|${place}>`
-      : place;
+  const origin = isHttpUrl(originUrl) ? `<${originUrl.replaceAll("|", "%7C").replaceAll(">", "%3E")}|${place}>` : place;
   const pending = ask.status === "pending";
   const { kind } = parseScopeId(ask.requesterScopeId);
   let audience = "this group";

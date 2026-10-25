@@ -526,6 +526,8 @@ export interface SurfaceContextQuery {
   conversationTarget?: string;
   channelId?: string;
   channelName?: string;
+  lookupChannel?: string;
+  postable?: boolean;
   count?: number;
   viewer?: string;
   before?: string;
@@ -547,6 +549,8 @@ export interface SurfaceContextResult {
   liveSearch?: "unconfigured" | "unconnected";
   file?: { blobId: string; name: string; mimetype?: string; sizeBytes: number; author?: string };
   group?: { groupId: string };
+  channel?: { channelId: string; name: string; dm?: true };
+  retry?: boolean;
 }
 
 export interface SurfaceContextRequest {

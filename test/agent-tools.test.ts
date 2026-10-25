@@ -287,7 +287,7 @@ function fakeToolContext(sink?: { lastExecOpts?: Parameters<ToolContext["execute
     async webhookDisable() {
       return { ok: true };
     },
-    soulRead() {
+    async soulRead() {
       return { effectiveSoul: "Org policy.\n\nBe terse.", soul: "Be terse.", soulVersion: 3 };
     },
     async soulWrite() {
@@ -2297,7 +2297,7 @@ test("guidance conversation scope with no own instructions does not return inher
   for (const soul of [null, ""]) {
     const tc: ToolContext = {
       ...fakeToolContext(),
-      soulRead: () => ({ effectiveSoul: "Org policy.", soul, soulVersion: 0 }),
+      soulRead: async () => ({ effectiveSoul: "Org policy.", soul, soulVersion: 0 }),
     };
     assert.equal(
       textOut(await call(tool("guidance", tc), { action: "read", scope: "conversation" })),
@@ -2310,7 +2310,7 @@ test("guidance read then replace keeps inherited policy out of saved instruction
   let soul = "Be terse.";
   const tc: ToolContext = {
     ...fakeToolContext(),
-    soulRead: () => ({ effectiveSoul: `Org policy.\n\n${soul}`, soul, soulVersion: 3 }),
+    soulRead: async () => ({ effectiveSoul: `Org policy.\n\n${soul}`, soul, soulVersion: 3 }),
     async soulWrite(content) {
       soul = content;
       return { ok: true, version: 4 };
@@ -2375,7 +2375,7 @@ test("guidance edit swaps one exact passage in either scope and refuses ambiguou
       setCalls.push({ bots, ambientEnabled });
       return { ok: true, orders };
     },
-    soulRead() {
+    async soulRead() {
       return {
         effectiveSoul: "Org policy.\n\nBe terse. Use $1 sparingly.",
         soul: "Be terse. Use $1 sparingly.",
@@ -2424,7 +2424,7 @@ test("guidance surfaces the channel bot ledger and cross-scope note on read", as
     async getStandingOrder() {
       return { ok: true, orders: "watch the Q3 launch", bots: { newsbot: { mode: "rollup", rollupHours: 6 } } };
     },
-    soulRead() {
+    async soulRead() {
       return { effectiveSoul: "Org policy.\n\nBe terse.", soul: "Be terse.", soulVersion: 3 };
     },
   };
@@ -2460,7 +2460,7 @@ test("control tools degrade to a crisp [error] when the turn has no self-API (CO
     async getStandingOrder() {
       return { ok: false, message: "standing orders aren't available on this turn" };
     },
-    soulRead() {
+    async soulRead() {
       return CONTROL_UNAVAILABLE;
     },
   };

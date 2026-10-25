@@ -36,16 +36,11 @@ export function approvalCardDestination(ask: KeychainAsk): Destination | null {
   const own = samePerson(ask.ownerId, ask.requesterId);
   if (d?.type === "web" && own) return null;
   const caps = d ? surfaceCapabilities(surfaceForDeliveryType(d.type)) : undefined;
-  if (caps && !caps.keychainCardInConversation && caps.approvalCardType)
-    return {
-      ...principalDestination(ask.ownerId, ask.requesterId),
-      type: caps.approvalCardType,
-      keychainAskId: ask.id,
-    };
   if (
-    d?.type === "principal"
+    caps?.keychainCardInConversation !== false &&
+    (d?.type === "principal"
       ? samePerson(d.target, ask.ownerId)
-      : d && d.type !== "web" && d.audienceScopeId === ask.requesterScopeId
+      : d && d.type !== "web" && d.audienceScopeId === ask.requesterScopeId)
   )
     return { ...d!, keychainAskId: ask.id };
   return { ...principalDestination(ask.ownerId, ask.requesterId), keychainAskId: ask.id };

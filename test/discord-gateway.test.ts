@@ -3,11 +3,16 @@ import { test } from "node:test";
 import {
   createUserClassifier,
   memberFacts,
-  cachedViewers,
+  channelViewers,
   createChannelKind,
+  createDiscordChannels,
+  createDiscordHistoryReader,
   createStakeHistory,
   toInbound,
 } from "../src/discord/gateway.ts";
+import { withReplyContext } from "../src/discord/forwards.ts";
+import { ChannelType, PermissionFlagsBits } from "discord.js";
+import { noLinkChannels } from "./support/discord-channels.ts";
 
 const member = (id: string, roles: string[], bot = false, guildId = "900") => ({
   id,
@@ -84,13 +89,13 @@ test("memberFacts excludes the role whose id equals the member guild id", () => 
   assert.deepEqual(facts.roleIds, ["r1", "r2"]);
 });
 
-test("cachedViewers returns not_a_guild_channel when channel is not in cache", () => {
+test("channelViewers returns not_a_guild_channel when channel is not in cache", async () => {
   const client = { channels: { cache: new Map() } };
-  const res = cachedViewers(client as never, "unknown");
+  const res = await channelViewers(noLinkChannels(client), "unknown");
   assert.deepEqual(res, { ok: false, reason: "not_a_guild_channel" });
 });
 
-test("cachedViewers returns viewers for a guild channel", () => {
+test("channelViewers returns viewers for a guild channel", async () => {
   const g = guild("900", [member("1", ["staff"]), member("2", [])]);
   const channel = {
     id: "c1",
@@ -99,12 +104,79 @@ test("cachedViewers returns viewers for a guild channel", () => {
     permissionsFor: (m: { id: string }) => ({ has: () => m.id === "1" }),
   };
   const client = { channels: { cache: new Map([["c1", channel]]) } };
-  const res = cachedViewers(client as never, "c1");
+  const res = await channelViewers(noLinkChannels(client), "c1");
   assert.equal(res.ok, true);
   if (res.ok) {
     assert.equal(res.guildId, "900");
     assert.equal(res.members.length, 1);
     assert.equal(res.members[0]!.userId, "1");
+  }
+});
+
+function threadsUnder(threadType: ChannelType, fetchMembers: () => Promise<Map<string, unknown>>) {
+  const g = guild("900", [member("1", ["staff"]), member("2", ["staff"]), member("3", []), member("4", [])]);
+  const parent = {
+    id: "c1",
+    guild: g,
+    isThread: () => false,
+    permissionsFor: (m: { id: string }) => ({
+      has: (p: bigint | bigint[]) => m.id !== "4" && (p === PermissionFlagsBits.ManageThreads ? m.id === "2" : true),
+    }),
+  };
+  const thread = {
+    id: "t1",
+    type: threadType,
+    parent,
+    parentId: "c1",
+    guild: g,
+    isThread: () => true,
+    members: { fetch: fetchMembers },
+  };
+  return {
+    channels: {
+      cache: new Map<string, unknown>([
+        ["c1", parent],
+        ["t1", thread],
+      ]),
+    },
+  };
+}
+
+test("a private thread's viewers are its members plus thread managers, never the rest of the parent", async () => {
+  const client = threadsUnder(ChannelType.PrivateThread, async () => new Map([["1", {}]]));
+  const res = await channelViewers(noLinkChannels(client), "t1");
+  assert.deepEqual(res.ok && res.members.map((m) => m.userId), ["1", "2"]);
+  const parent = await channelViewers(noLinkChannels(client), "c1");
+  assert.deepEqual(parent.ok && parent.members.map((m) => m.userId), ["1", "2", "3"]);
+  const publicThread = await channelViewers(
+    noLinkChannels(threadsUnder(ChannelType.PublicThread, async () => new Map())),
+    "t1",
+  );
+  assert.deepEqual(publicThread.ok && publicThread.members.map((m) => m.userId), ["1", "2", "3"]);
+});
+
+test("a private thread whose members cannot be fetched is unknown, and a deleted one is not a guild channel", async () => {
+  const flaky = threadsUnder(ChannelType.PrivateThread, async () => {
+    throw Object.assign(new Error("boom"), { status: 500 });
+  });
+  assert.deepEqual(await channelViewers(noLinkChannels(flaky), "t1"), { ok: false, reason: "members_not_ready" });
+  const gone = threadsUnder(ChannelType.PrivateThread, async () => {
+    throw Object.assign(new Error("Unknown Channel"), { code: 10003 });
+  });
+  assert.deepEqual(await channelViewers(noLinkChannels(gone), "t1"), { ok: false, reason: "not_a_guild_channel" });
+});
+
+test("createChannelKind gates a private thread on the thread itself and a public thread on its parent", async () => {
+  for (const [type, expected] of [
+    [ChannelType.PrivateThread, "t1"],
+    [ChannelType.PublicThread, "c1"],
+  ] as const) {
+    const client = threadsUnder(type, async () => new Map());
+    const withFetch = { channels: { ...client.channels, fetch: async (id: string) => client.channels.cache.get(id) } };
+    assert.deepEqual(await createChannelKind(noLinkChannels(withFetch))("t1"), {
+      kind: "guild",
+      baseChannelId: expected,
+    });
   }
 });
 
@@ -125,7 +197,7 @@ test("createChannelKind handles DM and guild channels", async () => {
       },
     },
   };
-  const kindFn = createChannelKind(client as never);
+  const kindFn = createChannelKind(noLinkChannels(client));
   assert.deepEqual(await kindFn("dm1"), { kind: "dm", recipientId: "u1" });
   assert.deepEqual(await kindFn("g1"), { kind: "guild", baseChannelId: "g1" });
   assert.equal(await kindFn("missing"), null);
@@ -145,7 +217,7 @@ test("createStakeHistory fetches recent messages", async () => {
       },
     },
   };
-  const stakeHistory = createStakeHistory(client as never);
+  const stakeHistory = createStakeHistory(noLinkChannels(client));
   const history = await stakeHistory("t1");
   assert.deepEqual(history, [{ authorId: "u1", mentionedUserIds: ["bot"] }]);
 });
@@ -176,4 +248,151 @@ test("toInbound maps discord message correctly", () => {
   assert.equal(inbound.content, "hello world");
   assert.deepEqual(inbound.mentionedUserIds, ["bot1"]);
   assert.equal(inbound.attachments.length, 1);
+});
+
+const att = (name: string) => ({ url: `https://cdn/${name}`, name, contentType: "text/plain", size: 7 });
+const baseMsg = {
+  id: "m1",
+  channelId: "c1",
+  guildId: "g1",
+  channel: { isThread: () => false, name: "eng" },
+  author: { id: "a1", username: "alice", bot: false, globalName: null },
+  member: null,
+  mentions: { users: new Map() },
+  attachments: new Map(),
+};
+
+test("toInbound renders forwarded snapshots after the text and carries their attachments", () => {
+  const inbound = toInbound({
+    ...baseMsg,
+    content: "look at this",
+    attachments: new Map([["a", att("mine.txt")]]),
+    messageSnapshots: new Map([
+      ["s1", { content: "original words", attachments: new Map([["b", att("theirs.txt")]]) }],
+      ["s2", { content: "", attachments: new Map() }],
+    ]),
+  } as never);
+  assert.equal(inbound.content, "look at this\n[forwarded message] original words\n[forwarded message]");
+  assert.deepEqual(
+    inbound.attachments.map((a) => a.name),
+    ["mine.txt", "theirs.txt"],
+  );
+});
+
+test("toInbound renders at most five forwarded snapshots", () => {
+  const snapshots = new Map(
+    Array.from({ length: 7 }, (_, i) => [`s${i}`, { content: `fw${i}`, attachments: new Map() }] as const),
+  );
+  const inbound = toInbound({ ...baseMsg, content: "x", messageSnapshots: snapshots } as never);
+  assert.equal(inbound.content.split("\n").length, 6);
+  assert.ok(inbound.content.includes("fw4"));
+  assert.ok(!inbound.content.includes("fw5"));
+});
+
+test("toInbound with no snapshots leaves the content untouched", () => {
+  assert.equal(toInbound({ ...baseMsg, content: "plain", messageSnapshots: new Map() } as never).content, "plain");
+});
+
+test("withReplyContext prefixes the referenced message with its author and a one-line excerpt", async () => {
+  const msg = {
+    reference: { messageId: "p1", type: 0 },
+    fetchReference: async () => ({
+      member: { displayName: "Bo" },
+      author: { globalName: null, username: "bo" },
+      content: "  the build\nis   red ",
+    }),
+  };
+  assert.equal(await withReplyContext(msg as never, "why?"), "[in reply to Bo] the build is red\nwhy?");
+});
+
+test("withReplyContext clips a long referenced message", async () => {
+  const msg = {
+    reference: { messageId: "p1", type: 0 },
+    fetchReference: async () => ({
+      member: null,
+      author: { globalName: "Bo", username: "bo" },
+      content: "z".repeat(400),
+    }),
+  };
+  assert.equal(await withReplyContext(msg as never, "ok"), `[in reply to Bo] ${"z".repeat(300)}…\nok`);
+});
+
+test("withReplyContext leaves text alone for plain messages, forwards and unreadable references", async () => {
+  let fetched = 0;
+  const fetchReference = async () => {
+    fetched += 1;
+    throw new Error("Unknown Message");
+  };
+  assert.equal(await withReplyContext({ reference: null, fetchReference } as never, "t"), "t");
+  assert.equal(await withReplyContext({ reference: { messageId: "p1", type: 1 }, fetchReference } as never, "t"), "t");
+  assert.equal(fetched, 0);
+  assert.equal(await withReplyContext({ reference: { messageId: "p1", type: 0 }, fetchReference } as never, "t"), "t");
+  assert.equal(fetched, 1);
+});
+
+test("history rows include forwarded snapshot text", async () => {
+  const messages = new Map([
+    [
+      "1300000000000000001",
+      {
+        id: "1300000000000000001",
+        content: "fyi",
+        author: { id: "1", globalName: null, username: "alice", bot: false },
+        messageSnapshots: new Map([["s", { content: "inner", attachments: new Map() }]]),
+        reactions: { cache: new Map() },
+      },
+    ],
+  ]);
+  const channel = {
+    id: "c1",
+    isTextBased: () => true,
+    isThread: () => false,
+    messages: { fetch: async () => messages },
+  };
+  const reader = createDiscordHistoryReader({
+    channels: noLinkChannels({ channels: { cache: new Map([["c1", channel]]), fetch: async () => channel } } as never),
+    guildIds: new Set(["g1"]),
+    hydrator: { ready: () => true },
+  });
+  const rows = await reader.recent("c1", { count: 5 });
+  assert.equal(rows[0]!.text, "fyi\n[forwarded message] inner");
+});
+
+test("every channel the gateway resolves links a private thread before returning it, and fails when the link cannot be written", async () => {
+  const thread = (id: string, type: ChannelType) => ({
+    id,
+    type,
+    parentId: "c1",
+    name: id,
+    guildId: "g1",
+    isTextBased: () => true,
+  });
+  const cache = new Map([
+    ["p1", thread("p1", ChannelType.PrivateThread)],
+    ["u1", thread("u1", ChannelType.PublicThread)],
+  ]);
+  const client = {
+    channels: { cache, fetch: async (id: string) => cache.get(id) ?? thread(id, ChannelType.PrivateThread) },
+  };
+  const links: string[] = [];
+  const channels = createDiscordChannels(client as never, async (threadId, parentId) => {
+    links.push(`${threadId}>${parentId}`);
+  });
+  await channels.fetch("p2");
+  await channels.cached("p1");
+  await channels.cached("u1");
+  await channels.fetch("u1");
+  assert.deepEqual(links, ["p2>c1", "p1>c1"]);
+  const failing = createDiscordChannels(client as never, async () => {
+    throw new Error("store down");
+  });
+  await assert.rejects(failing.fetch("p2"), /store down/);
+  await assert.rejects(failing.cached("p1"), /store down/);
+  const reader = (on: typeof channels) =>
+    createDiscordHistoryReader({ channels: on, guildIds: new Set(["g1"]), hydrator: { ready: () => true } });
+  links.length = 0;
+  assert.deepEqual(await reader(channels).find("p1"), [{ id: "p1", name: "p1" }]);
+  assert.deepEqual(links, ["p1>c1"]);
+  await assert.rejects(reader(failing).find("p1"), /store down/);
+  assert.deepEqual(await channelViewers(failing, "p1"), { ok: false, reason: "members_not_ready" });
 });

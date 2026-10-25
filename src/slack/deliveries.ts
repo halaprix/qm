@@ -34,6 +34,8 @@ import { cleanAgentReplyForSlack, stripSlackDirectives } from "./messaging.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
 import { slackErrorCode } from "./payloads.ts";
 import { relaySenderAttribution } from "../reach/reach.ts";
+import { sessionWebUrl } from "../surfaces/approval-limits.ts";
+import { runIdOfDeliveryKey } from "../delivery/run-result-delivery.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
 const SLOW_DRAIN_ALARM_MS = 120_000;
@@ -205,7 +207,7 @@ export function createDeliveryPoller(deps: {
         const destinationClient = deliveryClient(defaultClient, d.destination);
         if (!destinationClient) return;
         const client = destinationClient;
-        const runId = d.idempotencyKey?.startsWith("run:") ? d.idempotencyKey.slice("run:".length) : undefined;
+        const runId = runIdOfDeliveryKey(d.idempotencyKey);
         const namespace = deps.externalNamespace?.(d.destination.slackAccountId ?? "default");
         if (
           namespace &&
@@ -427,7 +429,7 @@ export function createDeliveryPoller(deps: {
                     reason: commandApproval.reason ?? "Approval required",
                     ...(deps.webUiPublicUrl && commandApproval.sessionId
                       ? {
-                          originUrl: `${deps.webUiPublicUrl.trim().replace(/\/+$/, "")}/s/${encodeURIComponent(commandApproval.sessionId)}`,
+                          originUrl: sessionWebUrl(deps.webUiPublicUrl, commandApproval.sessionId),
                         }
                       : {}),
                   },

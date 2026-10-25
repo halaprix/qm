@@ -20,6 +20,7 @@ import {
 import { builtInModelCatalog, selectableCatalogForHarness, selectableModelCatalog } from "../../model/model-catalog.ts";
 import { errMessage } from "../../util/errors.ts";
 import { SoulUpdateDeniedError, type SessionPageStatus } from "../app-types.ts";
+import { ConfigInheritedError } from "../../resolution/config-store.ts";
 import { renderAgentApis } from "../agent-api-catalog.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS } from "../../auth/capability-token.ts";
 import { contentTypeWithUtf8Charset, pipeToResponse, sendJson } from "../http.ts";
@@ -1341,11 +1342,11 @@ async function putChannelHeaderPin(ctx: ApiCtx): Promise<void> {
   });
 }
 
-function getSoul(ctx: ApiCtx): void {
+async function getSoul(ctx: ApiCtx): Promise<void> {
   const { res, app, url, capability } = ctx;
   const scopeIdVal = capability?.scopeId ?? url.searchParams.get("scopeId");
   if (!scopeIdVal) return sendJson(res, 400, { error: "bad_request", message: "scopeId required" });
-  return sendJson(res, 200, app.getSoul(scopeIdVal));
+  return sendJson(res, 200, await app.getSoul(scopeIdVal));
 }
 
 export async function postSoul(ctx: ApiCtx): Promise<void> {
@@ -1383,6 +1384,7 @@ export async function postSoul(ctx: ApiCtx): Promise<void> {
   } catch (e) {
     if (e instanceof SoulUpdateDeniedError)
       return sendJson(res, 403, { error: "soul_update_denied", message: e.message });
+    if (e instanceof ConfigInheritedError) return sendJson(res, 409, { error: "config_inherited", message: e.message });
     return sendJson(res, 500, { error: "soul_update_failed", message: errMessage(e) });
   }
 }

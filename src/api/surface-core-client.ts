@@ -25,7 +25,11 @@ import type { LeaderLease } from "../persistence/leader-lease.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
 import type { KeychainApprovals } from "../credentials/keychain-approval.ts";
 import type { IngestEvent } from "../surface-cache/surface-cache.ts";
+import type { SurfaceCache } from "../surface-cache/surface-cache.ts";
+import type { MemoryService } from "../memory/memory-service.ts";
+import { scopeId } from "../types.ts";
 import { decideDeploymentAccess } from "../deploy/access-decision.ts";
+import { runDeliveryKey } from "../delivery/run-result-delivery.ts";
 
 interface SurfaceRunHooks {
   onReplying?(): void;
@@ -54,6 +58,7 @@ export interface SurfaceCoreClient {
   readBlob(blobId: string): Promise<Buffer>;
   readFileArtifact(artifactId: string, viewerId: string): Promise<Buffer>;
   ingestSurfaceEvents(events: IngestEvent[], self?: { name?: string; mentionId?: string }): Promise<void>;
+  noteSurfaceHistoryGap(container: string, note: string): Promise<void>;
   ackRunDelivery(runId: string): Promise<void>;
   reportRunEditRef(runId: string, editRef: string): Promise<void>;
   claimDeliveries(type: string, claimMs: number): Promise<Delivery[]>;
@@ -62,6 +67,7 @@ export interface SurfaceCoreClient {
   reportDeliveryUndeliverable(id: string, reason: string): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
   holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
+  holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   pendingContextRequests(): Promise<SurfaceContextRequest[]>;
   onContextRequest(listener: (request: SurfaceContextRequest) => void): () => void;
   fulfillContextRequest(id: string, outcome: { result?: SurfaceContextResult; error?: string }): Promise<void>;
@@ -92,6 +98,8 @@ export interface SurfaceCoreClientDeps {
   leaderLease: LeaderLease;
   errors?: ErrorLog;
   keychainApprovals?: KeychainApprovals;
+  surfaceCache?: SurfaceCache;
+  memory?: MemoryService;
 }
 
 const RUN_FALLBACK_POLL_MS = 1_000;
@@ -243,8 +251,14 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
       await deps.app.ingestSurfaceEvents(events, surface, self);
     },
 
+    async noteSurfaceHistoryGap(container, note) {
+      if (!deps.memory) return;
+      const kind = (await deps.surfaceCache?.containerState(container))?.kind;
+      await deps.memory.capture(scopeId(kind === "group" ? "group" : "channel", container), [note], Date.now());
+    },
+
     async ackRunDelivery(runId) {
-      await deps.app.ackDeliveryByKey(`run:${runId}`);
+      await deps.app.ackDeliveryByKey(runDeliveryKey(runId));
     },
 
     async reportRunEditRef(runId, editRef) {
@@ -282,6 +296,10 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
       return lease.hold(`${surface}:delivery-dispatch`, fn);
     },
 
+    holdDirectorySync(fn) {
+      return lease.hold(`${surface}:directory-sync`, fn);
+    },
+
     async ackDelivery(id, body) {
       if (body?.recipientThreadRef) await deps.app.recordPrincipalDelivery(id, body.recipientThreadRef);
       await deps.app.ackDelivery(id, body?.slackApiMs);
@@ -313,9 +331,6 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
     async fulfillContextRequest(id, outcome) {
       await deps.app
         .fulfillContextRequest(id, outcome)
-        .then((ok) => {
-          if (!ok) return;
-        })
         .catch(swallowAs("surface-core-client: fulfill context request", undefined));
     },
   };

@@ -1,6 +1,7 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
 import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
+import { APPROVAL_SUMMARY_MAX, INLINE_COMMAND_MAX, isHttpUrl, sessionWebUrl } from "../surfaces/approval-limits.ts";
 import type { Delivery } from "../types.ts";
 import { DISCORD_MESSAGE_LIMIT } from "./format.ts";
 import type { OutboundMessage } from "./sender.ts";
@@ -55,12 +56,26 @@ function card(kind: CardKind, actions: readonly string[], deliveryId: string, co
 
 type StoredApprovalView = NonNullable<Awaited<ReturnType<SurfaceCoreClient["getApproval"]>>>;
 
-function commandCard(deliveryId: string, a: StoredApprovalView): OutboundMessage {
+function commandCard(deliveryId: string, a: StoredApprovalView, webUiPublicUrl: string | undefined): OutboundMessage {
+  const title = a.kind === "input" ? "**Release screened output?**" : "**Approval needed**";
+  const summary = a.summary?.slice(0, APPROVAL_SUMMARY_MAX) ?? "";
+  const body = [title, summary, "```", a.command, "```", a.reason ?? ""].filter(Boolean).join("\n");
+  if (a.command.length > INLINE_COMMAND_MAX || body.length > DISCORD_MESSAGE_LIMIT) {
+    const place =
+      isHttpUrl(webUiPublicUrl) && a.sessionId ? sessionWebUrl(webUiPublicUrl, a.sessionId) : "this conversation in QM";
+    const link = [
+      title,
+      summary,
+      `This is too long to show in Discord. Open ${place} on the web to review and decide.`,
+      a.reason ?? "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return card("cmd", ["deny"], deliveryId, link);
+  }
   const actions = CARD_ACTIONS.cmd.filter(
     (x) => !(x === "session" && a.grantModes?.session === false) && !(x === "always" && a.grantModes?.always === false),
   );
-  const title = a.kind === "input" ? "**Release screened output?**" : "**Approval needed**";
-  const body = [title, a.summary ?? "", "```", a.command, "```", a.reason ?? ""].filter(Boolean).join("\n");
   return card("cmd", actions, deliveryId, body);
 }
 
@@ -85,12 +100,13 @@ function keychainCard(deliveryId: string, v: KeychainApprovalView): OutboundMess
 
 export function createCardRenderer(
   core: Pick<SurfaceCoreClient, "getApproval" | "keychainApprovals">,
+  webUiPublicUrl?: string,
 ): (d: Delivery) => Promise<OutboundMessage | null> {
   return async (d) => {
     const dest = d.destination;
     if (dest.commandApprovalId) {
       const approval = await core.getApproval(dest.commandApprovalId);
-      return approval ? commandCard(d.id, approval) : { content: APPROVAL_EXPIRED_TEXT };
+      return approval ? commandCard(d.id, approval, webUiPublicUrl) : { content: APPROVAL_EXPIRED_TEXT };
     }
     if (dest.keychainAskId) {
       const view = await core.keychainApprovals?.get(dest.keychainAskId, dest.target);

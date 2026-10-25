@@ -131,7 +131,10 @@ const discordRuntime = createSurfaceRuntimeReconciler({
   startPaused: Boolean(config.backgroundDeploymentId),
   load: () => loadDiscordRuntimeConfig(built.discordInstallation, process.env),
   startPlugin: async (desired) => {
-    const plugin = createDiscordPlugin(desired, built.discordCore, { drainTimeoutMs: config.shutdownDrainMs });
+    const plugin = createDiscordPlugin(desired, built.discordCore, {
+      drainTimeoutMs: config.shutdownDrainMs,
+      webUiPublicUrl: config.publicWebUrl,
+    });
     await plugin.start();
     return plugin;
   },

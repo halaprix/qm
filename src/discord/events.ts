@@ -1,6 +1,6 @@
 import type { CoreTurnBody } from "../api/surface-core-client.ts";
 import type { ActorAssertion } from "../types.ts";
-import { DISCORD_SURFACE } from "./config.ts";
+import { discordDmThreadRef, discordThreadRef } from "./config.ts";
 
 export interface DiscordAttachmentRef {
   url: string;
@@ -25,12 +25,12 @@ export interface DiscordInbound {
 
 export type Routed =
   | { target: "dm"; text: string }
-  | { target: "new-thread"; text: string }
+  | { target: "new-thread"; text: string; title: string }
   | { target: "thread"; text: string; unprompted: boolean };
 
 export type DiscordConversationTarget =
   | { kind: "dm"; channelId: string }
-  | { kind: "thread"; threadId: string; parentChannelId: string; channelName?: string };
+  | { kind: "thread"; threadId: string; scopeChannelId: string; channelName?: string };
 
 const THREAD_NAME_MAX = 100;
 
@@ -38,15 +38,21 @@ export function needsStakeLookup(msg: DiscordInbound, botUserId: string): boolea
   return msg.threadParentId !== null && msg.authorId !== botUserId && !msg.mentionedUserIds.includes(botUserId);
 }
 
-export function routeMessage(msg: DiscordInbound, botUserId: string, guildIds: ReadonlySet<string>): Routed | null {
-  if (msg.authorIsBot || msg.authorId === botUserId) return null;
-  const text = msg.content.replace(new RegExp(`<@!?${botUserId}>`, "g"), "").trim();
+export function routeMessage(
+  msg: DiscordInbound,
+  bot: { id: string; name: string },
+  guildIds: ReadonlySet<string>,
+): Routed | null {
+  const botUserId = bot.id;
+  if (msg.authorId === botUserId) return null;
+  const mention = new RegExp(`<@!?${botUserId}>`, "g");
+  const text = msg.content.replace(mention, `@${bot.name}`).trim();
   if (!text && msg.attachments.length === 0) return null;
   if (msg.guildId === null) return { target: "dm", text };
   if (!guildIds.has(msg.guildId)) return null;
   const mentioned = msg.mentionedUserIds.includes(botUserId);
   if (msg.threadParentId !== null) return { target: "thread", text, unprompted: !mentioned };
-  return mentioned ? { target: "new-thread", text } : null;
+  return mentioned ? { target: "new-thread", text, title: msg.content.replace(mention, "").trim() } : null;
 }
 
 export function conversationFor(
@@ -54,11 +60,11 @@ export function conversationFor(
   audience?: ActorAssertion[],
 ): CoreTurnBody["conversation"] {
   if (target.kind === "dm")
-    return { kind: "dm", threadRef: `${DISCORD_SURFACE}:dm:${target.channelId}`, channelRef: target.channelId };
+    return { kind: "dm", threadRef: discordDmThreadRef(target.channelId), channelRef: target.channelId };
   return {
     kind: "channel",
-    threadRef: `${DISCORD_SURFACE}:th:${target.threadId}`,
-    channelRef: target.parentChannelId,
+    threadRef: discordThreadRef(target.threadId),
+    channelRef: target.scopeChannelId,
     ...(target.channelName ? { channelName: target.channelName } : {}),
     ...(audience ? { audience } : {}),
   };

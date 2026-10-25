@@ -4,9 +4,7 @@ import type { SlackHistoryReader } from "./history.ts";
 import { swallow, swallowAs } from "../util/errors.ts";
 import { WebClient } from "@slack/web-api";
 import {
-  type RecentMessage,
   type SlackFile,
-  buildContextWindow,
   downloadSlackFile,
   isExternallyShared,
   isOversize,
@@ -14,6 +12,7 @@ import {
   oversizeMsg,
   parseDeliveryTarget,
 } from "./lib.ts";
+import { type RecentMessage, buildContextWindow, formatSlackTs } from "../surfaces/conversation.ts";
 import { SLACK_AUTH_ERRORS, type SlackHistoryMessage, parseMessageList, slackErrorCode } from "./payloads.ts";
 import type { SlackCoreClient, SurfaceContextRequest } from "../api/slack-core-client.ts";
 import type { Directory } from "./directory.ts";
@@ -65,7 +64,7 @@ export function createSurfaceContextFulfiller(deps: {
           ...(m?.user ? { authorId: String(m.user) } : {}),
         }))
         .filter((m) => m.ts);
-      await post(buildContextWindow(shaped, { count }));
+      await post(buildContextWindow(shaped, { count, formatTs: formatSlackTs }));
     } catch (err) {
       if (viewerToken && SLACK_AUTH_ERRORS.has(slackErrorCode(err) ?? "")) {
         await post({ messages: [], liveSearch: "unconnected" });
@@ -289,6 +288,7 @@ export function createSurfaceContextFulfiller(deps: {
       await post({
         ...buildContextWindow(shaped, {
           count,
+          formatTs: formatSlackTs,
           ...(typeof q.match === "string" && q.match ? { match: q.match } : {}),
           scanHasMore: hasMore,
           nameById,

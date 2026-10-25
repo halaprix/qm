@@ -119,6 +119,19 @@ test("eager membership maintenance: ingest keeps a container's members fresh, un
   assert.equal((await cache.listContainers()).find((c) => c.container === "C1")?.kind, "channel");
 });
 
+test("listContainers narrows to matching container ids before the limit applies", async () => {
+  const cache = createMemorySurfaceCache();
+  await cache.ingest([
+    { container: "C1", ts: "1.0", text: "slack", createdAt: 1 },
+    { container: "1500000000000000001", ts: "1500000000000000009", text: "discord", createdAt: 2 },
+  ]);
+  const found = await cache.listContainers({ limit: 1, containerPattern: "^\\d{17,20}$" });
+  assert.deepEqual(
+    found.map((c) => [c.container, c.messageCount]),
+    [["1500000000000000001", 1]],
+  );
+});
+
 test("oldest_ts is the numeric floor of ingested ts — compared numerically, not lexically", async () => {
   const cache = createMemorySurfaceCache();
   await cache.ingest([{ container: "C1", ts: "1000.1", text: "newest", createdAt: 3 }]);

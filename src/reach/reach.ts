@@ -11,6 +11,9 @@ import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { ChannelResolution, GroupResolution, RecipientResolution } from "../directory/directory-store.ts";
 import { isVisible } from "../directory/visibility.ts";
 import { swallow } from "../util/errors.ts";
+import { DISCORD_SURFACE } from "../discord/config.ts";
+
+export type SurfacePull = (query: SurfaceContextQuery) => Promise<SurfaceContextResult | null>;
 
 export function principalDestination(target: string, onBehalfOf: string): Destination {
   return { type: "principal", target, audienceScopeId: makeScopeId("personal", target), onBehalfOf };
@@ -25,6 +28,7 @@ export interface ReachDirectory {
   directoryMember(principalId: string): Promise<{ type: string } | null>;
   openGroup?(participants: readonly string[]): Promise<{ groupId: string } | { error: string } | null>;
   registerGroup?(groupId: string, participants: readonly string[]): Promise<void>;
+  discordLookup?: SurfacePull;
 }
 
 const MAX_GROUP_DM_PARTICIPANTS = 8;
@@ -39,7 +43,7 @@ function groupTooLarge(): Extract<ReachResolution, { ok: false }> {
 }
 
 export async function openGroupViaSurface(
-  pull: (query: SurfaceContextQuery) => Promise<SurfaceContextResult | null>,
+  pull: SurfacePull,
   participants: readonly string[],
 ): Promise<{ groupId: string } | { error: string } | null> {
   const result = await pull({ count: 1, openGroup: { participants: [...participants] } });
@@ -141,6 +145,18 @@ export async function resolveReachTarget(
   }
   if (wantsChannel) {
     const r = await dir.resolveChannel(target.channel!);
+    if (r.kind === "none" && dir.discordLookup) {
+      const found = await dir.discordLookup({ lookupChannel: target.channel!, postable: true, viewer: authorityId });
+      if (found?.channel) {
+        const { channelId, name } = found.channel;
+        return {
+          ok: true,
+          destination: { type: DISCORD_SURFACE, target: channelId, audienceScopeId: makeScopeId("channel", channelId) },
+          channel: { channelId, name },
+        };
+      }
+      if (found?.note) return { ok: false, status: 403, error: "discord_channel_unavailable", message: found.note };
+    }
     if (r.kind === "none") {
       return {
         ok: false,

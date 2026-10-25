@@ -3,15 +3,19 @@ import { orgId as configOrgId } from "../config.ts";
 import { createHash } from "node:crypto";
 import { createPgPool, type PoolClient, withPgTransaction } from "../persistence/pg-pool.ts";
 import type { PrincipalType } from "../types.ts";
+import { discordExternalId } from "../discord/config.ts";
 import { foldPrincipalId, rosterIds } from "./person.ts";
 import {
   MAX_CANDIDATES,
+  mergeSlicePicks,
+  isDiscordMember,
   groupParticipantsKey,
   normDirectoryQuery,
   type ChannelMembership,
   type DirectoryChannel,
   type DirectoryMember,
   type DirectoryStore,
+  type SlicePick,
 } from "./directory-store.ts";
 
 const INITIAL_SCHEMA = [
@@ -142,6 +146,14 @@ function channelRow(r: Record<string, unknown>): DirectoryChannel {
   };
 }
 
+const DISCORD_ID_LIKE = `${likeEscape(discordExternalId(""))}%`;
+
+function internalRows(members: DirectoryMember[]): DirectoryMember[] {
+  const byId = new Map<string, DirectoryMember>();
+  for (const m of members) if (m.principalId && m.type === "internal") byId.set(m.principalId, m);
+  return [...byId.values()];
+}
+
 function hashRoster(rows: string[]): string {
   return createHash("sha256").update(rows.slice().sort().join("\n")).digest("hex");
 }
@@ -192,27 +204,37 @@ export function createPostgresDirectoryStore(connectionString: string): Director
   const orgId = configOrgId();
   const { q, pool } = createPgPool(connectionString, DIRECTORY_MIGRATIONS);
 
-  async function pick<T>(
-    query: string,
-    table: string,
+  async function insertMembers(client: PoolClient, internal: DirectoryMember[]): Promise<void> {
+    if (!internal.length) return;
+    await client.query(
+      `INSERT INTO directory_members (org_id, principal_id, display_name, display_name_lc, type, slack_id, avatar_url)
+       SELECT $1, * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])`,
+      [
+        orgId,
+        internal.map((m) => m.principalId),
+        internal.map((m) => m.displayName),
+        internal.map((m) => normDirectoryQuery(m.displayName)),
+        internal.map((m) => m.type),
+        internal.map((m) => m.slackId ?? null),
+        internal.map((m) => m.avatarUrl ?? null),
+      ],
+    );
+  }
+
+  async function pickLabel<T>(
+    qn: string,
+    from: string,
     idCol: string,
     labelLcCol: string,
     cols: string,
     map: (r: Record<string, unknown>) => T,
-  ): Promise<{ kind: "one"; item: T } | { kind: "ambiguous"; items: T[] } | { kind: "none" }> {
-    const qn = normDirectoryQuery(query);
-    if (!qn) return { kind: "none" };
-    const from = `FROM ${table} WHERE org_id = $1`;
-
-    const byId = await q(`SELECT ${cols} ${from} AND lower(${idCol}) = $2 LIMIT 1`, [orgId, qn]);
-    if (byId.length) return { kind: "one", item: map(byId[0]!) };
-
+  ): Promise<SlicePick<T>> {
     const exact = await q(
       `SELECT ${cols} ${from} AND ${labelLcCol} = $2 ORDER BY ${idCol} LIMIT ${MAX_CANDIDATES + 1}`,
       [orgId, qn],
     );
-    if (exact.length === 1) return { kind: "one", item: map(exact[0]!) };
-    if (exact.length > 1) return { kind: "ambiguous", items: exact.slice(0, MAX_CANDIDATES).map(map) };
+    if (exact.length === 1) return { kind: "one", item: map(exact[0]!), exact: true };
+    if (exact.length > 1) return { kind: "ambiguous", items: exact.slice(0, MAX_CANDIDATES).map(map), exact: true };
 
     const esc = likeEscape(qn);
     let pool2 = await q(
@@ -228,6 +250,30 @@ export function createPostgresDirectoryStore(connectionString: string): Director
     if (!pool2.length) return { kind: "none" };
     if (pool2.length === 1) return { kind: "one", item: map(pool2[0]!) };
     return { kind: "ambiguous", items: pool2.slice(0, MAX_CANDIDATES).map(map) };
+  }
+
+  async function pick<T>(
+    query: string,
+    table: string,
+    idCol: string,
+    labelLcCol: string,
+    cols: string,
+    map: (r: Record<string, unknown>) => T,
+    sliceByDiscord = false,
+  ): Promise<SlicePick<T>> {
+    const qn = normDirectoryQuery(query);
+    if (!qn) return { kind: "none" };
+    const from = `FROM ${table} WHERE org_id = $1`;
+
+    const byId = await q(`SELECT ${cols} ${from} AND lower(${idCol}) = $2 LIMIT 1`, [orgId, qn]);
+    if (byId.length) return { kind: "one", item: map(byId[0]!) };
+
+    if (!sliceByDiscord) return pickLabel(qn, from, idCol, labelLcCol, cols, map);
+    const slices = [
+      `${from} AND ${idCol} NOT LIKE '${DISCORD_ID_LIKE}'`,
+      `${from} AND ${idCol} LIKE '${DISCORD_ID_LIKE}'`,
+    ];
+    return mergeSlicePicks(await Promise.all(slices.map((s) => pickLabel(qn, s, idCol, labelLcCol, cols, map))));
   }
 
   async function swapIfChanged(
@@ -278,31 +324,29 @@ export function createPostgresDirectoryStore(connectionString: string): Director
 
   return {
     async replace(members, syncedAt) {
-      const byId = new Map<string, DirectoryMember>();
-      for (const m of members) if (m.principalId && m.type === "internal") byId.set(m.principalId, m);
-      const internal = [...byId.values()];
-
+      const internal = internalRows(members.filter((m) => !isDiscordMember(m)));
       const hash = hashRoster(
         internal.map((m) => `${m.principalId}|${m.displayName}|${m.type}|${m.slackId ?? ""}|${m.avatarUrl ?? ""}`),
       );
 
       return swapIfChanged("members_hash", hash, syncedAt, async (client) => {
-        await client.query("DELETE FROM directory_members WHERE org_id = $1", [orgId]);
-        if (internal.length) {
-          await client.query(
-            `INSERT INTO directory_members (org_id, principal_id, display_name, display_name_lc, type, slack_id, avatar_url)
-             SELECT $1, * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])`,
-            [
-              orgId,
-              internal.map((m) => m.principalId),
-              internal.map((m) => m.displayName),
-              internal.map((m) => normDirectoryQuery(m.displayName)),
-              internal.map((m) => m.type),
-              internal.map((m) => m.slackId ?? null),
-              internal.map((m) => m.avatarUrl ?? null),
-            ],
-          );
-        }
+        await client.query("DELETE FROM directory_members WHERE org_id = $1 AND principal_id NOT LIKE $2", [
+          orgId,
+          DISCORD_ID_LIKE,
+        ]);
+        await insertMembers(client, internal);
+      });
+    },
+
+    async replaceDiscord(members) {
+      const internal = internalRows(members.filter(isDiscordMember));
+      await withPgTransaction(await pool(), async (client) => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('directory'), hashtext($1))", [orgId]);
+        await client.query("DELETE FROM directory_members WHERE org_id = $1 AND principal_id LIKE $2", [
+          orgId,
+          DISCORD_ID_LIKE,
+        ]);
+        await insertMembers(client, internal);
       });
     },
 
@@ -689,7 +733,7 @@ export function createPostgresDirectoryStore(connectionString: string): Director
         [orgId, query.trim()],
       );
       if (bySlackId.length) return { kind: "one", member: memberRow(bySlackId[0]!) };
-      const m = await pick(query, "directory_members", "principal_id", "display_name_lc", MEMBER_COLS, memberRow);
+      const m = await pick(query, "directory_members", "principal_id", "display_name_lc", MEMBER_COLS, memberRow, true);
       if (m.kind === "one") return { kind: "one", member: m.item };
       if (m.kind === "ambiguous") return { kind: "ambiguous", candidates: m.items };
       return { kind: "none" };

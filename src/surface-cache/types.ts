@@ -97,6 +97,7 @@ interface RevisedSinceOpts {
 
 export interface SearchOpts {
   container?: string;
+  containerPattern?: string;
   limit?: number;
 }
 
@@ -112,6 +113,6 @@ export interface SurfaceCache {
   members(container: string): Promise<string[]>;
   isMember(container: string, principalId: string): Promise<boolean>;
   containerState(container: string): Promise<ContainerState | null>;
-  listContainers(opts?: { limit?: number }): Promise<ContainerSummary[]>;
+  listContainers(opts?: { limit?: number; containerPattern?: string }): Promise<ContainerSummary[]>;
   close(): Promise<void>;
 }

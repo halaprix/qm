@@ -521,3 +521,46 @@ test("pg directory: room membership follows a person's linked identities", { ski
     installPrincipalLinks(null);
   }
 });
+
+test("pg directory: the Slack swap and the Discord swap each leave the other's rows alone", { skip }, async () => {
+  const store = createPostgresDirectoryStore(URL!);
+  await seed(store);
+  await store.replaceDiscord([
+    { principalId: "discord:9", displayName: "Disc Dee", type: "internal", avatarUrl: "https://cdn.example/9.png" },
+  ]);
+  assert.equal((await store.list()).length, 5);
+  assert.equal((await store.get("discord:9"))?.avatarUrl, "https://cdn.example/9.png");
+  assert.equal((await store.resolve("Disc")).kind, "one");
+
+  await store.replace([{ principalId: "U-alice", displayName: "Alice Renamed", type: "internal" }]);
+  assert.deepEqual((await store.list()).map((m) => m.principalId).sort(), ["U-alice", "discord:9"]);
+
+  await store.replaceDiscord([]);
+  assert.deepEqual(
+    (await store.list()).map((m) => m.principalId),
+    ["U-alice"],
+  );
+});
+
+test("pg directory: an exact Slack name beats a Discord name that only starts with it", { skip }, async () => {
+  const store = createPostgresDirectoryStore(URL!);
+  await store.replace([{ principalId: "U-bea", displayName: "Bea", type: "internal" }]);
+  await store.replaceDiscord([{ principalId: "discord:6", displayName: "Bea Arthur", type: "internal" }]);
+  const r = await store.resolve("bea");
+  assert.equal(r.kind === "one" && r.member.principalId, "U-bea");
+  await store.replaceDiscord([{ principalId: "discord:6", displayName: "bea", type: "internal" }]);
+  assert.equal((await store.resolve("bea")).kind, "ambiguous");
+  await store.replaceDiscord([]);
+});
+
+test("pg directory: a Discord nickname never wins a name that a Slack member also matches", { skip }, async () => {
+  const store = createPostgresDirectoryStore(URL!);
+  await seed(store);
+  await store.replaceDiscord([{ principalId: "discord:5", displayName: "Alice", type: "internal" }]);
+  const r = await store.resolve("alice");
+  assert.equal(r.kind, "ambiguous");
+  if (r.kind === "ambiguous") assert.deepEqual(r.candidates.map((c) => c.principalId).sort(), ["U-alice", "discord:5"]);
+  assert.equal((await store.resolve("discord:5")).kind, "one");
+  await store.replaceDiscord([]);
+  assert.equal((await store.resolve("alice")).kind, "one");
+});

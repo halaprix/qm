@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENTS_PER_TURN } from "../surfaces/attachment-limits.ts";
 import { sleep } from "./util.ts";
 import { channelShareTs, parseUploadedFileIds, slackErrorCode } from "./payloads.ts";
 import { BlobTooLargeError } from "../persistence/blob-transfer.ts";
@@ -67,8 +68,6 @@ export function attachmentFromBytes(
     ...(author ? { author } : {}),
   };
 }
-
-export const MAX_ATTACHMENTS_PER_TURN = 10;
 
 const CAP_MB = Math.floor(MAX_ATTACHMENT_BYTES / 1_000_000);
 const capLabel = CAP_MB >= 1000 ? `${Math.round(CAP_MB / 1000)} GB` : `${CAP_MB} MB`;

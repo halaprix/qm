@@ -1,5 +1,5 @@
-import { DISCORD_DM_DELIVERY_TYPE } from "../discord/config.ts";
-import type { DiscordInstallationStore } from "../surfaces/discord-installation.ts";
+import { DISCORD_DM_DELIVERY_TYPE, discordUserIdOf } from "../discord/config.ts";
+import { discordActive, type DiscordInstallationStore } from "../surfaces/discord-installation.ts";
 import { reportFailureAs } from "../util/errors.ts";
 import type { DeliveryStore } from "./delivery-store.ts";
 
@@ -9,7 +9,6 @@ export function withPrincipalRouting(store: DeliveryStore, route: PrincipalRoute
   return {
     ...store,
     async enqueue(input) {
-      const original = await store.enqueue(input);
       if (
         input.destination.type !== "principal" ||
         input.destination.commandApprovalId ||
@@ -18,19 +17,28 @@ export function withPrincipalRouting(store: DeliveryStore, route: PrincipalRoute
         input.destination.delete ||
         input.destination.editRef
       ) {
-        return original;
+        return store.enqueue(input);
       }
-      try {
-        const type = await route(input.destination.target);
-        if (type) {
-          await store.enqueue({
+      const report = reportFailureAs("principal-routing discord copy", undefined);
+      const discordOnly = discordUserIdOf(input.destination.target) !== null;
+      const type = await route(input.destination.target).catch((err: unknown) => {
+        if (discordOnly) throw err;
+        report(err);
+        return null;
+      });
+      if (discordOnly) {
+        if (!type) throw new Error(`discord delivery unavailable for ${input.destination.target}`);
+        return store.enqueue({ ...input, destination: { ...input.destination, type } });
+      }
+      const original = await store.enqueue(input);
+      if (type) {
+        await store
+          .enqueue({
             ...input,
             destination: { ...input.destination, type, copyOf: original.id },
             idempotencyKey: `${input.idempotencyKey}:discord-dm`,
-          });
-        }
-      } catch (err) {
-        reportFailureAs("principal-routing discord copy", undefined)(err);
+          })
+          .catch(report);
       }
       return original;
     },
@@ -45,8 +53,9 @@ export function createDiscordPrincipalRoute(deps: {
   return async (principalId) => {
     if (!deps.linkedDiscordUserIds(principalId).length) return null;
     const status = await deps.installation.status();
-    if (status.disabled) return null;
-    if (status.configured) return status.principalDeliveries ? DISCORD_DM_DELIVERY_TYPE : null;
-    return deps.environmentConfigured ? DISCORD_DM_DELIVERY_TYPE : null;
+    if (!discordActive(status, deps.environmentConfigured)) return null;
+    return !status.configured || status.principalDeliveries || discordUserIdOf(principalId) !== null
+      ? DISCORD_DM_DELIVERY_TYPE
+      : null;
   };
 }

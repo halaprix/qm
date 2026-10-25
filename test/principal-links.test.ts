@@ -326,6 +326,19 @@ describe("linked sign-ins across the HTTP surface", () => {
     assert.ok(audit.some((e) => e.resource === `${OIDC} -> ${EMAIL}`));
   });
 
+  it("an admin can link a synced Discord directory member to its canonical principal", async () => {
+    await built.app.upsertDiscordDirectory([{ principalId: "discord:77", displayName: "Dee", type: "internal" }]);
+    const linked = await signed(
+      "POST",
+      "/v1/admin/principal-links",
+      JSON.stringify({ principalId: "discord:77", canonicalId: "casey@acme.test", evidence: EVIDENCE }),
+      admin,
+    );
+    assert.equal(linked.status, 200);
+    await built.principalLinks.unlink("discord:77");
+    await built.app.upsertDiscordDirectory([]);
+  });
+
   it("surfaces resolve a sign-in to its canonical principal", async () => {
     const r = await signed("GET", `/v1/principals/${encodeURIComponent(OIDC)}/canonical`);
     assert.equal(r.status, 200);

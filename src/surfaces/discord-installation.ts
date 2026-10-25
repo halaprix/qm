@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { decryptSecret, deriveConnectorKey, encryptSecret } from "../connectors/connector-client-store.ts";
+import { SNOWFLAKE } from "../util/snowflake.ts";
 import { discordPluginConfigFromEnv, type DiscordPluginConfig } from "../discord/config.ts";
 import type { ReloadableSurfaceConfig } from "./surface-runtime.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 
 export const DISCORD_API = "https://discord.com/api/v10";
-export const SNOWFLAKE = /^\d{17,20}$/;
 const MAX_IDS = 500;
 const DISCORD_API_TIMEOUT_MS = 10_000;
 
@@ -295,13 +295,16 @@ export function createDiscordInstallationStore(
         updatedAt,
         updatedBy,
       };
-      if (map.update) {
-        const record = await map.update(orgId, () => tombstone);
-        if (record) return;
-      }
       await map.put(orgId, tombstone);
     },
   };
+}
+
+export function discordActive(
+  status: Pick<DiscordInstallationStatus, "configured" | "disabled">,
+  environmentConfigured: boolean,
+): boolean {
+  return !status.disabled && (status.configured || environmentConfigured);
 }
 
 export function discordPluginConfigFromInstallation(i: DiscordInstallation): DiscordPluginConfig {

@@ -1,5 +1,6 @@
 import { PrincipalLinkError } from "../../../identity/principal-links.ts";
 import { adminStatusFromGrants } from "../../../admin/admin-service.ts";
+import { isDiscordMember } from "../../../directory/directory-store.ts";
 import { samePerson } from "../../../directory/person.ts";
 import { sendJson } from "../../http.ts";
 import { audit, authorizeAdmin, isObj, orgScope } from "../shared.ts";
@@ -13,7 +14,9 @@ const ADMIN_SIGN_IN_NEEDS_ADMIN_CANONICAL =
 async function directoryMember(deps: ApiCtx["deps"], id: string): Promise<boolean> {
   if (!deps.directory) return false;
   const trimmed = id.trim();
-  return (await deps.directory.list()).some((m) => samePerson(m.principalId, trimmed) || m.slackId === trimmed);
+  return (await deps.directory.list()).some(
+    (m) => !isDiscordMember(m) && (samePerson(m.principalId, trimmed) || m.slackId === trimmed),
+  );
 }
 
 export async function listPrincipalLinks(ctx: ApiCtx): Promise<void> {

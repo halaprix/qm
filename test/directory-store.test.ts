@@ -398,3 +398,26 @@ it("live channel observations survive older snapshots but yield to later removal
   const { directoryObservationCases } = await import("./support/directory-observation-cases.ts");
   await directoryObservationCases(createDirectoryStore());
 });
+
+it("an exact Slack name beats a Discord name that only starts with it", async () => {
+  const d = createDirectoryStore();
+  await d.replace([{ principalId: "U-alice", displayName: "Alice", type: "internal" }]);
+  await d.replaceDiscord([{ principalId: "discord:5", displayName: "Alice Cooper", type: "internal" }]);
+  const r = await d.resolve("alice");
+  assert.equal(r.kind === "one" && r.member.principalId, "U-alice");
+  await d.replaceDiscord([{ principalId: "discord:5", displayName: "alice", type: "internal" }]);
+  assert.equal((await d.resolve("alice")).kind, "ambiguous");
+});
+
+it("a Discord nickname never wins a name that a Slack member also matches", async () => {
+  const d = createDirectoryStore();
+  await d.replace([{ principalId: "U-alice", displayName: "Alice Smith", type: "internal" }]);
+  await d.replaceDiscord([{ principalId: "discord:5", displayName: "Alice", type: "internal" }]);
+  const r = await d.resolve("alice");
+  assert.equal(r.kind, "ambiguous");
+  if (r.kind === "ambiguous") assert.deepEqual(r.candidates.map((c) => c.principalId).sort(), ["U-alice", "discord:5"]);
+  const slackOnly = await d.resolve("Alice Smi");
+  assert.equal(slackOnly.kind, "one");
+  const byId = await d.resolve("discord:5");
+  assert.equal(byId.kind, "one");
+});

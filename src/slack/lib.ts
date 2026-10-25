@@ -58,7 +58,6 @@ export {
   isOversize,
   isTrustedSlackHost,
   attachmentFromBytes,
-  MAX_ATTACHMENTS_PER_TURN,
   oversizeMsg,
   downloadSlackFile,
   processInboundFiles,
@@ -75,37 +74,17 @@ export {
   createApprovalRegistry,
 } from "./approval-cards.ts";
 export {
-  encodeTs,
-  decodeTs,
   REACTION_INSTRUCTION,
   REACTION_DETECT_GUIDANCE,
-  MAX_REACTIONS_PER_TURN,
   normalizeReaction,
   normalizeReactions,
   applyReactions,
-  type ReactionTally,
-  summarizeReactions,
-  shouldSurfaceReaction,
-  buildReactionTurnText,
   type ReactionDirective,
   parseReactionGroup,
   resolveReactionTargets,
   extractReactions,
   stripReactionDirectives,
 } from "./reactions.ts";
-export {
-  buildContextWindow,
-  type RecentMessage,
-  MAX_RECENT_MESSAGES,
-  recentWindow,
-  resolveMentions,
-  type ConversationView,
-  type ConversationTurn,
-  type OverheardMessage,
-  formatSlackTs,
-  renderConversationView,
-  mergeConsecutiveTurns,
-} from "./conversation.ts";
 export {
   botIdentityFromEnv,
   botIdentityArgs,
@@ -138,10 +117,8 @@ export {
   SLACK_TEXT_LIMIT,
 } from "./delivery.ts";
 export {
-  DEFAULT_ACK_REACTIONS,
   CURATED_ACK_EMOJI,
   stripAckPrefix,
-  createAckPresenter,
   renderGoalNotice,
   type GoalNoticeView,
   type GoalNoticePresenter,

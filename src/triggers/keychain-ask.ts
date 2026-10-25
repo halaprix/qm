@@ -2,7 +2,13 @@ import { cronTriggerAuthority } from "../cron/authority.ts";
 import type { Keychain, KeychainAsk, KeychainGrant } from "../credentials/keychain.ts";
 import type { AuditLog } from "../audit/audit-log.ts";
 import type { Cron, Destination, ScopeId } from "../types.ts";
-import { runTrigger, destinationVisible, type TriggerDeps, type TriggerOutcome } from "./run-trigger.ts";
+import {
+  BUSY_DEFER_MAX_LATE_MS,
+  runTrigger,
+  destinationVisible,
+  type TriggerDeps,
+  type TriggerOutcome,
+} from "./run-trigger.ts";
 import { principalDestination, withWebTranscriptText } from "../reach/reach.ts";
 import { swallow } from "../util/errors.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
@@ -60,7 +66,8 @@ export async function fireAskResolution(
     fireKey: `ask:${ask.id}:${ask.status}`,
     surface: "keychain-ask",
     ...(cron?.runtime ? { runtime: cron.runtime } : {}),
-    deferWhenBusy: true,
+    mayDefer: true,
+    mayDeferReaders: Date.now() - (ask.resolvedAt ?? ask.expiresAt) <= BUSY_DEFER_MAX_LATE_MS,
     ...(destination ? { destination } : {}),
     ...(ask.requesterThreadRef ? { threadRef: ask.requesterThreadRef } : {}),
   });
@@ -133,9 +140,10 @@ export async function fireDropResolution(deps: TriggerDeps, drop: DropResolution
     ...(drop.threadRef ? { threadRef: drop.threadRef } : {}),
   });
   if (outcome.ran && outcome.status === "ok") return outcome;
-  if (drop.destination && (await destinationVisible(deps, drop.ownerId, drop.destination))) {
+  const fallback = outcome.readersUnknown ? principalDestination(drop.ownerId, drop.ownerId) : drop.destination;
+  if (fallback && (await destinationVisible(deps, drop.ownerId, fallback))) {
     await deps.deliveries.enqueue({
-      destination: withWebTranscriptText(drop.destination),
+      destination: withWebTranscriptText(fallback),
       text: dropFallbackText(drop),
       idempotencyKey: `drop:${drop.id}:fallback`,
     });

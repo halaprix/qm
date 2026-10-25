@@ -1,4 +1,5 @@
 import type { IngestEvent } from "../surface-cache/types.ts";
+import { snowflakeMs } from "../util/snowflake.ts";
 import { discordExternalId } from "./config.ts";
 import type { DiscordInbound } from "./events.ts";
 
@@ -10,7 +11,7 @@ export function shouldMirror(msg: DiscordInbound, botUserId: string, staked: boo
 export function toIngestEvent(
   msg: DiscordInbound,
   botUserId: string,
-  opts: { handled: boolean; createdAt: number },
+  opts: { handled: boolean; createdAt: number; editedAt?: number },
 ): IngestEvent {
   return {
     container: msg.channelId,
@@ -24,6 +25,15 @@ export function toIngestEvent(
     handled: opts.handled,
     createdAt: opts.createdAt,
     kind: "channel",
+    ...(opts.editedAt !== undefined ? { editedAt: opts.editedAt } : {}),
     ...(msg.channelName ? { containerName: msg.channelName } : {}),
   };
+}
+
+export function toEditEvent(msg: DiscordInbound, botUserId: string, editedAt: number): IngestEvent {
+  return toIngestEvent(msg, botUserId, { handled: false, createdAt: snowflakeMs(msg.id), editedAt });
+}
+
+export function toDeleteEvent(container: string, id: string, self: boolean): IngestEvent {
+  return { container, ts: id, deleted: true, kind: "channel", ...(self ? { self: true } : {}) };
 }

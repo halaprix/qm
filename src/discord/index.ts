@@ -4,42 +4,80 @@ import {
   Events,
   GatewayIntentBits,
   MessageFlags,
+  MessageType,
+  RESTJSONErrorCodes,
   Partials,
   type AnyThreadChannel,
+  type ClientOptions,
   type Message,
   type MessageCreateOptions,
+  type MessageReaction,
+  type PartialMessage,
+  type PartialMessageReaction,
+  type PartialUser,
+  type User,
 } from "discord.js";
+import { LRUCache } from "lru-cache";
+import type { CoreTurnBody } from "../api/surface-core-client.ts";
 import type { DiscordCoreClient } from "../api/discord-core-client.ts";
+import type { IngestEvent } from "../surface-cache/types.ts";
+import { buildReactionTurnText, REACTION_ITEM_MESSAGE, shouldSurfaceReaction } from "../surfaces/reactions.ts";
 import type { ActorAssertion, SurfaceContextRequest } from "../types.ts";
 import { reportFailureAs, swallowAs } from "../util/errors.ts";
+import { createSweeper } from "../util/sweeper.ts";
+import { createDiscordAck } from "./ack.ts";
+import { createBackfill, type Backfill } from "./backfill.ts";
 import { ingestAttachments } from "./attachments.ts";
 import { createCardRenderer } from "./approval-cards.ts";
-import { DISCORD_SURFACE, discordUserIdOf, type DiscordPluginConfig } from "./config.ts";
-import { createDeliveryGuard, createDiscordDispatcher, type DiscordDispatcher } from "./deliveries.ts";
-import { conversationFor, deliveryTargetFor, needsStakeLookup, routeMessage, threadName } from "./events.ts";
-import { createInteractionHandler, type ButtonClick } from "./interactions.ts";
-import { createContextFulfiller } from "./context.ts";
 import {
-  cachedViewers,
+  DISCORD_RETRY_BASE_MS,
+  DISCORD_RETRY_MAX_MS,
+  DISCORD_SURFACE,
+  discordUserIdOf,
+  type DiscordPluginConfig,
+} from "./config.ts";
+import { createDeliveryGuard, createDiscordDispatcher } from "./deliveries.ts";
+import {
+  conversationFor,
+  deliveryTargetFor,
+  needsStakeLookup,
+  routeMessage,
+  threadName,
+  type DiscordAttachmentRef,
+  type DiscordInbound,
+} from "./events.ts";
+import { createDirectorySync, DISCORD_DIRECTORY_SYNC_MS } from "./directory.ts";
+import { createInteractionHandler } from "./interactions.ts";
+import { buildGuildTurnContext, gatewayContextFor } from "./conversation-context.ts";
+import { createChannelLookup, createContextFulfiller, type DiscordHistoryReader } from "./context.ts";
+import { withReplyContext } from "./forwards.ts";
+import {
+  cachedPeople,
+  channelViewers,
   createChannelKind,
+  createDiscordChannels,
   createDiscordHistoryReader,
   createMergedClassify,
   createStakeHistory,
   createUserClassifier,
+  displayNameOf,
+  scopeChannelId,
   toInbound,
+  type DiscordChannels,
 } from "./gateway.ts";
-import { createMemberHydrator, type MemberHydrator } from "./member-hydrator.ts";
-import { shouldMirror, toIngestEvent } from "./mirror.ts";
-import { audienceWith, channelReaders, type ReaderResult } from "./readers.ts";
-import { createDiscordSender, NO_MENTIONS, sendable } from "./sender.ts";
+import { createMemberHydrator } from "./member-hydrator.ts";
+import { shouldMirror, toDeleteEvent, toEditEvent, toIngestEvent } from "./mirror.ts";
+import { audienceWith, channelReaders, turnPostGate, type ReaderResult } from "./readers.ts";
+import { createDiscordSender, NO_MENTIONS, sendable, type DiscordSender } from "./sender.ts";
 import { createStakeTracker, type StakeTracker } from "./thread-stake.ts";
-import { runDiscordTurn, type ReplyChannel } from "./turn-flow.ts";
+import { applyDiscordReactions, emojiDisplayName, reactionTallies, type MessageTarget } from "./reactions.ts";
+import { runDiscordTurn, type ReactHandler, type ReplyChannel } from "./turn-flow.ts";
 
 type StreamGate = () => Promise<boolean>;
 const allowDmStream: StreamGate = async () => true;
 
-export const DISCORD_LOGIN_RETRY_BASE_MS = 5_000;
-const DISCORD_LOGIN_RETRY_MAX_MS = 300_000;
+const MIRRORED_MESSAGES_MAX = 5_000;
+const THREAD_EMPTY_PROBE = 2;
 export const DISCORD_DELIVERY_POLL_MS = 60_000;
 const READERS_UNKNOWN_TEXT =
   "I can't confirm who can read this channel right now, so I won't answer here yet. Try again in a minute.";
@@ -53,19 +91,34 @@ export interface DiscordPlugin {
   stop(): Promise<void>;
 }
 
+export const DISCORD_CLIENT_OPTIONS: ClientOptions = {
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessageReactions,
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
+  allowedMentions: NO_MENTIONS,
+};
+
 export interface DiscordPluginOptions {
   clientFactory?: () => Client;
   drainTimeoutMs: number;
+  webUiPublicUrl?: string;
 }
 
 interface ConnectionScope {
-  inFlightRuns: Set<string>;
-  hydrator: MemberHydrator;
+  channels: DiscordChannels;
   classifyUser: (userId: string, fallbackName: string) => Promise<ActorAssertion | null>;
-  readersOf: (baseChannelId: string) => Promise<ReaderResult>;
+  readersOf: (channelId: string) => Promise<ReaderResult>;
   stakes: StakeTracker;
-  dispatcher: DiscordDispatcher;
-  interact: (click: ButtonClick) => Promise<void>;
+  historyReader: DiscordHistoryReader;
+  sender: DiscordSender;
+  backfill: Backfill;
 }
 
 function replyChannel(ch: {
@@ -100,20 +153,7 @@ export function createDiscordPlugin(
   core: DiscordCoreClient,
   opts: DiscordPluginOptions,
 ): DiscordPlugin {
-  const clientFactory =
-    opts.clientFactory ??
-    (() =>
-      new Client({
-        intents: [
-          GatewayIntentBits.Guilds,
-          GatewayIntentBits.GuildMessages,
-          GatewayIntentBits.GuildMembers,
-          GatewayIntentBits.MessageContent,
-          GatewayIntentBits.DirectMessages,
-        ],
-        partials: [Partials.Channel],
-        allowedMentions: NO_MENTIONS,
-      }));
+  const clientFactory = opts.clientFactory ?? (() => new Client(DISCORD_CLIENT_OPTIONS));
   const drainTimeoutMs = opts.drainTimeoutMs;
   const inFlightRuns = new Set<string>();
 
@@ -121,91 +161,332 @@ export function createDiscordPlugin(
   let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
   let stopPromise: Promise<void> | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
-  let retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
+  let retryDelay = DISCORD_RETRY_BASE_MS;
   let stopped = true;
 
-  async function handle(message: Message, c: Client, run: ConnectionScope): Promise<void> {
+  const reactionsInFlight = new Set<string>();
+  const sharedThreads = new LRUCache<string, true>({ max: MIRRORED_MESSAGES_MAX });
+  const unknownNoticed = new LRUCache<string, true>({ max: MIRRORED_MESSAGES_MAX });
+  const mirrored = new LRUCache<string, true>({ max: MIRRORED_MESSAGES_MAX });
+  const mirroredKey = (channelId: string, messageId: string): string => `${channelId}:${messageId}`;
+
+  function mirrorEvent(c: Client, event: IngestEvent): void {
+    if (!event.deleted) mirrored.set(mirroredKey(event.container, event.ts), true);
+    void core
+      .ingestSurfaceEvents([event], { name: c.user?.tag, mentionId: c.user?.id ?? "" })
+      .catch(swallowAs("discord: mirror", undefined));
+  }
+
+  const unconfiguredGuild = (guildId: string | null): boolean => guildId !== null && !cfg.guildIds.has(guildId);
+
+  async function linkActivePrivateThreads(c: Client, channels: DiscordChannels, guildId: string): Promise<void> {
+    const { threads } = await (await c.guilds.fetch(guildId)).channels.fetchActiveThreads();
+    for (const thread of threads.values()) await channels.linked(thread);
+  }
+
+  async function stakedIn(run: ConnectionScope, inbound: DiscordInbound, botUserId: string): Promise<boolean> {
+    return needsStakeLookup(inbound, botUserId) ? run.stakes.has(inbound.channelId, botUserId) : false;
+  }
+
+  async function tracked(run: ConnectionScope, inbound: DiscordInbound, botUserId: string): Promise<boolean> {
+    return (
+      shouldMirror(inbound, botUserId, await stakedIn(run, inbound, botUserId)) ||
+      mirrored.has(mirroredKey(inbound.channelId, inbound.id))
+    );
+  }
+
+  async function handleEdit(message: Message, c: Client, run: ConnectionScope): Promise<void> {
+    if (message.guildId === null || unconfiguredGuild(message.guildId)) return;
+    const full = message.partial ? await message.fetch() : message;
+    if (full.editedTimestamp === null) return;
+    const botUserId = c.user?.id ?? "";
+    const inbound = toInbound(full);
+    if (await tracked(run, inbound, botUserId)) mirrorEvent(c, toEditEvent(inbound, botUserId, full.editedTimestamp));
+  }
+
+  async function handleDelete(message: Message | PartialMessage, c: Client, run: ConnectionScope): Promise<void> {
+    if (message.guildId === null || unconfiguredGuild(message.guildId)) return;
+    const botUserId = c.user?.id ?? "";
+    if (!message.partial && !(await tracked(run, toInbound(message), botUserId))) return;
+    mirrorEvent(c, toDeleteEvent(message.channelId, message.id, message.author?.id === botUserId));
+  }
+
+  async function noticeReadersUnknown(message: Message, accepted: () => void): Promise<void> {
+    accepted();
+    if (unknownNoticed.has(message.id)) return;
+    unknownNoticed.set(message.id, true);
+    await message.reply({ content: READERS_UNKNOWN_TEXT, allowedMentions: NO_MENTIONS });
+  }
+
+  async function handle(message: Message, c: Client, run: ConnectionScope, replay = false): Promise<void> {
     const botUserId = c.user?.id ?? "";
     const inbound = toInbound(message);
-    if (inbound.guildId !== null && !cfg.guildIds.has(inbound.guildId)) return;
-    const staked = needsStakeLookup(inbound, botUserId) ? await run.stakes.has(inbound.channelId, botUserId) : false;
+    if (unconfiguredGuild(inbound.guildId)) return;
+    const accepted = () => run.backfill.seen(inbound.channelId, inbound.id);
+    const staked = await stakedIn(run, inbound, botUserId);
     if (shouldMirror(inbound, botUserId, staked))
-      void core
-        .ingestSurfaceEvents([toIngestEvent(inbound, botUserId, { handled: false, createdAt: Date.now() })], {
-          name: c.user?.tag,
-          mentionId: botUserId,
-        })
-        .catch(swallowAs("discord: mirror", undefined));
-    const routed = routeMessage(inbound, botUserId, cfg.guildIds);
-    if (!routed) return;
-    const prompted = routed.target !== "thread" || !routed.unprompted;
-    if (!prompted && !staked) return;
-    const actor = await run.classifyUser(inbound.authorId, inbound.authorName);
-    if (!actor) {
-      if (prompted) await message.reply({ content: READERS_UNKNOWN_TEXT, allowedMentions: NO_MENTIONS });
+      mirrorEvent(c, toIngestEvent(inbound, botUserId, { handled: false, createdAt: Date.now() }));
+    const routed = routeMessage(inbound, { id: botUserId, name: c.user?.username ?? "" }, cfg.guildIds);
+    const prompted = routed !== null && (routed.target !== "thread" || !routed.unprompted);
+    if (!routed || (!prompted && (!staked || replay))) {
+      accepted();
       return;
     }
-    if (actor.isExternalGuest) return;
-    const common = { actor, text: routed.text, redeliveryKey: `discord:${message.id}` };
+    const classified = await run.classifyUser(inbound.authorId, inbound.authorName);
+    if (!classified) {
+      if (prompted) await noticeReadersUnknown(message, accepted);
+      return;
+    }
+    const actor = inbound.authorIsBot && !classified.isBot ? { ...classified, isBot: true } : classified;
+    if (actor.isExternalGuest) {
+      accepted();
+      return;
+    }
+    const common = {
+      actor,
+      text: await withReplyContext(message, routed.text),
+      redeliveryKey: `discord:${message.id}`,
+      ...(actor.isBot ? { botActor: true } : {}),
+    };
     if (routed.target === "dm") {
       if (message.channel.type !== ChannelType.DM) return;
+      accepted();
       const { attachments, notes } = await ingestAttachments(inbound.attachments, core);
-      const target = { kind: "dm" as const, channelId: message.channelId };
       await runDiscordTurn({
         core,
         channel: replyChannel(message.channel),
         mode: "stream",
-        inFlightRuns: run.inFlightRuns,
+        inFlightRuns,
         mayPost: allowDmStream,
+        onReact: reactHandler(run, { channelId: message.channelId, messageId: message.id }),
         body: {
           ...common,
           ...(attachments.length ? { attachments } : {}),
           ...(notes.length ? { inboundNotes: notes } : {}),
-          conversation: conversationFor(target),
-          deliveryTarget: deliveryTargetFor(target),
+          ...dmTurnBody(message.channelId),
           triggerTs: message.id,
           entryTs: message.id,
         },
       });
       return;
     }
-    const parentChannelId = inbound.threadParentId ?? message.channelId;
-    const readers = await run.readersOf(parentChannelId);
+    const scopeChannel = scopeChannelId(message.channel);
+    const readers = await run.readersOf(scopeChannel);
     if (!readers.ok && readers.retry) {
-      if (prompted) await message.reply({ content: READERS_UNKNOWN_TEXT, allowedMentions: NO_MENTIONS });
+      if (prompted) await noticeReadersUnknown(message, accepted);
       return;
     }
+    accepted();
     const thread =
       routed.target === "new-thread"
-        ? await message.startThread({ name: threadName(routed.text) })
+        ? await message.startThread({ name: threadName(routed.title) })
         : (message.channel as AnyThreadChannel);
-    run.stakes.mark(thread.id);
+    const audience = readers.ok ? audienceWith(readers.readers, actor) : [actor, UNKNOWN_READER];
+    const ack = prompted ? createDiscordAck(run.sender, { channelId: message.channelId, messageId: message.id }) : null;
+    try {
+      await runThreadTurn(c, run, {
+        thread,
+        scopeChannelId: scopeChannel,
+        audience,
+        common,
+        attachmentRefs: inbound.attachments,
+        history: {
+          before: message.id,
+          channelId: routed.target === "new-thread" ? scopeChannel : thread.id,
+          threadId: routed.target === "new-thread" ? null : thread.id,
+        },
+        trigger: prompted ? { triggerTs: message.id, entryTs: message.id } : { unprompted: true, entryTs: message.id },
+        reactTarget: { channelId: message.channelId, messageId: message.id },
+      });
+    } finally {
+      await ack?.settle();
+    }
+  }
+
+  async function reactionThread(channels: DiscordChannels, message: Message): Promise<AnyThreadChannel | null> {
+    if (message.channel.isThread()) return message.channel;
+    if (!message.hasThread) return null;
+    const thread = message.thread ?? (await channels.fetch(message.id));
+    return thread?.isThread() ? thread : null;
+  }
+
+  function reactHandler(run: ConnectionScope, target: MessageTarget): ReactHandler {
+    return async (names) => void (await applyDiscordReactions(run.sender, target, names));
+  }
+
+  function dmTurnBody(channelId: string): Pick<CoreTurnBody, "conversation" | "gatewayContext" | "deliveryTarget"> {
+    const target = { kind: "dm" as const, channelId };
+    return {
+      conversation: conversationFor(target),
+      gatewayContext: gatewayContextFor(target),
+      deliveryTarget: deliveryTargetFor(target),
+    };
+  }
+
+  async function runThreadTurn(
+    c: Client,
+    run: ConnectionScope,
+    p: {
+      thread: AnyThreadChannel;
+      scopeChannelId: string;
+      audience: ActorAssertion[];
+      common: Pick<CoreTurnBody, "actor" | "text" | "redeliveryKey" | "botActor">;
+      attachmentRefs: DiscordAttachmentRef[];
+      history: { before?: string; channelId: string; threadId: string | null };
+      trigger: Pick<CoreTurnBody, "triggerTs" | "entryTs" | "unprompted">;
+      reactTarget: MessageTarget;
+      onNoReply?: () => Promise<void>;
+    },
+  ): Promise<void> {
+    const botUserId = c.user?.id ?? "";
+    run.stakes.mark(p.thread.id);
+    const ownScope = p.scopeChannelId === p.thread.id;
+    await run.channels.linked(p.thread);
+    const channelName = ownScope ? p.thread.name : p.thread.parent?.name;
     const target = {
       kind: "thread" as const,
-      threadId: thread.id,
-      parentChannelId,
-      ...(thread.parent?.name ? { channelName: thread.parent.name } : {}),
+      threadId: p.thread.id,
+      scopeChannelId: p.scopeChannelId,
+      ...(channelName ? { channelName } : {}),
     };
-    const audience = readers.ok ? audienceWith(readers.readers, actor) : [actor, UNKNOWN_READER];
-    const { attachments, notes } = await ingestAttachments(inbound.attachments, core);
+    const { attachments, notes } = await ingestAttachments(p.attachmentRefs, core);
+    const turnContext = await buildGuildTurnContext(
+      { reader: run.historyReader, botUserId, botName: c.user?.username ?? "" },
+      {
+        ...(p.history.before ? { before: p.history.before } : {}),
+        historyChannelId: p.history.channelId,
+        threadId: p.history.threadId,
+        triggerId: p.reactTarget.messageId,
+        ...(target.channelName ? { channelName: target.channelName } : {}),
+        audience: p.audience,
+      },
+    );
     await runDiscordTurn({
       core,
-      channel: replyChannel(thread),
+      channel: replyChannel(p.thread),
       mode: "spine",
-      inFlightRuns: run.inFlightRuns,
-      mayPost: async () => {
-        const res = await run.readersOf(parentChannelId);
-        return res.ok && !res.readers.some((r) => r.isExternalGuest);
-      },
+      mayPost: turnPostGate(run.readersOf, p.scopeChannelId),
+      onReact: reactHandler(run, p.reactTarget),
+      ...(p.onNoReply ? { onNoReply: p.onNoReply } : {}),
       body: {
-        ...common,
+        ...p.common,
         ...(attachments.length ? { attachments } : {}),
         ...(notes.length ? { inboundNotes: notes } : {}),
-        conversation: conversationFor(target, audience),
+        conversation: conversationFor(target, p.audience),
+        gatewayContext: gatewayContextFor(target),
+        ...turnContext,
         deliveryTarget: deliveryTargetFor(target),
-        ...(prompted ? { triggerTs: message.id, entryTs: message.id } : { unprompted: true, entryTs: message.id }),
+        ...p.trigger,
       },
     });
+  }
+
+  async function deleteIfUnused(thread: AnyThreadChannel): Promise<void> {
+    const fetched = await thread.messages.fetch({ limit: THREAD_EMPTY_PROBE });
+    if ([...fetched.values()].some((m) => m.type !== MessageType.ThreadStarterMessage)) return;
+    if (sharedThreads.has(thread.id)) return;
+    await thread.delete();
+  }
+
+  async function handleReaction(
+    reaction: MessageReaction | PartialMessageReaction,
+    user: User | PartialUser,
+    added: boolean,
+    c: Client,
+    run: ConnectionScope,
+  ): Promise<void> {
+    const botUserId = c.user?.id ?? "";
+    if (user.id === botUserId) return;
+    const guildId = reaction.message.guildId;
+    if (unconfiguredGuild(guildId)) return;
+    const full = reaction.partial ? await reaction.fetch() : reaction;
+    const message = full.message.partial ? await full.message.fetch() : full.message;
+    const isDM = guildId === null;
+    const onBotMessage = message.author.id === botUserId;
+    const onFollowedRoot = !isDM && !onBotMessage && message.hasThread && (await run.stakes.has(message.id, botUserId));
+    if (
+      !shouldSurfaceReaction({
+        itemType: REACTION_ITEM_MESSAGE,
+        reactorId: user.id,
+        botUserId,
+        isDM,
+        onBotMessage,
+        onFollowedRoot,
+      })
+    )
+      return;
+    const flightKey = `${message.channelId}:${message.id}:${full.emoji.id ?? full.emoji.name}:${user.id}:${added ? "+" : "-"}`;
+    if (reactionsInFlight.has(flightKey)) return;
+    reactionsInFlight.add(flightKey);
+    try {
+      const reactor = user.partial ? await user.fetch() : user;
+      const reactorName = displayNameOf(message.guild?.members.cache.get(reactor.id), reactor);
+      const classified = await run.classifyUser(reactor.id, reactorName);
+      if (!classified) return;
+      const actor = reactor.bot && !classified.isBot ? { ...classified, isBot: true } : classified;
+      if (actor.isExternalGuest) return;
+      const inbound = toInbound(message);
+      const reactions = added ? reactionTallies(message.reactions.cache.values()) : [];
+      const text = buildReactionTurnText(DISCORD_SURFACE, {
+        reactorName: actor.displayName || "Someone",
+        emoji: emojiDisplayName(full.emoji),
+        added,
+        onBotMessage,
+        ...(!onBotMessage && inbound.authorId !== reactor.id ? { authorName: inbound.authorName } : {}),
+        ...(inbound.content ? { messageText: inbound.content } : {}),
+        ...(reactions.length ? { reactions } : {}),
+      });
+      const common = { actor, text, ...(actor.isBot ? { botActor: true } : {}) };
+      const reactTarget = { channelId: message.channelId, messageId: message.id };
+      if (isDM) {
+        if (message.channel.type !== ChannelType.DM) return;
+        await runDiscordTurn({
+          core,
+          channel: replyChannel(message.channel),
+          mode: "stream",
+          inFlightRuns,
+          mayPost: allowDmStream,
+          onReact: reactHandler(run, reactTarget),
+          body: { ...common, ...dmTurnBody(message.channelId), unprompted: true },
+        });
+        return;
+      }
+      const existing = await reactionThread(run.channels, message);
+      if (!existing && !added) return;
+      if (existing) sharedThreads.set(existing.id, true);
+      const scopeChannel = existing ? scopeChannelId(existing) : message.channelId;
+      const readers = await run.readersOf(scopeChannel);
+      if (!readers.ok) return;
+      const audience = audienceWith(readers.readers, actor);
+      if (audience.some((a) => a.isExternalGuest)) return;
+      let thread = existing;
+      let created: AnyThreadChannel | null = null;
+      if (!thread) {
+        try {
+          thread = await message.startThread({ name: threadName(inbound.content) });
+          created = thread;
+        } catch (err) {
+          if ((err as { code?: unknown }).code !== RESTJSONErrorCodes.ThreadAlreadyCreatedForMessage) throw err;
+          const raced = await run.channels.fetch(message.id);
+          if (!raced?.isThread()) throw err;
+          thread = raced;
+          sharedThreads.set(thread.id, true);
+        }
+      }
+      await runThreadTurn(c, run, {
+        thread,
+        scopeChannelId: scopeChannel,
+        audience,
+        common,
+        attachmentRefs: [],
+        history: { channelId: thread.id, threadId: thread.id },
+        trigger: { unprompted: true },
+        reactTarget,
+        ...(created ? { onNoReply: () => deleteIfUnused(created!) } : {}),
+      });
+    } finally {
+      reactionsInFlight.delete(flightKey);
+    }
   }
 
   async function connect(): Promise<void> {
@@ -214,9 +495,20 @@ export function createDiscordPlugin(
     const inFlight = new Set<Promise<void>>();
     const c = clientFactory();
     client = c;
+    const channels = createDiscordChannels(c, (threadId, parentId) => core.linkPrivateThread(threadId, parentId));
 
+    const track = (work: Promise<void>, what: string): void => {
+      const p = work.catch(swallowAs(what, undefined)).finally(() => inFlight.delete(p));
+      inFlight.add(p);
+    };
+    let backfill: Backfill | null = null;
     const hydrator = createMemberHydrator({
       guildIds: cfg.guildIds,
+      onAllReady: () => {
+        if (!accepting) return;
+        track(syncDirectory(), "discord: directory sync");
+        if (backfill) track(backfill.run(), "discord: backfill");
+      },
       fetchAll: async (g) => {
         const guild = await c.guilds.fetch(g);
         const before = new Set(guild.members.cache.keys());
@@ -233,6 +525,16 @@ export function createDiscordPlugin(
       linkedInternal: (userId) => core.linkedInternal(userId),
       coreStatus: (userId) => core.coreStatus(userId),
     });
+    const syncDirectory = createDirectorySync({
+      ready: () => hydrator.allReady(),
+      people: () => cachedPeople(c, cfg.guildIds),
+      classify: mergedClassify,
+      hold: (fn) => core.holdDirectorySync(fn),
+      push: (members) => core.syncDirectory(members),
+    });
+    const directorySweeper = createSweeper(syncDirectory, DISCORD_DIRECTORY_SYNC_MS, {
+      label: "discord directory sync",
+    });
     const classifyUser = createUserClassifier({
       client: c,
       cfg,
@@ -240,26 +542,27 @@ export function createDiscordPlugin(
       linkedInternal: (userId) => core.linkedInternal(userId),
       coreStatus: (userId) => core.coreStatus(userId),
     });
-    const readersOf = (baseChannelId: string) =>
+    const readersOf = async (channelId: string) =>
       channelReaders({
-        viewers: cachedViewers(c, baseChannelId),
+        viewers: await channelViewers(channels, channelId),
         guildIds: cfg.guildIds,
         ready: (guildId) => hydrator.ready(guildId),
         botUserId: c.user?.id ?? "",
         classify: (m) => mergedClassify(m.userId, m.displayName),
       });
-    const stakes = createStakeTracker({ recent: createStakeHistory(c) });
-    const sender = createDiscordSender(c);
+    const stakes = createStakeTracker({ recent: createStakeHistory(channels) });
+    const sender = createDiscordSender(c, channels);
+    const guard = createDeliveryGuard({
+      channelKind: createChannelKind(channels),
+      readers: readersOf,
+      classifyUser: (id) => classifyUser(id, id),
+    });
     const dispatcher = createDiscordDispatcher({
       core,
       sender,
-      guard: createDeliveryGuard({
-        channelKind: createChannelKind(c),
-        readers: readersOf,
-        classifyUser: (id) => classifyUser(id, id),
-      }),
+      guard,
       inFlightRuns,
-      renderCard: createCardRenderer(core),
+      renderCard: createCardRenderer(core, opts.webUiPublicUrl),
       recipientFor: (t) => discordUserIdOf(t) ?? core.discordUserIdsFor(t)[0] ?? null,
     });
 
@@ -272,18 +575,13 @@ export function createDiscordPlugin(
         if (!target) return;
         let ch;
         try {
-          ch = await sendable(c, target);
+          ch = await sendable(channels, target);
         } catch {
           return;
         }
         const isDm = body.conversation.kind === "dm";
         if (!isDm && !body.conversation.channelRef) return;
-        const mayPost = isDm
-          ? allowDmStream
-          : async () => {
-              const res = await readersOf(body.conversation.channelRef!);
-              return res.ok && !res.readers.some((r) => r.isExternalGuest);
-            };
+        const mayPost = isDm ? allowDmStream : turnPostGate(readersOf, body.conversation.channelRef!);
         return runDiscordTurn({
           core,
           channel: replyChannel(ch),
@@ -297,7 +595,7 @@ export function createDiscordPlugin(
     });
 
     const historyReader = createDiscordHistoryReader({
-      client: c,
+      channels,
       guildIds: cfg.guildIds,
       hydrator,
     });
@@ -307,40 +605,61 @@ export function createDiscordPlugin(
       botUserId: () => c.user?.id ?? "",
     });
 
+    const lookupChannel = createChannelLookup({ core, reader: historyReader, guard });
+    backfill = createBackfill<Message>({
+      watermarks: () => core.channelWatermarks(),
+      open: async (channelId) => {
+        const ch = await channels.fetch(channelId);
+        if (!ch || !ch.isTextBased() || ch.isDMBased()) return null;
+        return {
+          baseChannelId: scopeChannelId(ch),
+          lastMessageId: ch.isThread() ? null : ch.lastMessageId,
+          newest: async (limit) => [...(await ch.messages.fetch({ limit })).values()],
+        };
+      },
+      dispatch: async (message) => {
+        if (!message.hasThread)
+          await handle(message, c, scope, true).catch(swallowAs("discord: backfill message", undefined));
+      },
+      noteGap: (channelId, note) => core.noteSurfaceHistoryGap(channelId, note),
+    });
     const scope: ConnectionScope = {
-      inFlightRuns,
-      hydrator,
+      channels,
       classifyUser,
       readersOf,
       stakes,
-      dispatcher,
-      interact,
+      historyReader,
+      sender,
+      backfill,
     };
 
     let unsubscribeDeliveries: (() => void) | null = null;
     let unsubscribeContext: (() => void) | null = null;
     let pollTimer: NodeJS.Timeout | null = null;
-    const drain = () => void scope.dispatcher.drain().catch(swallowAs("discord: delivery drain", undefined));
-    const stopDeliverySubscription = () => unsubscribeDeliveries?.();
-    const stopContextSubscription = () => unsubscribeContext?.();
+    const drain = () => void dispatcher.drain().catch(swallowAs("discord: delivery drain", undefined));
 
-    detachClient = () => {
+    const detach = () => {
       accepting = false;
-      scope.hydrator.stop();
-      stopDeliverySubscription();
-      stopContextSubscription();
+      hydrator.stop();
+      track(directorySweeper.stop(), "discord: directory sweep drain");
+      unsubscribeDeliveries?.();
+      unsubscribeContext?.();
       if (pollTimer) clearInterval(pollTimer);
       return { client: c, inFlight };
     };
+    detachClient = detach;
 
-    c.on(Events.ShardReconnecting, () => scope.hydrator.invalidate());
-    c.on(Events.ShardDisconnect, () => scope.hydrator.invalidate());
-    c.on(Events.ShardReady, () => scope.hydrator.hydrate());
-    c.on(Events.ShardResume, () => scope.hydrator.hydrate());
+    c.on(Events.ShardReconnecting, () => hydrator.invalidate());
+    c.on(Events.ShardDisconnect, () => hydrator.invalidate());
+    c.on(Events.ShardReady, () => hydrator.hydrate());
+    c.on(Events.ShardResume, () => hydrator.hydrate());
     c.once(Events.ClientReady, (ready) => {
       if (!accepting) return;
       console.log(`[qm] discord connected as @${ready.user.tag}`);
-      scope.hydrator.hydrate();
+      hydrator.hydrate();
+      for (const guildId of cfg.guildIds)
+        track(linkActivePrivateThreads(c, channels, guildId), "discord: private thread links");
+      directorySweeper.start();
       unsubscribeDeliveries = core.onDeliveryEnqueued(drain);
       pollTimer = setInterval(drain, DISCORD_DELIVERY_POLL_MS);
       drain();
@@ -348,13 +667,12 @@ export function createDiscordPlugin(
       const serviceContextRequest = (r: SurfaceContextRequest): void => {
         if (contextRequestsInFlight.has(r.id)) return;
         contextRequestsInFlight.add(r.id);
-        const p = fulfill(r)
-          .catch(swallowAs("discord: context request", undefined))
-          .finally(() => {
-            contextRequestsInFlight.delete(r.id);
-            inFlight.delete(p);
-          });
-        inFlight.add(p);
+        track(
+          (r.query.lookupChannel !== undefined ? lookupChannel : fulfill)(r).finally(() =>
+            contextRequestsInFlight.delete(r.id),
+          ),
+          "discord: context request",
+        );
       };
 
       unsubscribeContext = core.onContextRequest(serviceContextRequest);
@@ -367,10 +685,18 @@ export function createDiscordPlugin(
         .catch(swallowAs("discord: context request drain", undefined));
     });
 
+    c.on(Events.ThreadCreate, (thread) => {
+      if (accepting && !unconfiguredGuild(thread.guildId))
+        track(
+          channels.linked(thread).then(() => {}),
+          "discord: private thread link",
+        );
+    });
+
     c.on(Events.InteractionCreate, (interaction) => {
       if (!accepting || !interaction.isButton()) return;
-      const p = scope
-        .interact({
+      track(
+        interact({
           customId: interaction.customId,
           userId: interaction.user.id,
           defer: async () => void (await interaction.deferUpdate()),
@@ -378,41 +704,51 @@ export function createDiscordPlugin(
           settle: async (content) =>
             void (await interaction.editReply({ content, components: [], allowedMentions: NO_MENTIONS })),
           settleFinal: (content) => sender.edit(interaction.channelId, interaction.message.id, { content }),
-        })
-        .catch(swallowAs("discord: interaction", undefined))
-        .finally(() => inFlight.delete(p));
-      inFlight.add(p);
+        }),
+        "discord: interaction",
+      );
     });
 
     c.on(Events.MessageCreate, (message) => {
+      if (accepting) track(handle(message, c, scope), "discord: message handler");
+    });
+
+    c.on(Events.MessageReactionAdd, (reaction, user) => {
+      if (accepting) track(handleReaction(reaction, user, true, c, scope), "discord: reaction add");
+    });
+
+    c.on(Events.MessageReactionRemove, (reaction, user) => {
+      if (accepting) track(handleReaction(reaction, user, false, c, scope), "discord: reaction remove");
+    });
+
+    c.on(Events.MessageUpdate, (_old, updated) => {
+      if (accepting) track(handleEdit(updated, c, scope), "discord: message edit");
+    });
+
+    c.on(Events.MessageDelete, (deleted) => {
+      if (accepting) track(handleDelete(deleted, c, scope), "discord: message delete");
+    });
+
+    c.on(Events.MessageBulkDelete, (deleted) => {
       if (!accepting) return;
-      const p = handle(message, c, scope)
-        .catch(swallowAs("discord: message handler", undefined))
-        .finally(() => {
-          inFlight.delete(p);
-        });
-      inFlight.add(p);
+      for (const message of deleted.values()) track(handleDelete(message, c, scope), "discord: message delete");
     });
 
     try {
       await c.login(cfg.botToken);
-      retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
+      retryDelay = DISCORD_RETRY_BASE_MS;
     } catch (err) {
       reportFailureAs("discord plugin login", undefined)(err);
-      scope.hydrator.stop();
-      stopDeliverySubscription();
-      stopContextSubscription();
-      if (pollTimer) clearInterval(pollTimer);
+      detach();
       await c.destroy().catch(swallowAs("discord client cleanup", undefined));
       const isCurrent = client === c;
       if (isCurrent) {
         client = null;
         detachClient = null;
       }
-      accepting = false;
       if (!stopped && !retryTimer && isCurrent) {
         const delay = retryDelay;
-        retryDelay = Math.min(retryDelay * 2, DISCORD_LOGIN_RETRY_MAX_MS);
+        retryDelay = Math.min(retryDelay * 2, DISCORD_RETRY_MAX_MS);
         retryTimer = setTimeout(() => {
           retryTimer = null;
           void connect();
@@ -434,7 +770,7 @@ export function createDiscordPlugin(
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      retryDelay = DISCORD_LOGIN_RETRY_BASE_MS;
+      retryDelay = DISCORD_RETRY_BASE_MS;
       const detached = detachClient?.();
       client = null;
       detachClient = null;

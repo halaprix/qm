@@ -8,6 +8,7 @@ import { adminCronHistoryUrl } from "../util/admin-links.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
 import { randomUUID } from "node:crypto";
 import { isPersonAddressed } from "../delivery/delivery-store.ts";
+import { surfaceForDeliveryType } from "../surfaces/surface-capabilities.ts";
 import {
   reachEnqueue,
   withSlackUnfurlOption,
@@ -17,7 +18,7 @@ import {
   type ReachResolution,
 } from "../reach/reach.ts";
 import { isVisible } from "../directory/visibility.ts";
-import { pickMatch, type DirectoryMember } from "../directory/directory-store.ts";
+import { isDiscordMember, pickMatch, type DirectoryMember } from "../directory/directory-store.ts";
 import { externalMemberActive } from "../identity/external-members.ts";
 import { hasRevisionEvents, recordMessageRevisions } from "../core/message-revisions.ts";
 import { answerWebContextRequest } from "./web-context.ts";
@@ -30,6 +31,7 @@ import type { App, AppDeps, ReachNowResult } from "./app-types.ts";
 import { CONTEXT_REQUEST_EXPIRY_MS } from "./app-types.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 import type { AmbientHelpers } from "./app-ambient.ts";
+import { runDeliveryKey } from "../delivery/run-result-delivery.ts";
 
 export async function cronVisibility(deps: AppDeps, h: AppHelpers, principalId: string) {
   const viewerKeys = personKeys(await deps.directory.get(principalId).catch(() => null), principalId);
@@ -101,6 +103,7 @@ export function createMessagingMethods(
   | "ackDeliveryByKey"
   | "setRunDeliveryState"
   | "upsertDirectory"
+  | "upsertDiscordDirectory"
   | "upsertChannels"
   | "upsertGroups"
   | "setDirectoryWorkspaceUrl"
@@ -317,8 +320,8 @@ export function createMessagingMethods(
       if (!deps.surfaceCache || !events.length) return { upserted: 0 };
       if (self && (self.name || self.mentionId)) ambientSelf.set(`${orgIdOf()}:${surface}`, self);
       const out = await deps.surfaceCache.ingest(events);
-      if (surface === "slack" && hasRevisionEvents(events)) {
-        void recordMessageRevisions(deps.sessions, events).catch(
+      if (hasRevisionEvents(events)) {
+        void recordMessageRevisions(deps.sessions, events, surface).catch(
           reportFailureAs("revisions: surface revision record", undefined),
         );
       }
@@ -422,12 +425,12 @@ export function createMessagingMethods(
     },
     async setRunDeliveryState(runId, state) {
       const found = await deps.runs.setDeliveryState(runId, null, state);
-      if (found && state.editRef) await deps.deliveries.setEditRefByKey(`run:${runId}`, state.editRef);
+      if (found && state.editRef) await deps.deliveries.setEditRefByKey(runDeliveryKey(runId), state.editRef);
       return found;
     },
 
     async upsertDirectory(members, syncedAt) {
-      const previous = await deps.directory.list();
+      const previous = (await deps.directory.list()).filter((m) => !isDiscordMember(m));
       if (!(await deps.directory.replace(members, syncedAt))) return false;
       const present = members.filter((m) => m.type === "internal").map((m) => m.principalId);
       const presentSet = new Set(present);
@@ -453,6 +456,12 @@ export function createMessagingMethods(
         });
       }
       return true;
+    },
+    async upsertDiscordDirectory(members) {
+      const owned = new Set(
+        (await deps.directory.list()).filter((m) => !isDiscordMember(m)).map((m) => personKey(m.principalId)),
+      );
+      await deps.directory.replaceDiscord(members.filter((m) => !owned.has(personKey(m.principalId))));
     },
     async upsertChannels(channels, channelMembers, syncedAt, channelRosterIds, revocations, partial) {
       const applied = await deps.directory.replaceChannels(
@@ -538,7 +547,7 @@ export function createMessagingMethods(
         "dm",
         recipientScope,
         undefined,
-        "slack",
+        surfaceForDeliveryType(delivery.destination.type),
       );
       await deps.deliveries.recordRecipientThread(delivery.id, recipientThreadRef, Date.now());
       await deps.sessions.addParticipant(session.id, recipientId);

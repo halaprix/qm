@@ -1,17 +1,16 @@
+import { SLACK_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 import { slackHistoryRateLimitMessage } from "./history-rate-limit.ts";
 import type { SlackHistoryReader } from "./history.ts";
 import { swallow } from "../util/errors.ts";
+import { type ActorAssertion, type SlackFile, decodeSlackEntities, isOversize } from "./lib.ts";
 import {
-  type ActorAssertion,
   type ConversationView,
-  type ReactionTally,
   type RecentMessage,
-  type SlackFile,
   MAX_RECENT_MESSAGES,
-  decodeSlackEntities,
-  isOversize,
+  MEMBERS_SHOW_MAX,
   recentWindow,
-} from "./lib.ts";
+} from "../surfaces/conversation.ts";
+import { countedReactions, type ReactionTally } from "../surfaces/reaction-tally.ts";
 import type { BotIdentity, Directory } from "./directory.ts";
 import type { SlackConversationKind } from "./messaging.ts";
 import { type SlackHistoryMessage } from "./payloads.ts";
@@ -21,15 +20,12 @@ export const RECENT_HISTORY_LIMIT = 200;
 export const RECENT_THREAD_LIMIT = 200;
 export const MAX_NAME_LOOKUPS = 10;
 const RECENT_KEEP_SUBTYPES = new Set(["file_share", "bot_message", "thread_broadcast"]);
-const MEMBERS_SHOW_MAX = 40;
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
 
 export function reactionTallies(raw: unknown): ReactionTally[] {
   if (!Array.isArray(raw)) return [];
-  return raw
-    .map((r: any) => ({ name: String(r?.name ?? ""), count: Number(r?.count) || 0 }))
-    .filter((r) => r.name && r.count > 0);
+  return countedReactions(raw.map((r: any) => ({ name: String(r?.name ?? ""), count: Number(r?.count) || 0 })));
 }
 
 export interface ConversationSerializer {
@@ -173,6 +169,7 @@ export function createConversationSerializer(deps: {
     },
   ): Promise<{ view: ConversationView }> {
     const empty: ConversationView = {
+      messageIds: SLACK_MESSAGE_IDS,
       channel: { kind: ctx.kind ?? inc.kind },
       members: [],
       messages: [],
@@ -242,6 +239,7 @@ export function createConversationSerializer(deps: {
       .map((f) => ({ name: slackFileName(f), reason: "too-big" as const }));
 
     const view: ConversationView = {
+      messageIds: SLACK_MESSAGE_IDS,
       channel: {
         ...(ctx.channelName ? { name: ctx.channelName } : {}),
         kind: ctx.kind ?? inc.kind,

@@ -6,6 +6,7 @@ import type { Principal } from "../types.ts";
 import { conversationWebUrl } from "../util/conversation-links.ts";
 import { collectBytes } from "../util/bytes.ts";
 import { swallowAs } from "../util/errors.ts";
+import { SLACK_CONTAINER } from "../surfaces/message-ids.ts";
 import type { App, AppDeps } from "./app-types.ts";
 import type { AppHelpers } from "./app-helpers.ts";
 
@@ -110,7 +111,10 @@ function slackBackend(deps: AppDeps, app: App): SearchBackend | null {
   return {
     name: "slack",
     async search(request) {
-      const messages = await app.searchSurface(request.query, { limit: Math.min(100, request.limit * 4) });
+      const messages = await app.searchSurface(request.query, {
+        containerPattern: SLACK_CONTAINER.source,
+        limit: Math.min(100, request.limit * 4),
+      });
       const hits: BackendSearchHit[] = [];
       for (const message of messages) {
         const visible = await Promise.all(request.principals.map((p) => canSee(p, message.container)));

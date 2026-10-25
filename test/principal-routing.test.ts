@@ -262,6 +262,7 @@ test("relaySenderAttribution formats attribution string and discord dispatcher r
     edit: async () => {},
     react: async () => {},
     remove: async () => {},
+    unreact: async () => {},
     openDm: async (userId) => {
       log.push(`openDm:${userId}`);
       return "dm-chan-42";
@@ -356,6 +357,22 @@ test("createDiscordPrincipalRoute uses status alone without calling decrypting g
   assert.equal(await none("ana@acme.com"), null);
 });
 
+test("a Discord-only person is still reachable by Discord DM when extra personal-notice copies are off", async () => {
+  const off = createDiscordPrincipalRoute({
+    installation: installationStatus({ configured: true, disabled: false, principalDeliveries: false }),
+    environmentConfigured: false,
+    linkedDiscordUserIds,
+  });
+  const store = withPrincipalRouting(createDeliveryStore(), off);
+  const row = await store.enqueue({
+    destination: principalDestination(discordExternalId("4242"), "ana@acme.com"),
+    text: "hand-off",
+    idempotencyKey: "k-discord-only",
+  });
+  assert.equal(row.destination.type, DISCORD_DM_DELIVERY_TYPE);
+  assert.equal(await off("ana@acme.com"), null);
+});
+
 test("linkedDiscordUserIds extracts linked discord user ids from principal links", async () => {
   const links: PrincipalLinkService = createPrincipalLinkService();
   installPrincipalLinks(links);
@@ -385,6 +402,7 @@ test("withPrincipalRouting feeds discord-dm copies to the discord dispatcher", a
     edit: async () => {},
     react: async () => {},
     remove: async () => {},
+    unreact: async () => {},
     openDm: async (userId) => {
       log.push(`openDm:${userId}`);
       return "dm-chan-42";
@@ -481,6 +499,7 @@ test("recordPrincipalDelivery records recipient thread for discord-dm deliveries
   const threadDeliveries = await built.deliveries.listByRecipientThread("discord:dm:channel-99");
   assert.equal(threadDeliveries.length, 1);
   assert.equal(threadDeliveries[0]!.id, delivery.id);
+  assert.equal((await built.sessions.getByThread("discord:dm:channel-99"))?.surface, "discord");
 });
 
 test("a keychain resolution row gets no discord copy while the initial card still does", async () => {
@@ -500,4 +519,33 @@ test("a keychain resolution row gets no discord copy while the initial card stil
     (await store.pending("principal")).map((d) => d.idempotencyKey),
     ["ask:k1:notice", "ask:k1:resolved"],
   );
+});
+
+test("a Discord-only principal gets one discord-dm delivery and no stranded principal row", async () => {
+  const store = withPrincipalRouting(createDeliveryStore(), async () => DISCORD_DM_DELIVERY_TYPE);
+  const result = await store.enqueue({
+    destination: principalDestination("discord:42", "bob@acme.com"),
+    text: "hi",
+    idempotencyKey: "h1",
+  });
+  assert.equal(result.destination.type, DISCORD_DM_DELIVERY_TYPE);
+  assert.equal(result.destination.copyOf, undefined);
+  assert.equal(result.idempotencyKey, "h1");
+  assert.deepEqual(await store.pending("principal"), []);
+  assert.deepEqual(
+    (await store.pending(DISCORD_DM_DELIVERY_TYPE)).map((d) => d.destination.target),
+    ["discord:42"],
+  );
+});
+
+test("a Discord-only principal enqueues nothing when Discord routing is off or the route fails", async () => {
+  const destination = principalDestination("discord:42", "bob@acme.com");
+  const off = withPrincipalRouting(createDeliveryStore(), async () => null);
+  await assert.rejects(off.enqueue({ destination, text: "hi", idempotencyKey: "h2" }), /discord delivery unavailable/);
+  assert.deepEqual(await off.pending("principal"), []);
+  const failing = withPrincipalRouting(createDeliveryStore(), async () => {
+    throw new Error("install store down");
+  });
+  await assert.rejects(failing.enqueue({ destination, text: "hi", idempotencyKey: "h3" }), /install store down/);
+  assert.deepEqual(await failing.pending("principal"), []);
 });

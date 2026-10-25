@@ -315,11 +315,11 @@ test("the card goes where the request came from, never to someone else's DM", ()
   assert.equal(approvalCardDestination(ask)!.target, "alice");
 });
 
-test("a Discord-originated ask routes its card to the owner's Discord DM, never the channel", () => {
+test("a Discord-originated ask routes its card to the owner by principal routing, never the channel", () => {
   const ask = { id: "a1", ownerId: "alice", requesterId: "bob", requesterScopeId: "channel:C1" } as KeychainAsk;
   const fromDiscord = { type: "discord", target: "123456", audienceScopeId: "channel:C1" };
   assert.deepEqual(approvalCardDestination({ ...ask, requesterDestination: fromDiscord }), {
-    type: "discord-dm",
+    type: "principal",
     target: "alice",
     audienceScopeId: "personal:alice",
     onBehalfOf: "bob",
@@ -327,11 +327,11 @@ test("a Discord-originated ask routes its card to the owner's Discord DM, never 
   });
 });
 
-test("a discord-dm-origin ask routes its card to the owner's discord-dm row", () => {
+test("a discord-dm-origin ask routes its card to the owner by principal routing", () => {
   const ask = { id: "a1", ownerId: "alice", requesterId: "bob", requesterScopeId: "channel:C1" } as KeychainAsk;
   const fromDm = { type: "discord-dm", target: "bob", audienceScopeId: "channel:C1" };
   assert.deepEqual(approvalCardDestination({ ...ask, requesterDestination: fromDm }), {
-    type: "discord-dm",
+    type: "principal",
     target: "alice",
     audienceScopeId: "personal:alice",
     onBehalfOf: "bob",

@@ -304,7 +304,6 @@ test("spine mode posts nothing itself when the agent spoke through deliveries", 
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, []);
@@ -325,7 +324,6 @@ test("spine mode posts a refusal, because core has nothing to deliver", async ()
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, [
@@ -349,7 +347,6 @@ test("a guest appears before the spine refusal post → no reason or adminUrl te
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -375,7 +372,6 @@ test("a guest appears before the spine approval post → the approval text and a
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -395,7 +391,6 @@ test("a guest appears before the spine failure post → the neutral text is post
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -444,7 +439,6 @@ test("spine mode posts the same approval pointer in the thread", async () => {
     channel: channel(log),
     body: baseBody,
     mode: "spine",
-    inFlightRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, [
@@ -972,4 +966,198 @@ test("streamRun does not resolve before an in-flight tick's edit settles", async
     releaseWait({ status: "ok", reply: "final answer" });
     await turn.catch(() => {});
   }
+});
+
+test("stream mode applies a detect-time react outcome and drops the status message", async () => {
+  const log = fresh();
+  const reacted: (readonly string[])[] = [];
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "react", reactions: ["tada", "eyes"] }) }),
+    channel: channel(log),
+    body,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+    onReact: async (names) => {
+      reacted.push(names);
+    },
+  });
+  assert.deepEqual(reacted, [["tada", "eyes"]]);
+  assert.equal(log.deleted, 1);
+  assert.ok(!log.edits.includes("(no response)"));
+});
+
+test("spine mode reacts only when posting is allowed", async () => {
+  const reacted: (readonly string[])[] = [];
+  const run = async (mayPost: () => Promise<boolean>) => {
+    await runDiscordTurn({
+      core: core({ submit: async () => ({ status: "react", reactions: ["tada"] }) }),
+      channel: channel(fresh()),
+      body: baseBody,
+      mode: "spine",
+      mayPost,
+      onReact: async (names) => {
+        reacted.push(names);
+      },
+    });
+  };
+  await run(allowAll);
+  await run(async () => false);
+  assert.deepEqual(reacted, [["tada"]]);
+});
+
+test("an unprompted stream turn posts no working message and stays quiet on failure", async () => {
+  const log = fresh();
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "failed" }) }),
+    channel: channel(log),
+    body: { ...body, unprompted: true },
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
+  assert.deepEqual([log.sent, log.edits], [[], []]);
+});
+
+test("an unprompted stream turn still posts a real reply", async () => {
+  const log = fresh();
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "ok", reply: "hello" }) }),
+    channel: channel(log),
+    body: { ...body, unprompted: true },
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  });
+  assert.deepEqual(log.sent, ["hello"]);
+});
+
+test("an unprompted spine turn posts nothing on refusal, approval or failure", async () => {
+  for (const submit of [
+    async () => ({ status: "refused" as const, reason: "no" }),
+    async () => ({ status: "pending_approval" as const }),
+    async (): Promise<TurnResult> => {
+      throw new Error("down");
+    },
+  ]) {
+    const log = fresh();
+    await runDiscordTurn({
+      core: core({ submit }),
+      channel: channel(log),
+      body: { ...baseBody, unprompted: true },
+      mode: "spine",
+      mayPost: allowAll,
+    });
+    assert.deepEqual(log.sent, []);
+  }
+});
+
+function typingChannel(counter: { n: number }): ReplyChannel {
+  return {
+    send: async () => ({ id: "s1", edit: async () => {}, delete: async () => {} }),
+    typing: async () => {
+      counter.n += 1;
+    },
+  };
+}
+
+test("spine typing for an unprompted turn starts only once the reply begins", async () => {
+  const typed = { n: 0 };
+  let beforeReplying = -1;
+  const c = {
+    ...core({}),
+    waitRun: async (_id: string, hooks?: { onReplying?: () => void }) => {
+      beforeReplying = typed.n;
+      hooks?.onReplying?.();
+      return { status: "silent" };
+    },
+  } as unknown as SurfaceCoreClient;
+  await runDiscordTurn({
+    core: c,
+    channel: typingChannel(typed),
+    body: { ...baseBody, unprompted: true },
+    mode: "spine",
+    mayPost: allowAll,
+  });
+  assert.equal(beforeReplying, 0);
+  assert.equal(typed.n, 1);
+});
+
+test("spine typing for an unprompted turn the agent declines never shows", async () => {
+  const typed = { n: 0 };
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "silent" }) }),
+    channel: typingChannel(typed),
+    body: { ...baseBody, unprompted: true },
+    mode: "spine",
+    mayPost: allowAll,
+  });
+  assert.equal(typed.n, 0);
+});
+
+test("spine typing for a prompted turn starts immediately", async () => {
+  const typed = { n: 0 };
+  await runDiscordTurn({
+    core: core({ wait: async () => ({ status: "silent" }) }),
+    channel: typingChannel(typed),
+    body: baseBody,
+    mode: "spine",
+    mayPost: allowAll,
+  });
+  assert.equal(typed.n, 1);
+});
+
+test("a spine turn calls onNoReply for every outcome except ok, including failed and null results", async () => {
+  const outcomes: Array<[string, TurnResult | null, boolean]> = [
+    ["ok", { status: "ok", reply: "hi" }, false],
+    ["failed", { status: "failed" }, true],
+    ["null", null, true],
+    ["silent", { status: "silent" }, true],
+  ];
+  for (const [name, result, expected] of outcomes) {
+    let calls = 0;
+    await runDiscordTurn({
+      core: core({ wait: async () => result }),
+      channel: channel(fresh()),
+      body: { ...baseBody, unprompted: true },
+      mode: "spine",
+      mayPost: allowAll,
+      onNoReply: async () => void (calls += 1),
+    });
+    assert.equal(calls > 0, expected, name);
+  }
+});
+
+test("a spine turn whose wait throws keeps the thread, because the run is still live", async () => {
+  let calls = 0;
+  await runDiscordTurn({
+    core: core({
+      wait: async () => {
+        throw new Error("stall budget");
+      },
+    }),
+    channel: channel(fresh()),
+    body: { ...baseBody, unprompted: true },
+    mode: "spine",
+    mayPost: allowAll,
+    onNoReply: async () => void (calls += 1),
+  });
+  assert.equal(calls, 0);
+});
+
+test("a spine turn whose submit throws calls onNoReply, because no run exists", async () => {
+  let calls = 0;
+  await runDiscordTurn({
+    core: core({
+      submit: async () => {
+        throw new Error("down");
+      },
+    }),
+    channel: channel(fresh()),
+    body: { ...baseBody, unprompted: true },
+    mode: "spine",
+    mayPost: allowAll,
+    onNoReply: async () => void (calls += 1),
+  });
+  assert.equal(calls, 1);
 });

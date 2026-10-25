@@ -38,6 +38,7 @@ function harness(
     edit: async (c, id, m) => void log.push(`edit:${c}:${id}:${m.content}`),
     react: async (c, id, e) => void log.push(`react:${c}:${id}:${e}`),
     remove: async (c, id) => void log.push(`remove:${c}:${id}`),
+    unreact: async (c, id, e) => void log.push(`unreact:${c}:${id}:${e}`),
     openDm: async () => "dm",
   };
   const core = {
@@ -65,6 +66,21 @@ function harness(
 test("targets carry an optional reply-to message", () => {
   assert.deepEqual(parseDiscordTarget("c1"), { channelId: "c1" });
   assert.deepEqual(parseDiscordTarget("c1:m1"), { channelId: "c1", replyTo: "m1" });
+});
+
+test("a react delivery decodes a ~id token to the message snowflake and reacts on that message", async () => {
+  const h = harness([
+    row({ id: "r1", text: "", destination: { react: { messageTs: "~9vkbjfeanyf5", emoji: "👍" } } }),
+    row({ id: "r2", text: "", destination: { react: { messageTs: "1300000000000000002", emoji: "👍" } } }),
+  ]);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["react:c1:1300000000000000001:👍", "ack:r1", "react:c1:1300000000000000002:👍", "ack:r2"]);
+});
+
+test("a react delivery whose ~id token is not a snowflake is reported undeliverable, not reacted", async () => {
+  const h = harness([row({ id: "r1", text: "", destination: { react: { messageTs: "~zz", emoji: "👍" } } })]);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["undeliverable:r1:Discord cannot resolve that message id", "ack:r1"]);
 });
 
 test("a plain post is sent and acked", async () => {
@@ -102,17 +118,42 @@ test("a long editRef delivery edits the placeholder and sends the rest", async (
   assert.equal(h.log.at(-1), "ack:d1");
 });
 
-test("reactions need a Unicode emoji; a :name: is reported and acked, not retried", async () => {
+test("an unresolvable emoji is reported and acked, not retried", async () => {
   const good = row({ id: "r1", text: "", destination: { react: { messageTs: "m1", emoji: "👍" } } });
-  const bad = row({ id: "r2", text: "", destination: { react: { messageTs: "m1", emoji: "thumbsup" } } });
+  const bad = row({ id: "r2", text: "", destination: { react: { messageTs: "m1", emoji: "no_such_emoji_zz" } } });
   const h = harness([good, bad]);
   await h.dispatcher.drain();
-  assert.deepEqual(h.log, [
-    "react:c1:m1:👍",
-    "ack:r1",
-    "undeliverable:r2:Discord reactions need a Unicode emoji",
-    "ack:r2",
-  ]);
+  assert.deepEqual(h.log, ["react:c1:m1:👍", "ack:r1", "undeliverable:r2:Discord cannot resolve that emoji", "ack:r2"]);
+});
+
+test("shortcodes and custom guild emoji forms resolve to what discord accepts", async () => {
+  const emojis = [
+    "+1",
+    ":tada:",
+    "<:party:123456789012345678>",
+    "<a:spin:123456789012345679>",
+    "wave:123456789012345680",
+    ":TADA:",
+    ":heart:",
+    "thumbsup",
+  ];
+  const h = harness(
+    emojis.map((emoji, i) => row({ id: `e${i}`, text: "", destination: { react: { messageTs: "m1", emoji } } })),
+  );
+  await h.dispatcher.drain();
+  assert.deepEqual(
+    h.log.filter((l) => l.startsWith("react:")),
+    [
+      "react:c1:m1:👍",
+      "react:c1:m1:🎉",
+      "react:c1:m1:party:123456789012345678",
+      "react:c1:m1:a:spin:123456789012345679",
+      "react:c1:m1:wave:123456789012345680",
+      "react:c1:m1:🎉",
+      "react:c1:m1:\u2764\uFE0F",
+      "react:c1:m1:👍",
+    ],
+  );
 });
 
 test("deletes remove the message", async () => {
@@ -202,6 +243,7 @@ test("lease loss mid-drain stops dispatching subsequent deliveries", async () =>
     edit: async () => {},
     react: async () => {},
     remove: async () => {},
+    unreact: async () => {},
     openDm: async () => "dm",
   };
   const core = {

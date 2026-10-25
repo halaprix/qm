@@ -66,6 +66,7 @@ export type CronCreateResult =
         | "group_not_found"
         | "not_a_member"
         | "identity_unverified"
+        | "discord_channel_unavailable"
         | "unknown_destination"
         | "forbidden"
         | "cron_create_failed";
@@ -173,7 +174,7 @@ export interface ControlService {
     patch: { action: string },
     claims: CapabilityClaims,
   ): Promise<ControlOk<{ webhook: Webhook }> | ControlErr<"not_found" | "forbidden" | "bad_request">>;
-  readSoul(claims: CapabilityClaims): { effectiveSoul: string; soul: string | null; soulVersion: number };
+  readSoul(claims: CapabilityClaims): Promise<{ effectiveSoul: string; soul: string | null; soulVersion: number }>;
   writeSoul(
     content: string,
     claims: CapabilityClaims,
@@ -403,7 +404,8 @@ export function createControlService(app: App, scheduler?: Scheduler, admin?: Ad
             | "ambiguous_channel"
             | "group_not_found"
             | "not_a_member"
-            | "identity_unverified" = "bad_request";
+            | "identity_unverified"
+            | "discord_channel_unavailable" = "bad_request";
           const RESOLVER_CODES = new Set(["recipient_not_found", "ambiguous_recipient", "group_not_found"]);
           if (RESOLVER_CODES.has(r.error)) {
             code = r.error as typeof code;
@@ -413,7 +415,8 @@ export function createControlService(app: App, scheduler?: Scheduler, admin?: Ad
           } else if (r.status === 409) {
             code = req.recipient !== undefined ? "ambiguous_recipient" : "ambiguous_channel";
           } else if (r.status === 403) {
-            code = r.error === "identity_unverified" ? "identity_unverified" : "not_a_member";
+            code =
+              r.error === "identity_unverified" || r.error === "discord_channel_unavailable" ? r.error : "not_a_member";
           }
           return {
             ok: false,
@@ -773,8 +776,8 @@ export function createControlService(app: App, scheduler?: Scheduler, admin?: Ad
       return editWebhookTask(app, id, patch.action, capability.actorId);
     },
 
-    readSoul(capability) {
-      const { effectiveSoul, soul, soulVersion } = app.getSoul(capability.scopeId);
+    async readSoul(capability) {
+      const { effectiveSoul, soul, soulVersion } = await app.getSoul(capability.scopeId);
       return { effectiveSoul, soul, soulVersion };
     },
 

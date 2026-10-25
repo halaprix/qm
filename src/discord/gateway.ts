@@ -2,14 +2,17 @@ import {
   ChannelType,
   PermissionFlagsBits,
   RESTJSONErrorCodes,
+  type Channel,
   type Client,
   type GuildMember,
   type Message,
 } from "discord.js";
 import type { ActorAssertion } from "../types.ts";
 import type { DiscordPluginConfig } from "./config.ts";
-import type { DiscordHistoryReader, HistoryMessage } from "./context.ts";
+import type { DirectoryPerson } from "./directory.ts";
+import type { DiscordHistoryReader, DiscordThreadInfo, HistoryMessage } from "./context.ts";
 import type { ChannelKind } from "./deliveries.ts";
+import { attachmentRefs, withForwardedContent } from "./forwards.ts";
 import type { DiscordInbound } from "./events.ts";
 import type { MemberHydrator } from "./member-hydrator.ts";
 import {
@@ -19,10 +22,17 @@ import {
   type DiscordMemberFacts,
   type LinkedInternal,
 } from "./members.ts";
+import { SNOWFLAKE } from "../util/snowflake.ts";
+import { compareIds } from "../surfaces/conversation.ts";
 import type { ChannelViewers } from "./readers.ts";
+import { reactionTallies } from "./reactions.ts";
 import type { StakeMessage } from "./thread-stake.ts";
 
+const GONE_CODES: unknown[] = [RESTJSONErrorCodes.UnknownChannel, RESTJSONErrorCodes.MissingAccess];
+const isGone = (err: unknown): boolean =>
+  GONE_CODES.includes((err as { code?: unknown }).code) || (err as { status?: unknown }).status === 404;
 const STAKE_HISTORY_LIMIT = 100;
+const AVATAR_SIZE = 64;
 
 export function memberFacts(m: GuildMember): DiscordMemberFacts {
   return {
@@ -33,27 +43,111 @@ export function memberFacts(m: GuildMember): DiscordMemberFacts {
   };
 }
 
-function cachedBase(client: Client, channelId: string) {
-  const ch = client.channels.cache.get(channelId);
-  if (!ch) return null;
-  const base = ch.isThread() ? ch.parent : ch;
+const DM_CHANNEL_NAME = "direct message";
+
+export function displayNameOf(
+  member: { displayName: string } | null | undefined,
+  user: { globalName: string | null; username: string },
+): string {
+  return member?.displayName ?? user.globalName ?? user.username;
+}
+
+export type ThreadLinker = (threadId: string, parentId: string) => Promise<void>;
+
+export interface DiscordChannels {
+  fetch(channelId: string): Promise<Channel | null>;
+  cached(channelId: string): Promise<Channel | null>;
+  unlinkedCache(): Iterable<Channel>;
+  linked<T extends Channel>(ch: T): Promise<T>;
+}
+
+export function createDiscordChannels(client: Pick<Client, "channels">, link: ThreadLinker): DiscordChannels {
+  const linked = async <T extends Channel>(ch: T): Promise<T> => {
+    if (ch.type === ChannelType.PrivateThread && ch.parentId) await link(ch.id, ch.parentId);
+    return ch;
+  };
+  return {
+    linked,
+    fetch: async (channelId) => {
+      const ch = await client.channels.fetch(channelId);
+      return ch && linked(ch);
+    },
+    cached: async (channelId) => {
+      const ch = client.channels.cache.get(channelId);
+      return ch ? linked(ch) : null;
+    },
+    unlinkedCache: () => client.channels.cache.values(),
+  };
+}
+
+async function fetchIfPresent(channels: DiscordChannels, channelId: string): Promise<Channel | null> {
+  try {
+    return await channels.fetch(channelId);
+  } catch (err) {
+    if (isGone(err)) return null;
+    throw err;
+  }
+}
+
+function baseOf(ch: Channel | null) {
+  const base = ch?.isThread() ? ch.parent : ch;
   return base && "guild" in base && "permissionsFor" in base ? base : null;
 }
 
-export function cachedViewers(client: Client, baseChannelId: string): ChannelViewers {
-  const base = cachedBase(client, baseChannelId);
+export function scopeChannelId(ch: {
+  id: string;
+  type: ChannelType;
+  isThread(): boolean;
+  parentId?: string | null;
+}): string {
+  if (ch.type === ChannelType.PrivateThread || !ch.isThread()) return ch.id;
+  return ch.parentId ?? ch.id;
+}
+
+export async function channelViewers(channels: DiscordChannels, channelId: string): Promise<ChannelViewers> {
+  let ch;
+  try {
+    ch = await channels.cached(channelId);
+  } catch {
+    return { ok: false, reason: "members_not_ready" };
+  }
+  const base = baseOf(ch);
   if (!base) return { ok: false, reason: "not_a_guild_channel" };
+  let threadMembers: ReadonlySet<string> | null = null;
+  if (ch?.type === ChannelType.PrivateThread) {
+    try {
+      threadMembers = new Set((await ch.members.fetch()).keys());
+    } catch (err) {
+      return { ok: false, reason: isGone(err) ? "not_a_guild_channel" : "members_not_ready" };
+    }
+  }
   const members = [...base.guild.members.cache.values()]
-    .filter((m) => base.permissionsFor(m).has(PermissionFlagsBits.ViewChannel))
+    .filter((m) => {
+      const perms = base.permissionsFor(m);
+      if (!perms.has(PermissionFlagsBits.ViewChannel)) return false;
+      return !threadMembers || threadMembers.has(m.id) || perms.has(PermissionFlagsBits.ManageThreads);
+    })
     .map(memberFacts);
   return { ok: true, guildId: base.guild.id, members };
 }
 
-export function createChannelKind(client: Client): (channelId: string) => Promise<ChannelKind | null> {
+export function cachedPeople(client: Client, guildIds: ReadonlySet<string>): DirectoryPerson[] {
+  const people = new Map<string, DirectoryPerson>();
+  for (const guildId of guildIds) {
+    for (const m of client.guilds.cache.get(guildId)?.members.cache.values() ?? []) {
+      if (!m.user.bot && !people.has(m.id)) {
+        people.set(m.id, { userId: m.id, avatarUrl: m.displayAvatarURL({ extension: "png", size: AVATAR_SIZE }) });
+      }
+    }
+  }
+  return [...people.values()];
+}
+
+export function createChannelKind(channels: DiscordChannels): (channelId: string) => Promise<ChannelKind | null> {
   return async (channelId) => {
     let ch;
     try {
-      ch = await client.channels.fetch(channelId);
+      ch = await channels.fetch(channelId);
     } catch (err) {
       if ((err as { code?: unknown }).code === RESTJSONErrorCodes.UnknownChannel) return null;
       throw err;
@@ -62,7 +156,7 @@ export function createChannelKind(client: Client): (channelId: string) => Promis
     if (ch.type === ChannelType.DM) return { kind: "dm", recipientId: ch.recipientId };
     const base = ch.isThread() ? ch.parent : ch;
     if (!base || !("guild" in base)) return null;
-    return { kind: "guild", baseChannelId: base.id };
+    return { kind: "guild", baseChannelId: scopeChannelId(ch) };
   };
 }
 
@@ -101,9 +195,9 @@ export function createUserClassifier(deps: {
   };
 }
 
-export function createStakeHistory(client: Client): (threadId: string) => Promise<StakeMessage[]> {
+export function createStakeHistory(channels: DiscordChannels): (threadId: string) => Promise<StakeMessage[]> {
   return async (threadId) => {
-    const ch = await client.channels.fetch(threadId);
+    const ch = await channels.fetch(threadId);
     if (!ch?.isTextBased()) return [];
     const recent = await ch.messages.fetch({ limit: STAKE_HISTORY_LIMIT });
     return [...recent.values()].map((m) => ({ authorId: m.author.id, mentionedUserIds: [...m.mentions.users.keys()] }));
@@ -111,6 +205,7 @@ export function createStakeHistory(client: Client): (threadId: string) => Promis
 }
 
 export function toInbound(message: Message): DiscordInbound {
+  const forwarded = withForwardedContent(message.content, message.messageSnapshots?.values() ?? []);
   return {
     id: message.id,
     channelId: message.channelId,
@@ -118,75 +213,93 @@ export function toInbound(message: Message): DiscordInbound {
     threadParentId: message.channel.isThread() ? message.channel.parentId : null,
     channelName: "name" in message.channel ? message.channel.name : null,
     authorId: message.author.id,
-    authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username,
+    authorName: displayNameOf(message.member, message.author),
     authorIsBot: message.author.bot,
-    content: message.content,
+    content: forwarded.text,
     mentionedUserIds: [...message.mentions.users.keys()],
-    attachments: [...message.attachments.values()].map((a) => ({
-      url: a.url,
-      name: a.name,
-      contentType: a.contentType,
-      size: a.size,
-    })),
+    attachments: [...attachmentRefs(message.attachments), ...forwarded.attachments],
+  };
+}
+
+function toHistoryMessage(m: Message, threadId: string | null): HistoryMessage {
+  return {
+    id: m.id,
+    authorId: m.author.id,
+    authorName: displayNameOf(m.member, m.author),
+    authorIsBot: m.author.bot,
+    text: withForwardedContent(m.content, m.messageSnapshots?.values() ?? []).text,
+    reactions: reactionTallies(m.reactions.cache.values()),
+    ...(threadId ? { threadTs: threadId } : {}),
   };
 }
 
 export function createDiscordHistoryReader(deps: {
-  client: Client;
+  channels: DiscordChannels;
   guildIds: ReadonlySet<string>;
   hydrator: Pick<MemberHydrator, "ready">;
 }): DiscordHistoryReader {
   return {
+    async find(query: string) {
+      const wanted = query.trim().replace(/^#/, "").toLowerCase();
+      const inScope = (ch: Channel | null): ch is Channel & { name: string } =>
+        ch !== null &&
+        ch.isTextBased() &&
+        "guildId" in ch &&
+        "name" in ch &&
+        deps.guildIds.has(ch.guildId) &&
+        (ch.id === wanted || ch.name.toLowerCase() === wanted);
+      const hits = [...deps.channels.unlinkedCache()].filter(inScope);
+      const byId = hits.filter((ch) => ch.id === wanted);
+      const fetched = byId.length === 0 && SNOWFLAKE.test(wanted) ? await fetchIfPresent(deps.channels, wanted) : null;
+      if (fetched?.type === ChannelType.DM) return [{ id: fetched.id, name: DM_CHANNEL_NAME, dm: true as const }];
+      const exact = inScope(fetched) ? [fetched] : byId;
+      return Promise.all(
+        (exact.length > 0 ? exact : hits).map(async (ch) => {
+          await deps.channels.linked(ch);
+          return { id: ch.id, name: ch.name };
+        }),
+      );
+    },
     async recent(channelId: string, opts: { count: number; before?: string }): Promise<HistoryMessage[]> {
-      const cached = deps.client.channels.cache.get(channelId);
-      const ch = cached ?? (await deps.client.channels.fetch(channelId));
+      const ch = await deps.channels.fetch(channelId);
       if (!ch || !ch.isTextBased()) return [];
       const fetched = await ch.messages.fetch({
         limit: opts.count,
         ...(opts.before ? { before: opts.before } : {}),
       });
-      const isThread = ch.isThread();
-      return [...fetched.values()]
-        .sort((a, b) => {
-          const diff = BigInt(a.id) - BigInt(b.id);
-          if (diff < 0n) return -1;
-          if (diff > 0n) return 1;
-          return 0;
-        })
-        .map((m) => {
-          const authorName = m.member ? m.member.displayName : (m.author.globalName ?? m.author.username);
-          return {
-            id: m.id,
-            authorId: m.author.id,
-            authorName,
-            text: m.content,
-            ...(isThread ? { threadTs: ch.id } : {}),
-          };
-        });
+      const threadId = ch.isThread() ? ch.id : null;
+      return [...fetched.values()].sort((a, b) => compareIds(a.id, b.id)).map((m) => toHistoryMessage(m, threadId));
     },
 
-    async canView(channelId: string, userId: string): Promise<boolean> {
+    async thread(threadId: string): Promise<DiscordThreadInfo> {
+      const ch = await deps.channels.fetch(threadId);
+      if (!ch?.isThread()) return { ownerId: null, starter: null };
+      const starter = await ch.fetchStarterMessage().catch(() => null);
+      return { ownerId: ch.ownerId, starter: starter ? toHistoryMessage(starter, ch.id) : null };
+    },
+
+    async canView(channelId: string, userId: string): Promise<boolean | undefined> {
       try {
-        const ch = deps.client.channels.cache.get(channelId);
+        const ch = await fetchIfPresent(deps.channels, channelId);
         if (!ch) return false;
         if (ch.type === ChannelType.DM) {
           return ch.recipientId === userId;
         }
-        const base = cachedBase(deps.client, channelId);
+        const base = baseOf(ch);
         if (!base) return false;
         if (!deps.guildIds.has(base.guild.id)) return false;
-        if (!deps.hydrator.ready(base.guild.id)) return false;
+        if (!deps.hydrator.ready(base.guild.id)) return undefined;
         const member = base.guild.members.cache.get(userId);
         if (!member) return false;
         const perms = base.permissionsFor(member);
         if (!perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])) return false;
         if (ch.type === ChannelType.PrivateThread) {
-          const inMembers = ch.members.cache.has(userId);
-          return inMembers || perms.has(PermissionFlagsBits.ManageThreads);
+          if (ch.members.cache.has(userId) || perms.has(PermissionFlagsBits.ManageThreads)) return true;
+          await ch.members.fetch({ member: userId, cache: false });
         }
         return true;
-      } catch {
-        return false;
+      } catch (err) {
+        return isGone(err) ? false : undefined;
       }
     },
   };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { audienceWith, channelReaders } from "../src/discord/readers.ts";
+import { audienceWith, channelReaders, turnPostGate, type ReaderResult } from "../src/discord/readers.ts";
 import { classifyMember, type DiscordMemberFacts } from "../src/discord/members.ts";
 
 const BOT = "999";
@@ -107,4 +107,34 @@ test("the actor is always in the audience", () => {
     ["discord:2", "discord:1"],
   );
   assert.equal(audienceWith([{ externalId: "discord:1" }], { externalId: "discord:1" }).length, 1);
+});
+
+test("a turn's post gate reads the channel's readers once however often the turn posts", async () => {
+  const reads: string[] = [];
+  const readersOf = (result: ReaderResult) => async (channelId: string) => {
+    reads.push(channelId);
+    return result;
+  };
+  const internal = turnPostGate(readersOf({ ok: true, readers: [{ externalId: "discord:1" }] }), "t1");
+  assert.deepEqual([await internal(), await internal(), await internal()], [true, true, true]);
+  assert.deepEqual(reads, ["t1"]);
+  const guest = turnPostGate(
+    readersOf({ ok: true, readers: [{ externalId: "discord:2", isExternalGuest: true }] }),
+    "t2",
+  );
+  assert.equal(await guest(), false);
+  const unknown = turnPostGate(readersOf({ ok: false, retry: true, reason: "members_not_ready" }), "t3");
+  assert.equal(await unknown(), false);
+});
+
+test("a turn's post gate retries readers that were unknown and then keeps the definite answer", async () => {
+  const results: ReaderResult[] = [
+    { ok: false, retry: true, reason: "members_not_ready" },
+    { ok: true, readers: [{ externalId: "discord:1" }] },
+    { ok: true, readers: [{ externalId: "discord:2", isExternalGuest: true }] },
+  ];
+  let reads = 0;
+  const gate = turnPostGate(async () => results[reads++]!, "t1");
+  assert.deepEqual([await gate(), await gate(), await gate()], [false, true, true]);
+  assert.equal(reads, 2);
 });

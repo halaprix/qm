@@ -1,17 +1,19 @@
 import { RESTJSONErrorCodes } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
 import type { ActorAssertion, Delivery } from "../types.ts";
+import { DISCORD_MESSAGE_IDS, MESSAGE_ID_TOKEN } from "../surfaces/message-ids.ts";
 import { errMessage } from "../util/errors.ts";
 import { toDiscordFiles } from "./attachments.ts";
-import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE } from "./config.ts";
+import { resolveDiscordEmoji } from "./emoji.ts";
+import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, discordDmThreadRef } from "./config.ts";
 import { chunkMessage } from "./format.ts";
 import type { ReaderResult } from "./readers.ts";
 import type { DiscordSender, OutboundMessage } from "./sender.ts";
 import { relaySenderAttribution } from "../reach/reach.ts";
+import { runIdOfDeliveryKey } from "../delivery/run-result-delivery.ts";
 
 export const DISCORD_DELIVERY_CLAIM_MS = 15_000;
 export const DISCORD_RUN_RECOVERY_GRACE_MS = 15_000;
-const UNICODE_EMOJI = /^\p{Extended_Pictographic}/u;
 const EMPTY_TEXT = "(no response)";
 const DM_CLOSED_CODE = RESTJSONErrorCodes.CannotSendMessagesToThisUser;
 
@@ -77,8 +79,8 @@ export function createDiscordDispatcher(deps: {
   const now = deps.now ?? Date.now;
 
   function waitingOnRun(d: Delivery): boolean {
-    if (!d.idempotencyKey.startsWith("run:")) return false;
-    const runId = d.idempotencyKey.slice("run:".length);
+    const runId = runIdOfDeliveryKey(d.idempotencyKey);
+    if (runId === undefined) return false;
     return deps.inFlightRuns.has(runId) || now() - d.createdAt < DISCORD_RUN_RECOVERY_GRACE_MS;
   }
 
@@ -90,11 +92,19 @@ export function createDiscordDispatcher(deps: {
   async function deliverTo(channelId: string, d: Delivery, replyTo: string | undefined): Promise<void> {
     const dest = d.destination;
     if (dest.react) {
-      if (!UNICODE_EMOJI.test(dest.react.emoji)) {
-        await deps.core.reportDeliveryUndeliverable(d.id, "Discord reactions need a Unicode emoji");
+      const emoji = resolveDiscordEmoji(dest.react.emoji);
+      if (!emoji) {
+        await deps.core.reportDeliveryUndeliverable(d.id, "Discord cannot resolve that emoji");
         return;
       }
-      await deps.sender.react(channelId, dest.react.messageTs, dest.react.emoji);
+      const messageId = MESSAGE_ID_TOKEN.test(dest.react.messageTs)
+        ? DISCORD_MESSAGE_IDS.decode(dest.react.messageTs)
+        : dest.react.messageTs;
+      if (!messageId) {
+        await deps.core.reportDeliveryUndeliverable(d.id, "Discord cannot resolve that message id");
+        return;
+      }
+      await deps.sender.react(channelId, messageId, emoji);
       return;
     }
     if (dest.delete) {
@@ -125,21 +135,15 @@ export function createDiscordDispatcher(deps: {
       let dmChannelId: string;
       try {
         dmChannelId = await deps.sender.openDm(userId);
-      } catch (err) {
-        if ((err as { code?: unknown }).code === DM_CLOSED_CODE)
-          return drop(d, "recipient does not accept DMs from the bot");
-        throw err;
-      }
-      const verdict = await deps.guard.mayPost(dmChannelId);
-      if (!verdict.ok) return verdict.retry ? undefined : drop(d, verdict.reason);
-      try {
+        const verdict = await deps.guard.mayPost(dmChannelId);
+        if (!verdict.ok) return verdict.retry ? undefined : drop(d, verdict.reason);
         await deliverTo(dmChannelId, d, undefined);
       } catch (err) {
         if ((err as { code?: unknown }).code === DM_CLOSED_CODE)
           return drop(d, "recipient does not accept DMs from the bot");
         throw err;
       }
-      await deps.core.ackDelivery(d.id, { recipientThreadRef: `${DISCORD_SURFACE}:dm:${dmChannelId}` });
+      await deps.core.ackDelivery(d.id, { recipientThreadRef: discordDmThreadRef(dmChannelId) });
       return;
     }
     const { channelId, replyTo } = parseDiscordTarget(d.destination.target);

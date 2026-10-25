@@ -18,8 +18,7 @@ import type { ErrorLog } from "../admin/error-log.ts";
 import type { LeaderLease } from "../persistence/leader-lease.ts";
 import type { Delivery, ScopeId, SurfaceContextRequest, TurnRequest } from "../types.ts";
 import { scopeId } from "../types.ts";
-import type { MemoryService } from "../memory/memory-service.ts";
-import type { CachedMessage, ReadMessagesOpts, SurfaceCache, IngestEvent } from "../surface-cache/surface-cache.ts";
+import type { CachedMessage, ReadMessagesOpts, IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
 import type { OrgBranding, ScopedConfigStore } from "../resolution/config-store.ts";
 import type { BlobTransferStore } from "../persistence/blob-transfer.ts";
@@ -69,13 +68,11 @@ export interface SlackCoreClient extends Omit<
   onScopeModelChanged(listener: (scope: ScopeId) => void): void;
   onChannelHeaderPinChanged(listener: (scope: ScopeId) => void): void;
   rememberSurfaceHistory?(events: IngestEvent[]): Promise<void>;
-  noteSurfaceHistoryGap?(container: string, note: string): Promise<void>;
   readSurfaceMessages?(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
   pushDirectory(body: DirectoryPush): Promise<boolean>;
   reportSlowDeliveryDrain?(info: { durationMs: number; rows: number }): Promise<void>;
   holdEnvelopeReplay<T>(account: string, fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
-  holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   pickAckEmoji(text: string, candidates: readonly string[]): Promise<string | undefined>;
   recordAckPick(pick: AckPickInput): Promise<void>;
   inboxSlackMessage(msg: {
@@ -122,8 +119,6 @@ export interface SlackCoreClientDeps extends SurfaceCoreClientDeps {
   brandingDefault?: OrgBranding;
   leaderLease: LeaderLease;
   stagedEnvelopes?: DurableMap<StagedEnvelope>;
-  surfaceCache?: SurfaceCache;
-  memory?: MemoryService;
   inboxEvent?(event: ConversationEvent): Promise<void>;
 }
 
@@ -187,12 +182,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       await deps.surfaceCache?.ingest(events);
     },
 
-    async noteSurfaceHistoryGap(container, note) {
-      if (!deps.memory) return;
-      const kind = (await deps.surfaceCache?.containerState(container))?.kind;
-      await deps.memory.capture(scopeId(kind === "group" ? "group" : "channel", container), [note], Date.now());
-    },
-
     async readSurfaceMessages(container, opts) {
       return deps.app.readSurfaceMessages(container, { ...opts, noFallback: true });
     },
@@ -232,9 +221,6 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
       return applied;
     },
 
-    holdDirectorySync(fn) {
-      return lease.hold("slack:directory-sync", fn);
-    },
     holdEnvelopeReplay(account, fn) {
       return lease.hold(`slack:envelope-replay:${account}`, fn);
     },

@@ -110,7 +110,7 @@ import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { Environment, EnvironmentAttachment, EnvironmentStore } from "../environments/environment-store.ts";
 import type { ModelProviderAvailability } from "../model/pi-models.ts";
 import type { RuntimeChoice } from "../harness/harness.ts";
-import { type ReachOpts, type ReachResolution, type ReachTarget } from "../reach/reach.ts";
+import { type SurfacePull, type ReachOpts, type ReachResolution, type ReachTarget } from "../reach/reach.ts";
 import { type Project, type ProjectStore } from "../projects/project-store.ts";
 import type { SearchHit } from "../search/core-search.ts";
 
@@ -442,7 +442,7 @@ export interface App {
   artifactGrantPermission(ownerScopeId: ScopeId, ref: string, principalId: string): Promise<Permission | null>;
   getArtifactHome(type: ArtifactType, idOrName: string): Promise<ArtifactHome | null>;
   moveArtifactHome(type: ArtifactType, id: string, toScope: ScopeId, movedBy: string): Promise<void>;
-  getSoul(scopeId: ScopeId): {
+  getSoul(scopeId: ScopeId): Promise<{
     scopeId: ScopeId;
     soul: string | null;
     soulVersion: number;
@@ -450,7 +450,7 @@ export interface App {
     orgSoul: string | null;
     orgSoulVersion: number;
     effectiveSoul: string;
-  };
+  }>;
   updateSoul(
     scopeId: ScopeId,
     content: string,
@@ -497,7 +497,7 @@ export interface App {
   searchSurface(query: string, opts?: SearchOpts): Promise<CachedMessage[]>;
   readSurfaceMessages(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
   activeSurfaceThreads(opts?: { container?: string; limit?: number }): Promise<ActiveThread[]>;
-  listSurfaceContainers(opts?: { limit?: number }): Promise<ContainerSummary[]>;
+  listSurfaceContainers(opts?: { limit?: number; containerPattern?: string }): Promise<ContainerSummary[]>;
   getChannelPolicy(container: string): Promise<ChannelPolicy | null>;
   setChannelPolicy(
     container: string,
@@ -516,6 +516,7 @@ export interface App {
   ackDeliveryByKey(idempotencyKey: string): Promise<void>;
   setRunDeliveryState(runId: string, state: RunDeliveryState): Promise<boolean>;
   upsertDirectory(members: DirectoryMember[], syncedAt?: number): Promise<boolean>;
+  upsertDiscordDirectory(members: DirectoryMember[]): Promise<void>;
   upsertChannels(
     channels: DirectoryChannel[],
     channelMembers?: ChannelMembership[],
@@ -634,6 +635,7 @@ export interface App {
 }
 
 export interface AppDeps {
+  discordLookup?: SurfacePull;
   externalSlackPolicies?: ExternalSlackPolicies;
   admittedWork?: AdmittedWork;
   shutdown?: () => AbortSignal;

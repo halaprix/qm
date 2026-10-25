@@ -2,6 +2,7 @@ import { clip, inlineCode } from "./util.ts";
 import { slackSectionBlocks } from "./mrkdwn.ts";
 import { parseDeliveryTarget } from "./delivery.ts";
 import { approvalContinuation } from "../core/approval-continuation.ts";
+import { APPROVAL_SUMMARY_MAX, INLINE_COMMAND_MAX, isHttpUrl } from "../surfaces/approval-limits.ts";
 
 export const APPROVAL_ACTION_IDS = ["hilo_allow_once", "hilo_allow_session", "hilo_allow_always", "hilo_deny"] as const;
 export type ApprovalActionId = (typeof APPROVAL_ACTION_IDS)[number];
@@ -23,7 +24,6 @@ export interface SlackApprovalMessage {
 }
 
 const APPROVAL_BLOCK_PREFIX = "hilo_approval:";
-const INLINE_COMMAND_MAX = 1_800;
 const COMMAND_SECTIONS_MAX = 6;
 
 function button(
@@ -58,7 +58,7 @@ export function approvalMessage(approvals: readonly PendingApproval[]): SlackApp
     : [{ requestId: "", command: "unknown command", reason: "requires approval" }];
   const describe = (p: (typeof items)[number]): string => {
     if (p.kind === "input") return "My security screen flagged part of this message. Allow it?";
-    if (p.purpose) return `Approval needed: ${clip(p.purpose, 400)}`;
+    if (p.purpose) return `Approval needed: ${clip(p.purpose, APPROVAL_SUMMARY_MAX)}`;
     return `Approval needed before I can run ${inlineCode(p.command)}.`;
   };
   const text = items.map(describe).join("\n");
@@ -69,8 +69,8 @@ export function approvalMessage(approvals: readonly PendingApproval[]): SlackApp
         ? ":lock: *My security screen flagged part of this message. Allow it?*"
         : ":lock: *Approval needed.*",
     ];
-    if (p.summary) lines.push(clip(p.summary, 400));
-    if (p.purpose) lines.push(`*Why:* ${clip(p.purpose, 400)}`);
+    if (p.summary) lines.push(clip(p.summary, APPROVAL_SUMMARY_MAX));
+    if (p.purpose) lines.push(`*Why:* ${clip(p.purpose, APPROVAL_SUMMARY_MAX)}`);
     const longCommand = p.kind !== "input" && p.command.length > INLINE_COMMAND_MAX;
     const sections = longCommand ? slackSectionBlocks(p.command, { code: true }) : [];
     const shown = sections.length <= COMMAND_SECTIONS_MAX;
@@ -78,7 +78,7 @@ export function approvalMessage(approvals: readonly PendingApproval[]): SlackApp
       lines.push(
         shown
           ? "*Command:*"
-          : `*Command:* too long to show in Slack. Open ${p.originUrl && /^https?:\/\//.test(p.originUrl) ? `<${p.originUrl.replaceAll("|", "%7C").replaceAll(">", "%3E")}|this conversation in QM>` : "this conversation in QM"} on the web to review and approve it.`,
+          : `*Command:* too long to show in Slack. Open ${isHttpUrl(p.originUrl) ? `<${p.originUrl.replaceAll("|", "%7C").replaceAll(">", "%3E")}|this conversation in QM>` : "this conversation in QM"} on the web to review and approve it.`,
       );
     else if (p.kind !== "input") lines.push(`*Command:* ${inlineCode(p.command)}`);
     lines.push(`*Flagged as:* ${clip(p.reason, 200)}`);

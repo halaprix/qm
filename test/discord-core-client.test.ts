@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createDiscordCoreClient } from "../src/api/discord-core-client.ts";
-import type { SurfaceCoreClientDeps } from "../src/api/surface-core-client.ts";
 import { createIdentityService, type IdentityService } from "../src/identity/identity-service.ts";
 import { createPrincipalLinkService, type PrincipalLinkService } from "../src/identity/principal-links.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { discordExternalId } from "../src/discord/config.ts";
 
-function createDeps(identity: IdentityService): SurfaceCoreClientDeps {
+type DiscordCoreDeps = Parameters<typeof createDiscordCoreClient>[0];
+
+function createDeps(identity: IdentityService): DiscordCoreDeps {
   return {
     identity,
     runs: { onTerminal: () => {} },
-  } as unknown as SurfaceCoreClientDeps;
+  } as unknown as DiscordCoreDeps;
 }
 
 describe("discord core client identity links", () => {

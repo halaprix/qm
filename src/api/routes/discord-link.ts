@@ -2,9 +2,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { mintSignedPayload, verifySignedPayload } from "../../auth/signed-token.ts";
 import { orgId } from "../../config.ts";
 import { canonicalPerson, foldPrincipalId, personIds, samePerson } from "../../directory/person.ts";
+import { SNOWFLAKE } from "../../util/snowflake.ts";
 import { discordExternalId, discordUserIdOf } from "../../discord/config.ts";
 import { PrincipalLinkError } from "../../identity/principal-links.ts";
-import { DISCORD_API, discordLinkRedirectUri, SNOWFLAKE } from "../../surfaces/discord-installation.ts";
+import { DISCORD_API, discordLinkRedirectUri } from "../../surfaces/discord-installation.ts";
 import { scopeId } from "../../types.ts";
 import { sendJson } from "../http.ts";
 import type { ApiCtx, Route } from "./route.ts";
@@ -62,34 +63,26 @@ async function selfLink(ctx: ApiCtx, principal: string) {
   const links = ctx.deps.principalLinks ? await ctx.deps.principalLinks.list() : [];
   const discordAliases = personIds(principal).filter((id) => discordUserIdOf(id) !== null);
 
-  let targetLink: (typeof links)[number] | null = null;
-  let targetAlias: string | null = null;
-
-  for (const alias of discordAliases) {
-    const folded = foldPrincipalId(alias);
-    const found = links.find((l) => foldPrincipalId(l.principalId) === folded) ?? null;
-    if (found && ownedBy(found, principal)) {
-      targetLink = found;
-      targetAlias = alias;
-      break;
-    }
-    if (!targetLink && found) {
-      targetLink = found;
-      targetAlias = alias;
-    }
+  const linkFor = (alias: string) => links.find((l) => foldPrincipalId(l.principalId) === foldPrincipalId(alias));
+  const matches = discordAliases.flatMap((alias) => {
+    const link = linkFor(alias);
+    return link ? [{ link, alias }] : [];
+  });
+  let target = matches.find((m) => ownedBy(m.link, principal)) ?? matches[0];
+  if (!target && record) {
+    const alias = discordExternalId(record.discordUserId);
+    const link = linkFor(alias);
+    if (link) target = { link, alias };
   }
 
-  if (!targetLink && record) {
-    const recordAlias = discordExternalId(record.discordUserId);
-    const folded = foldPrincipalId(recordAlias);
-    const found = links.find((l) => foldPrincipalId(l.principalId) === folded) ?? null;
-    if (found) {
-      targetLink = found;
-      targetAlias = recordAlias;
-    }
-  }
+  return { record, link: target?.link ?? null, alias: target?.alias ?? null };
+}
 
-  return { record, link: targetLink, alias: targetAlias };
+function invalidLink(ctx: ApiCtx): void {
+  return sendJson(ctx.res, 400, {
+    error: "invalid_link",
+    message: "This Discord connection expired or belongs to another QM account. Start again from your settings.",
+  });
 }
 
 function ownedBy(link: { linkedBy: string; canonicalId: string } | null, principal: string): boolean {
@@ -252,22 +245,12 @@ async function complete(ctx: ApiCtx): Promise<void> {
     typeof proof.exp !== "number" ||
     proof.exp <= Date.now()
   )
-    return sendJson(ctx.res, 400, {
-      error: "invalid_link",
-      message: "This Discord connection expired or belongs to another QM account. Start again from your settings.",
-    });
-  if (typeof nonce !== "string")
-    return sendJson(ctx.res, 400, {
-      error: "invalid_link",
-      message: "This Discord connection expired or belongs to another QM account. Start again from your settings.",
-    });
+    return invalidLink(ctx);
+  if (typeof nonce !== "string") return invalidLink(ctx);
   const computedHash = createHash("sha256").update(nonce).digest();
   const expectedHash = Buffer.from(proof.nonceHash, "hex");
   if (computedHash.length !== expectedHash.length || !timingSafeEqual(computedHash, expectedHash))
-    return sendJson(ctx.res, 400, {
-      error: "invalid_link",
-      message: "This Discord connection expired or belongs to another QM account. Start again from your settings.",
-    });
+    return invalidLink(ctx);
   const proven = await provenDiscordUser(ctx, cfg, code);
   if (!proven.ok) {
     if (proven.status === 502) {

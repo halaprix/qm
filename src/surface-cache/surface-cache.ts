@@ -351,6 +351,10 @@ export function createPostgresSurfaceCache(
         args.push(opts.container);
         conds.push(`container = $${args.length}`);
       }
+      if (opts.containerPattern !== undefined) {
+        args.push(opts.containerPattern);
+        conds.push(`container ~ $${args.length}`);
+      }
       args.push(limit);
       const rows = await q(
         `SELECT * FROM channel_messages WHERE ${conds.join(" AND ")}
@@ -424,12 +428,12 @@ export function createPostgresSurfaceCache(
       const rows = await q(
         `SELECT s.*, COALESCE(m.n, 0) AS message_count
            FROM channel_state s
-           LEFT JOIN (SELECT container, COUNT(*)::int AS n FROM channel_messages WHERE org_id = $1 AND deleted = FALSE GROUP BY container) m
+           LEFT JOIN (SELECT container, COUNT(*)::int AS n FROM channel_messages WHERE org_id = $1 AND deleted = FALSE AND ($3::text IS NULL OR container ~ $3) GROUP BY container) m
              ON m.container = s.container
-          WHERE s.org_id = $1
+          WHERE s.org_id = $1 AND ($3::text IS NULL OR s.container ~ $3)
           ORDER BY s.updated_at DESC
           LIMIT $2`,
-        [orgId, limit],
+        [orgId, limit, opts.containerPattern ?? null],
       );
       return rows.map((r) => {
         let members: string[] = [];
@@ -604,11 +608,13 @@ export function createMemorySurfaceCache(opts: { liveFallback?: LiveFallback } =
       const term = queryText.trim().toLowerCase();
       if (!term) return [];
       const limit = clampLimit(o.limit, DEFAULT_SEARCH_LIMIT);
+      const pattern = o.containerPattern === undefined ? null : new RegExp(o.containerPattern);
       const out: CachedMessage[] = [];
       for (const m of messages.values()) {
         for (const msg of m.values()) {
           if (msg.deleted) continue;
           if (o.container && msg.container !== o.container) continue;
+          if (pattern && !pattern.test(msg.container)) continue;
           if ((msg.text ?? "").toLowerCase().includes(term)) out.push(msg);
         }
       }
@@ -671,7 +677,9 @@ export function createMemorySurfaceCache(opts: { liveFallback?: LiveFallback } =
     async listContainers(o = {}) {
       const limit = clampLimit(o.limit, MAX_READ_LIMIT);
       const out: ContainerSummary[] = [];
+      const pattern = o.containerPattern === undefined ? null : new RegExp(o.containerPattern);
       for (const [k, st] of state) {
+        if (pattern && !pattern.test(st.container)) continue;
         out.push({
           container: st.container,
           ...(st.lastTs ? { lastTs: st.lastTs } : {}),

@@ -80,3 +80,39 @@ test("linkedInternal is true only for a discord id linked to an internal princip
   assert.equal(await core.linkedInternal("9"), false);
   assert.deepEqual(core.discordUserIdsFor("ana@acme.com"), ["7"]);
 });
+
+test("channelWatermarks asks the store for discord-shaped containers only and keeps those with a last id", async () => {
+  const asked: unknown[] = [];
+  const core = createDiscordCoreClient({
+    app: {
+      listSurfaceContainers: async (opts: unknown) => {
+        asked.push(opts);
+        return [
+          { container: "1500000000000000001", lastTs: "1500000000000000009" },
+          { container: "1500000000000000002" },
+        ];
+      },
+    },
+    runs: { onTerminal: () => {} },
+  } as never);
+  assert.deepEqual(await core.channelWatermarks(), [
+    { container: "1500000000000000001", lastTs: "1500000000000000009" },
+  ]);
+  const { containerPattern } = asked[0] as { containerPattern: string };
+  const pattern = new RegExp(containerPattern);
+  assert.ok(pattern.test("1500000000000000001"));
+  assert.ok(!pattern.test("C0123SLACK"));
+  assert.ok(!pattern.test("1700000000.000100"));
+});
+
+test("a history gap is captured as a note in the channel's memory scope", async () => {
+  const captured: unknown[][] = [];
+  const core = createDiscordCoreClient({
+    memory: { capture: async (...args: unknown[]) => void captured.push(args) },
+    runs: { onTerminal: () => {} },
+  } as never);
+  await core.noteSurfaceHistoryGap("1500000000000000001", "gap note");
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]![0], "channel:1500000000000000001");
+  assert.deepEqual(captured[0]![1], ["gap note"]);
+});
