@@ -38,7 +38,7 @@ test("an unbroken run longer than the limit is hard-cut", () => {
   const chunks = chunkMessage("x".repeat(4500));
   assert.deepEqual(
     chunks.map((c) => c.length),
-    [1996, 1996, 508],
+    [2000, 2000, 500],
   );
 });
 
@@ -48,4 +48,15 @@ test("an oversized fence opening line still terminates and respects the limit", 
   assert.ok(chunks.length >= 2);
   for (const c of chunks) assert.ok(c.length <= DISCORD_MESSAGE_LIMIT, `chunk of ${c.length}`);
   assert.ok(chunks.join("\n").includes("body line"));
+});
+
+test("an unbroken run of emoji is never cut between surrogate halves", () => {
+  const chunks = chunkMessage(`a${"😀".repeat(1500)}`);
+  assert.ok(chunks.length >= 2);
+  for (const c of chunks) {
+    assert.ok(c.length <= DISCORD_MESSAGE_LIMIT);
+    assert.equal(c, [...c].join(""));
+    assert.ok(!/[\ud800-\udbff]$/.test(c) && !/^[\udc00-\udfff]/.test(c));
+  }
+  assert.equal(chunks.join(""), `a${"😀".repeat(1500)}`);
 });

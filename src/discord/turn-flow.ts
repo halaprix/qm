@@ -1,4 +1,5 @@
-import type { CoreTurnBody, SurfaceCoreClient } from "../api/surface-core-client.ts";
+import { ackRunDeliveryWithRetry, type CoreTurnBody, type SurfaceCoreClient } from "../api/surface-core-client.ts";
+import { GENERIC_FAILURE_TEXT } from "../../plugins/chassis/src/failure-copy.ts";
 import { INTERNAL_ONLY_REFUSAL_REASON } from "../core/failure-copy.ts";
 import type { TurnResult } from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
@@ -18,7 +19,6 @@ export interface ReplyChannel {
 
 const TYPING_REFRESH_MS = 8_000;
 const WORKING_TEXT = "⚙ Working…";
-export const FAILURE_TEXT = "Something went wrong on my side and I couldn't finish that. Please try again.";
 const REFUSED_GUEST_TEXT =
   "I can't answer here: people outside the organization can read this channel. Ask me in a private channel or a DM.";
 const REFUSED_STREAM_TEXT = "I can't post this reply here right now.";
@@ -139,7 +139,7 @@ async function deliver(
   quiet: boolean,
 ): Promise<void> {
   if (!result || result.status === "failed") {
-    await notice(quiet, status, FAILURE_TEXT);
+    await notice(quiet, status, GENERIC_FAILURE_TEXT);
     return;
   }
   if (result.status === "silent") {
@@ -214,11 +214,11 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
       return;
     }
     await deliver(result, status, channel, core, input.onReact, quiet);
-    if (runId) await core.ackRunDelivery(runId);
+    if (runId) await ackRunDeliveryWithRetry(core, runId).catch(swallowAs("discord: delivery ack", undefined));
   } catch (err) {
     swallowAs("discord: turn failed", undefined)(err);
     if (submitted) await settle({ status: "failed" });
-    await notice(quiet, status, FAILURE_TEXT).catch(swallowAs("discord: failure edit", undefined));
+    await notice(quiet, status, GENERIC_FAILURE_TEXT).catch(swallowAs("discord: failure edit", undefined));
   } finally {
     if (runId) inFlightRuns.delete(runId);
   }
@@ -254,8 +254,10 @@ async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<v
     }
   } catch (err) {
     swallowAs("discord: spine turn failed", undefined)(err);
-    const allowed = await mayPost().catch(() => false);
-    await say(allowed ? FAILURE_TEXT : REFUSED_STREAM_TEXT).catch(swallowAs("discord: failure post", undefined));
+    const allowed = await mayPost().catch(swallowAs("discord: may post", false));
+    await say(allowed ? GENERIC_FAILURE_TEXT : REFUSED_STREAM_TEXT).catch(
+      swallowAs("discord: failure post", undefined),
+    );
   } finally {
     clearInterval(timer);
     if (!keep) await input.onNoReply?.();

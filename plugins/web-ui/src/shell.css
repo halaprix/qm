@@ -1105,11 +1105,14 @@ a.chat-row-open {
 .settings-row:last-child {
   border-bottom: 0;
 }
-.settings-slack-account qm-slack-account {
+.settings-slack-account qm-slack-account,
+.settings-discord-account qm-discord-account {
   width: 100%;
 }
 .settings-slack-account .slack-connected,
-.settings-slack-account .welcome-slack {
+.settings-slack-account .welcome-slack,
+.settings-discord-account .slack-connected,
+.settings-discord-account .welcome-slack {
   margin-bottom: 0;
 }
 .settings-row-copy {

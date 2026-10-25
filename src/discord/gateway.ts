@@ -22,9 +22,10 @@ import {
   type DiscordMemberFacts,
   type LinkedInternal,
 } from "./members.ts";
+import { swallow, swallowAs } from "../util/errors.ts";
 import { SNOWFLAKE } from "../util/snowflake.ts";
-import { compareIds } from "../surfaces/conversation.ts";
-import type { ChannelViewers } from "./readers.ts";
+import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
+import { DISCORD_AUDIENCE_CAP, type ChannelViewers } from "./readers.ts";
 import { reactionTallies } from "./reactions.ts";
 import type { StakeMessage } from "./thread-stake.ts";
 
@@ -33,6 +34,7 @@ const isGone = (err: unknown): boolean =>
   GONE_CODES.includes((err as { code?: unknown }).code) || (err as { status?: unknown }).status === 404;
 const STAKE_HISTORY_LIMIT = 100;
 const AVATAR_SIZE = 64;
+const VIEWER_SCAN_LIMIT = DISCORD_AUDIENCE_CAP + 2;
 
 export function memberFacts(m: GuildMember): DiscordMemberFacts {
   return {
@@ -108,7 +110,8 @@ export async function channelViewers(channels: DiscordChannels, channelId: strin
   let ch;
   try {
     ch = await channels.cached(channelId);
-  } catch {
+  } catch (err) {
+    swallow("discord: channel viewers lookup", err);
     return { ok: false, reason: "members_not_ready" };
   }
   const base = baseOf(ch);
@@ -118,16 +121,18 @@ export async function channelViewers(channels: DiscordChannels, channelId: strin
     try {
       threadMembers = new Set((await ch.members.fetch()).keys());
     } catch (err) {
+      swallow("discord: private thread members", err);
       return { ok: false, reason: isGone(err) ? "not_a_guild_channel" : "members_not_ready" };
     }
   }
-  const members = [...base.guild.members.cache.values()]
-    .filter((m) => {
-      const perms = base.permissionsFor(m);
-      if (!perms.has(PermissionFlagsBits.ViewChannel)) return false;
-      return !threadMembers || threadMembers.has(m.id) || perms.has(PermissionFlagsBits.ManageThreads);
-    })
-    .map(memberFacts);
+  const members: DiscordMemberFacts[] = [];
+  for (const m of base.guild.members.cache.values()) {
+    if (members.length >= VIEWER_SCAN_LIMIT) break;
+    const perms = base.permissionsFor(m);
+    if (!perms.has(PermissionFlagsBits.ViewChannel)) continue;
+    if (!threadMembers || threadMembers.has(m.id) || perms.has(PermissionFlagsBits.ManageThreads))
+      members.push(memberFacts(m));
+  }
   return { ok: true, guildId: base.guild.id, members };
 }
 
@@ -268,13 +273,15 @@ export function createDiscordHistoryReader(deps: {
         ...(opts.before ? { before: opts.before } : {}),
       });
       const threadId = ch.isThread() ? ch.id : null;
-      return [...fetched.values()].sort((a, b) => compareIds(a.id, b.id)).map((m) => toHistoryMessage(m, threadId));
+      return [...fetched.values()]
+        .sort((a, b) => DISCORD_MESSAGE_IDS.compare(a.id, b.id))
+        .map((m) => toHistoryMessage(m, threadId));
     },
 
     async thread(threadId: string): Promise<DiscordThreadInfo> {
       const ch = await deps.channels.fetch(threadId);
       if (!ch?.isThread()) return { ownerId: null, starter: null };
-      const starter = await ch.fetchStarterMessage().catch(() => null);
+      const starter = await ch.fetchStarterMessage().catch(swallowAs("discord: starter message", null));
       return { ownerId: ch.ownerId, starter: starter ? toHistoryMessage(starter, ch.id) : null };
     },
 
@@ -299,6 +306,7 @@ export function createDiscordHistoryReader(deps: {
         }
         return true;
       } catch (err) {
+        swallow("discord: can view", err);
         return isGone(err) ? false : undefined;
       }
     },

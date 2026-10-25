@@ -44,7 +44,6 @@ import {
   slackAccountConfigsFromEnv,
   type SlackPluginConfig,
 } from "./slack/config.ts";
-import { discordPluginConfigFromEnv } from "./discord/config.ts";
 import {
   DEFAULT_CODEX_MODEL_ID,
   MODEL_PROVIDERS,
@@ -150,7 +149,6 @@ export interface Config {
   publicWebUrl?: string;
   flyAppName?: string;
   slack?: SlackPluginConfig;
-  discordEnvironmentConfigured: boolean;
   externalSlackPolicies?: ExternalSlackPolicies;
   runStore: "memory" | "postgres";
   skillSigningSecret?: string;
@@ -1460,7 +1458,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     numEnvStrict("RUN_MAX_AGE_MS", env.RUN_MAX_AGE_MS) ??
     (turnWallClockMs > 0 ? 2 * turnWallClockMs : CONFIG_DEFAULTS.runMaxAgeMs);
   const slack = slackPluginConfigFromEnv(env);
-  const discordEnvironmentConfigured = Boolean(discordPluginConfigFromEnv(env));
   const externalSlackPolicies = Object.fromEntries(
     [...(slack ? [slack] : []), ...slackAccountConfigsFromEnv(env)]
       .filter((account) => account.externalAccess)
@@ -1625,7 +1622,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(env.PUBLIC_WEB_URL ? { publicWebUrl: env.PUBLIC_WEB_URL } : {}),
     ...(env.FLY_APP_NAME ? { flyAppName: env.FLY_APP_NAME } : {}),
     ...(slack ? { slack } : {}),
-    discordEnvironmentConfigured,
     externalSlackPolicies,
     slackContextSource: parseSlackContextSource(env.SLACK_CONTEXT_SOURCE),
     runStore,

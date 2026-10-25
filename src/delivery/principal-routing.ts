@@ -1,5 +1,5 @@
 import { DISCORD_DM_DELIVERY_TYPE, discordUserIdOf } from "../discord/config.ts";
-import { discordActive, type DiscordInstallationStore } from "../surfaces/discord-installation.ts";
+import type { DiscordInstallationStore } from "../surfaces/discord-installation.ts";
 import { reportFailureAs } from "../util/errors.ts";
 import type { DeliveryStore } from "./delivery-store.ts";
 
@@ -47,15 +47,12 @@ export function withPrincipalRouting(store: DeliveryStore, route: PrincipalRoute
 
 export function createDiscordPrincipalRoute(deps: {
   installation: Pick<DiscordInstallationStore, "status">;
-  environmentConfigured: boolean;
   linkedDiscordUserIds(principalId: string): string[];
 }): PrincipalRoute {
   return async (principalId) => {
     if (!deps.linkedDiscordUserIds(principalId).length) return null;
     const status = await deps.installation.status();
-    if (!discordActive(status, deps.environmentConfigured)) return null;
-    return !status.configured || status.principalDeliveries || discordUserIdOf(principalId) !== null
-      ? DISCORD_DM_DELIVERY_TYPE
-      : null;
+    if (!status.configured) return null;
+    return DISCORD_DM_DELIVERY_TYPE;
   };
 }

@@ -9,8 +9,10 @@ import {
   type DeliveryGuard,
   type PostVerdict,
 } from "../src/discord/deliveries.ts";
-import type { DiscordSender } from "../src/discord/sender.ts";
+import { InvalidMessageIdError, type DiscordSender } from "../src/discord/sender.ts";
 import type { Delivery, Destination } from "../src/types.ts";
+
+const BAD_TOKEN = "~zz";
 
 function row(over: Omit<Partial<Delivery>, "destination"> & { destination?: Partial<Destination> }): Delivery {
   return {
@@ -35,9 +37,18 @@ function harness(
       log.push(`send:${c}:${m.content ?? ""}:${m.replyTo ?? ""}`);
       return { id: "new" };
     },
-    edit: async (c, id, m) => void log.push(`edit:${c}:${id}:${m.content}`),
-    react: async (c, id, e) => void log.push(`react:${c}:${id}:${e}`),
-    remove: async (c, id) => void log.push(`remove:${c}:${id}`),
+    edit: async (c, id, m) => {
+      if (id === BAD_TOKEN) throw new InvalidMessageIdError(id);
+      log.push(`edit:${c}:${id}:${m.content}`);
+    },
+    react: async (c, id, e) => {
+      if (id === BAD_TOKEN) throw new InvalidMessageIdError(id);
+      log.push(`react:${c}:${id}:${e}`);
+    },
+    remove: async (c, id) => {
+      if (id === BAD_TOKEN) throw new InvalidMessageIdError(id);
+      log.push(`remove:${c}:${id}`);
+    },
     unreact: async (c, id, e) => void log.push(`unreact:${c}:${id}:${e}`),
     openDm: async () => "dm",
   };
@@ -68,19 +79,12 @@ test("targets carry an optional reply-to message", () => {
   assert.deepEqual(parseDiscordTarget("c1:m1"), { channelId: "c1", replyTo: "m1" });
 });
 
-test("a react delivery decodes a ~id token to the message snowflake and reacts on that message", async () => {
+test("a react delivery reacts on the message id it carries", async () => {
   const h = harness([
-    row({ id: "r1", text: "", destination: { react: { messageTs: "~9vkbjfeanyf5", emoji: "👍" } } }),
     row({ id: "r2", text: "", destination: { react: { messageTs: "1300000000000000002", emoji: "👍" } } }),
   ]);
   await h.dispatcher.drain();
-  assert.deepEqual(h.log, ["react:c1:1300000000000000001:👍", "ack:r1", "react:c1:1300000000000000002:👍", "ack:r2"]);
-});
-
-test("a react delivery whose ~id token is not a snowflake is reported undeliverable, not reacted", async () => {
-  const h = harness([row({ id: "r1", text: "", destination: { react: { messageTs: "~zz", emoji: "👍" } } })]);
-  await h.dispatcher.drain();
-  assert.deepEqual(h.log, ["undeliverable:r1:Discord cannot resolve that message id", "ack:r1"]);
+  assert.deepEqual(h.log, ["react:c1:1300000000000000002:👍", "ack:r2"]);
 });
 
 test("a plain post is sent and acked", async () => {
@@ -351,4 +355,44 @@ test("a keychain resolution row is acked without opening a DM or sending anythin
   const h = dmHarness({ recipient: "111", destination: { keychainAskId: "k1", keychainResolution: true } });
   await h.dispatcher.drain();
   assert.deepEqual(h.log, ["ack:p1:"]);
+});
+
+test("a ~id token on react, edit or remove reaches the sender as the raw snowflake", async () => {
+  const h = harness([
+    row({ id: "a", text: "", destination: { react: { messageTs: "~9vkbjfeanyf5", emoji: "👍" } } }),
+    row({ id: "b", destination: { editRef: "~9vkbjfeanyf5" } }),
+    row({ id: "c", text: "", destination: { delete: { messageTs: "~9vkbjfeanyf5" } } }),
+  ]);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, [
+    "react:c1:1300000000000000001:👍",
+    "ack:a",
+    "edit:c1:1300000000000000001:hello",
+    "ack:b",
+    "remove:c1:1300000000000000001",
+    "ack:c",
+  ]);
+});
+
+test("a ~id token reply target reaches the sender as the raw snowflake", async () => {
+  const h = harness([row({ id: "a", destination: { target: "c1:~9vkbjfeanyf5" } })]);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["send:c1:hello:1300000000000000001", "ack:a"]);
+});
+
+test("an undecodable ~id token on react, edit or remove is reported once and acked, not retried", async () => {
+  const h = harness([
+    row({ id: "a", text: "", destination: { react: { messageTs: BAD_TOKEN, emoji: "👍" } } }),
+    row({ id: "b", destination: { editRef: BAD_TOKEN } }),
+    row({ id: "c", text: "", destination: { delete: { messageTs: BAD_TOKEN } } }),
+  ]);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, [
+    `undeliverable:a:${BAD_TOKEN}`,
+    "ack:a",
+    `undeliverable:b:${BAD_TOKEN}`,
+    "ack:b",
+    `undeliverable:c:${BAD_TOKEN}`,
+    "ack:c",
+  ]);
 });

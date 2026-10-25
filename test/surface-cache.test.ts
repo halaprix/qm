@@ -125,7 +125,7 @@ test("listContainers narrows to matching container ids before the limit applies"
     { container: "C1", ts: "1.0", text: "slack", createdAt: 1 },
     { container: "1500000000000000001", ts: "1500000000000000009", text: "discord", createdAt: 2 },
   ]);
-  const found = await cache.listContainers({ limit: 1, containerPattern: "^\\d{17,20}$" });
+  const found = await cache.listContainers({ limit: 1, surface: "discord" });
   assert.deepEqual(
     found.map((c) => [c.container, c.messageCount]),
     [["1500000000000000001", 1]],

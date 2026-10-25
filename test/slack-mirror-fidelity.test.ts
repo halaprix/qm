@@ -5,6 +5,7 @@ import { createMirror, slackMessageToIngestEvent } from "../src/slack/mirror.ts"
 import { toEvent } from "../src/api/routes/surface-cache.ts";
 import { createSlackHistoryReader } from "../src/slack/history.ts";
 import { buildContextWindow, formatSlackTs } from "../src/surfaces/conversation.ts";
+import { SLACK_MESSAGE_IDS } from "../src/surfaces/message-ids.ts";
 import { createConversationSerializer } from "../src/slack/conversation-view.ts";
 import type { SlackCoreClient } from "../src/api/slack-core-client.ts";
 import type { BotIdentity, Directory } from "../src/slack/directory.ts";
@@ -197,6 +198,7 @@ test("event mirroring preserves mention IDs for current-context rendering", asyn
   assert.equal(shaped[1]![0]!.name, "New name");
   const context = buildContextWindow(shaped[1]!, {
     formatTs: formatSlackTs,
+    messageIds: SLACK_MESSAGE_IDS,
     count: 20,
     nameById: new Map([["U1", "New name"]]),
   });

@@ -378,7 +378,7 @@ test("replacing a path preserves its artifact when staged again by ID", async ()
   assert.ok(await store.open(id), "the staged file ID remains readable");
 });
 
-function discordReachTools() {
+function discordReachTools(defaultDestination: unknown = { type: "web", target: "web:thread" }) {
   const enqueued: Array<{ destination: unknown; text: string }> = [];
   const asked: unknown[] = [];
   const tools = createSurfaceToolDeps({
@@ -407,7 +407,7 @@ function discordReachTools() {
     conversation: { kind: "group" },
     session: { id: "S1" },
     scopeId: scopeId("personal", "U1"),
-    defaultDestination: { type: "web", target: "web:thread" },
+    defaultDestination,
     strictReadOnly: false,
     provision: async () => handle,
     blobTransfer: createMemoryBlobTransferStore(),
@@ -444,4 +444,15 @@ test("delete, edit and react never resolve a Discord channel outside the current
   }
   assert.deepEqual(asked, []);
   assert.deepEqual(enqueued, []);
+});
+
+test("a Discord react queues the message id exactly as given; the Discord sender decodes tokens", async () => {
+  const { tools, enqueued } = discordReachTools({ type: "discord", target: "1300000000000000010" });
+  for (const ts of ["~9vkbjfeanyf5", "1300000000000000001"]) {
+    assert.equal((await tools.react({ ts, emoji: "eyes" })).ok, true, ts);
+  }
+  assert.deepEqual(
+    enqueued.map((e) => (e.destination as { react: { messageTs: string } }).react.messageTs),
+    ["~9vkbjfeanyf5", "1300000000000000001"],
+  );
 });

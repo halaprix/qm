@@ -121,7 +121,7 @@ test("a submit error replaces the working message with the failure text", async 
     inFlightRuns: new Set(),
     mayPost: allowAll,
   });
-  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
+  assert.equal(log.edits.at(-1), "Something went wrong on my end and I couldn't finish that. Try again in a moment.");
 });
 
 test("a stalled run replaces the working message with the failure text", async () => {
@@ -137,7 +137,7 @@ test("a stalled run replaces the working message with the failure text", async (
     inFlightRuns: new Set(),
     mayPost: allowAll,
   });
-  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
+  assert.equal(log.edits.at(-1), "Something went wrong on my end and I couldn't finish that. Try again in a moment.");
 });
 
 test("failed and null results also end in the failure text", async () => {
@@ -151,7 +151,7 @@ test("failed and null results also end in the failure text", async () => {
       inFlightRuns: new Set(),
       mayPost: allowAll,
     });
-    assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
+    assert.equal(log.edits.at(-1), "Something went wrong on my end and I couldn't finish that. Try again in a moment.");
   }
 });
 
@@ -237,7 +237,7 @@ test("a files-only reply deletes the working message and sends the files", async
   });
   assert.equal(log.deleted, 1);
   assert.deepEqual(log.files, ["r.csv"]);
-  assert.ok(!log.edits.includes("Something went wrong on my side and I couldn't finish that. Please try again."));
+  assert.ok(!log.edits.includes("Something went wrong on my end and I couldn't finish that. Try again in a moment."));
 });
 
 test("in stream mode, reportRunEditRef is called with the status message id and ackRunDelivery after delivery", async () => {
@@ -263,6 +263,35 @@ test("in stream mode, reportRunEditRef is called with the status message id and 
   });
   assert.deepEqual(calls, ["ref:r1:s1", "waiting:true", "ack:r1:true"]);
   assert.equal(inFlight.size, 0);
+});
+
+test("a failed run-delivery ack is retried and the delivered reply is not turned into a failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const log = fresh();
+  let attempts = 0;
+  const c = {
+    ...core({}),
+    ackRunDelivery: async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("core unreachable");
+    },
+  } as unknown as SurfaceCoreClient;
+  let settled = false;
+  const turn = runDiscordTurn({
+    core: c,
+    channel: channel(log),
+    body: baseBody,
+    mode: "stream",
+    inFlightRuns: new Set(),
+    mayPost: allowAll,
+  }).then(() => void (settled = true));
+  while (!settled) {
+    await new Promise((r) => setImmediate(r));
+    t.mock.timers.tick(30_000);
+  }
+  await turn;
+  assert.equal(attempts, 3);
+  assert.equal(log.edits.at(-1), "done");
 });
 
 test("the in-process reply acks its run delivery only after it was delivered", async () => {
@@ -554,7 +583,7 @@ test("waitRun rejecting after acceptance settles with failed and posts the failu
     onSettled: async (r) => void events.push(r.status),
   });
   assert.deepEqual(events, ["accepted", "failed"]);
-  assert.equal(log.edits.at(-1), "Something went wrong on my side and I couldn't finish that. Please try again.");
+  assert.equal(log.edits.at(-1), "Something went wrong on my end and I couldn't finish that. Try again in a moment.");
 });
 
 test("a throwing refusal edit on the pre-stream gate still settles with the real run result", async () => {
@@ -719,7 +748,7 @@ test("a throw from onSettled logs the failure, reports the edit ref, and continu
   } as never);
   assert.equal(reportedRef, true);
   assert.equal(log.edits.at(-1), "stream completed");
-  assert.ok(!log.edits.includes("Something went wrong on my side and I couldn't finish that. Please try again."));
+  assert.ok(!log.edits.includes("Something went wrong on my end and I couldn't finish that. Try again in a moment."));
 });
 
 test("with overlapping ticks, where mayPost resolves true slowly for tick A and false quickly for tick B, the last edit is the refusal text and no model text follows it", async () => {

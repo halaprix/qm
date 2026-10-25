@@ -1,5 +1,6 @@
 import { readOutgoingAttachment, type SurfaceCoreClient } from "../api/surface-core-client.ts";
 import { MAX_BLOB_BYTES } from "../persistence/blob-transfer.ts";
+import { swallow } from "../util/errors.ts";
 import type { IncomingAttachment, OutgoingAttachment } from "../types.ts";
 import type { DiscordAttachmentRef } from "./events.ts";
 
@@ -52,7 +53,8 @@ export async function ingestAttachments(
       const bytes = new Uint8Array(await res.arrayBuffer());
       const { blobId, sizeBytes } = await core.stageBlob(bytes);
       attachments.push({ name: ref.name, mimetype: ref.contentType ?? DEFAULT_MIMETYPE, sizeBytes, blobId });
-    } catch {
+    } catch (err) {
+      swallow(`discord attachment download ${ref.name}`, err);
       notes.push(`Skipped ${ref.name}: download failed.`);
     }
   }
@@ -82,7 +84,8 @@ export async function toDiscordFiles(
     try {
       const attachment = await readOutgoingAttachment(core, a);
       files.push({ attachment, name: a.name });
-    } catch {
+    } catch (err) {
+      swallow(`discord attachment read ${a.name}`, err);
       notes.push(`${a.name} could not be read; open it in the QM web app.`);
     }
   }

@@ -1,8 +1,6 @@
 import { isSessionTurn } from "../turn-origin.ts";
-import { compareIds } from "../../surfaces/conversation.ts";
-import { DISCORD_MESSAGE_IDS, SLACK_MESSAGE_IDS, SLACK_TS } from "../../surfaces/message-ids.ts";
+import { DISCORD_MESSAGE_IDS, SLACK_MESSAGE_IDS } from "../../surfaces/message-ids.ts";
 import { DISCORD_SURFACE } from "../../discord/config.ts";
-import { SNOWFLAKE } from "../../util/snowflake.ts";
 import type {
   Conversation,
   DeliveryProvenance,
@@ -338,12 +336,15 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (result.note && !result.messages?.length) return { ok: false, message: result.note };
       const msgs = (result.messages ?? []) as Array<{ ts?: string; threadTs?: string }>;
       const codec = input.surface === DISCORD_SURFACE ? DISCORD_MESSAGE_IDS : SLACK_MESSAGE_IDS;
-      const since = opts?.since === undefined ? undefined : (codec.decode(opts.since) ?? opts.since);
-      if (since !== undefined && !SNOWFLAKE.test(since) && !SLACK_TS.test(since))
+      const since =
+        opts?.since === undefined
+          ? undefined
+          : (codec.decode(opts.since) ?? (codec.isRaw(opts.since) ? opts.since : null));
+      if (since === null)
         return { ok: false, message: `"since" must be a message id returned by whats_new or read_thread` };
       const self = new Set(result.selfTs);
       const newer = msgs.filter(
-        (m) => typeof m?.ts === "string" && (since === undefined || compareIds(m.ts, since) > 0) && !self.has(m.ts),
+        (m) => typeof m?.ts === "string" && (since === undefined || codec.compare(m.ts, since) > 0) && !self.has(m.ts),
       );
       const isDm = conversation.kind === "dm";
       const hereRoot = dest.target.slice(dest.target.lastIndexOf(":") + 1);
@@ -354,7 +355,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         else if (m.threadTs) otherRoots.add(m.threadTs);
       }
       const latest = msgs.reduce<string | undefined>(
-        (acc, m) => (typeof m?.ts === "string" && (!acc || compareIds(m.ts, acc) > 0) ? m.ts : acc),
+        (acc, m) => (typeof m?.ts === "string" && (!acc || codec.compare(m.ts, acc) > 0) ? m.ts : acc),
         undefined,
       );
       const coverage = await coverageForTurn();
@@ -363,7 +364,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         hereNew,
         activeSubConversations: otherRoots.size,
         ...(result.note ? { message: result.note } : {}),
-        ...(latest ? { latest } : {}),
+        ...(latest ? { latest: codec.encode(latest) } : {}),
         ...(coverage ? { coverageSince: coverage } : {}),
       };
     },

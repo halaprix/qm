@@ -3,8 +3,14 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import { createMemberHydrator } from "../src/discord/member-hydrator.ts";
 import { DISCORD_RETRY_BASE_MS } from "../src/discord/config.ts";
 
-beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
-afterEach(() => mock.timers.reset());
+beforeEach(() => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  mock.method(Math, "random", () => 0.999999);
+});
+afterEach(() => {
+  mock.timers.reset();
+  mock.restoreAll();
+});
 const tick = () => new Promise((r) => setImmediate(r));
 
 test("guilds are not ready until their one full fetch succeeds", async () => {

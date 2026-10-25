@@ -98,11 +98,7 @@ test("channelWatermarks asks the store for discord-shaped containers only and ke
   assert.deepEqual(await core.channelWatermarks(), [
     { container: "1500000000000000001", lastTs: "1500000000000000009" },
   ]);
-  const { containerPattern } = asked[0] as { containerPattern: string };
-  const pattern = new RegExp(containerPattern);
-  assert.ok(pattern.test("1500000000000000001"));
-  assert.ok(!pattern.test("C0123SLACK"));
-  assert.ok(!pattern.test("1700000000.000100"));
+  assert.equal((asked[0] as { surface: string }).surface, "discord");
 });
 
 test("a history gap is captured as a note in the channel's memory scope", async () => {

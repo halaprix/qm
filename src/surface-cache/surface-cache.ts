@@ -1,11 +1,14 @@
 import { orgId as configOrgId } from "../config.ts";
 import { createPgPool } from "../persistence/pg-pool.ts";
+import { SLACK_CONTAINER } from "../surfaces/message-ids.ts";
+import { SNOWFLAKE } from "../util/snowflake.ts";
 import type {
   ActiveThread,
   CachedFile,
   CachedMessage,
   ContainerState,
   ContainerSummary,
+  ContainerSurface,
   LiveFallback,
   IngestEvent,
   SurfaceCache,
@@ -15,6 +18,7 @@ export type {
   ActiveThread,
   CachedMessage,
   ContainerSummary,
+  ContainerSurface,
   IngestEvent,
   LiveFallback,
   ReadMessagesOpts,
@@ -22,6 +26,7 @@ export type {
   SurfaceCache,
 } from "./types.ts";
 
+const CONTAINER_ID: Record<ContainerSurface, RegExp> = { slack: SLACK_CONTAINER, discord: SNOWFLAKE };
 const DEFAULT_READ_LIMIT = 100;
 const MAX_READ_LIMIT = 500;
 const DEFAULT_SEARCH_LIMIT = 50;
@@ -351,8 +356,8 @@ export function createPostgresSurfaceCache(
         args.push(opts.container);
         conds.push(`container = $${args.length}`);
       }
-      if (opts.containerPattern !== undefined) {
-        args.push(opts.containerPattern);
+      if (opts.surface) {
+        args.push(CONTAINER_ID[opts.surface].source);
         conds.push(`container ~ $${args.length}`);
       }
       args.push(limit);
@@ -433,7 +438,7 @@ export function createPostgresSurfaceCache(
           WHERE s.org_id = $1 AND ($3::text IS NULL OR s.container ~ $3)
           ORDER BY s.updated_at DESC
           LIMIT $2`,
-        [orgId, limit, opts.containerPattern ?? null],
+        [orgId, limit, opts.surface ? CONTAINER_ID[opts.surface].source : null],
       );
       return rows.map((r) => {
         let members: string[] = [];
@@ -608,7 +613,7 @@ export function createMemorySurfaceCache(opts: { liveFallback?: LiveFallback } =
       const term = queryText.trim().toLowerCase();
       if (!term) return [];
       const limit = clampLimit(o.limit, DEFAULT_SEARCH_LIMIT);
-      const pattern = o.containerPattern === undefined ? null : new RegExp(o.containerPattern);
+      const pattern = o.surface ? CONTAINER_ID[o.surface] : null;
       const out: CachedMessage[] = [];
       for (const m of messages.values()) {
         for (const msg of m.values()) {
@@ -677,7 +682,7 @@ export function createMemorySurfaceCache(opts: { liveFallback?: LiveFallback } =
     async listContainers(o = {}) {
       const limit = clampLimit(o.limit, MAX_READ_LIMIT);
       const out: ContainerSummary[] = [];
-      const pattern = o.containerPattern === undefined ? null : new RegExp(o.containerPattern);
+      const pattern = o.surface ? CONTAINER_ID[o.surface] : null;
       for (const [k, st] of state) {
         if (pattern && !pattern.test(st.container)) continue;
         out.push({

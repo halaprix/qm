@@ -1,8 +1,10 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
 import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
-import { APPROVAL_SUMMARY_MAX, INLINE_COMMAND_MAX, isHttpUrl, sessionWebUrl } from "../surfaces/approval-limits.ts";
+import { APPROVAL_SUMMARY_MAX, INLINE_COMMAND_MAX } from "../surfaces/approval-limits.ts";
+import { conversationWebUrl } from "../util/conversation-links.ts";
 import type { Delivery } from "../types.ts";
+import { UUID } from "../util/uuid.ts";
 import { DISCORD_MESSAGE_LIMIT } from "./format.ts";
 import type { OutboundMessage } from "./sender.ts";
 
@@ -13,7 +15,6 @@ const CARD_ACTIONS = {
   dep: ["approve", "decline"],
 } as const;
 export const APPROVAL_EXPIRED_TEXT = "That approval request is no longer pending.";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LABELS: Record<CardKind, Record<string, [string, ButtonStyle]>> = {
   cmd: {
     once: ["Allow once", ButtonStyle.Success],
@@ -61,8 +62,7 @@ function commandCard(deliveryId: string, a: StoredApprovalView, webUiPublicUrl: 
   const summary = a.summary?.slice(0, APPROVAL_SUMMARY_MAX) ?? "";
   const body = [title, summary, "```", a.command, "```", a.reason ?? ""].filter(Boolean).join("\n");
   if (a.command.length > INLINE_COMMAND_MAX || body.length > DISCORD_MESSAGE_LIMIT) {
-    const place =
-      isHttpUrl(webUiPublicUrl) && a.sessionId ? sessionWebUrl(webUiPublicUrl, a.sessionId) : "this conversation in QM";
+    const place = (a.sessionId && conversationWebUrl(webUiPublicUrl, a.sessionId)) || "this conversation in QM";
     const link = [
       title,
       summary,

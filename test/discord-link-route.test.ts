@@ -40,6 +40,7 @@ async function fixture(t: TestContext, opts: FixtureOpts = {}) {
   const links = createPrincipalLinkService(createMemoryMap());
   installPrincipalLinks(links);
   const tokenCalls: string[] = [];
+  const tokenRedirects: Array<string | null> = [];
   const recordedAudits: Array<Record<string, unknown>> = [];
   const deps = {
     signingSecret: "test-signing-secret",
@@ -74,6 +75,7 @@ async function fixture(t: TestContext, opts: FixtureOpts = {}) {
         const form = new URLSearchParams(String(init.body));
         const code = form.get("code") ?? "";
         tokenCalls.push(code);
+        tokenRedirects.push(form.get("redirect_uri"));
         if (opts.tokenStatus !== undefined) {
           return new Response(JSON.stringify(opts.tokenBody ?? {}), {
             status: opts.tokenStatus,
@@ -167,7 +169,7 @@ async function fixture(t: TestContext, opts: FixtureOpts = {}) {
     new URL(
       String((await call("POST", "/v1/discord/link/authorize", { p }, { nonceHash })).body!.url),
     ).searchParams.get("state")!;
-  return { call, stateFor, links, tokenCalls, recordedAudits, deps };
+  return { call, stateFor, links, tokenCalls, tokenRedirects, recordedAudits, deps };
 }
 
 test("authorize returns Discord's identify URL with the stored client id and redirect", async (t) => {
@@ -246,6 +248,7 @@ test("a web user cannot link a Discord id they did not prove via OAuth", async (
     { code: "good", state, nonce: TEST_NONCE, discordUserId: CLAIMED, id: CLAIMED },
   );
   assert.equal(done.status, 200);
+  assert.deepEqual(f.tokenRedirects, ["https://agent.example/settings"]);
   assert.deepEqual(
     (await f.links.list()).map((l) => [l.principalId, l.canonicalId]),
     [[`discord:${PROVEN}`, "ana@acme.com"]],
@@ -310,104 +313,59 @@ test("a state minted for another principal is refused before any code exchange",
   assert.deepEqual(f.tokenCalls, []);
 });
 
-test("a state with wrong purpose is refused", async (t) => {
-  const f = await fixture(t);
-  const state = await mintSignedPayload(
-    {
-      purpose: "other-purpose",
-      principal: "ana@acme.com",
-      org: orgId(),
-      nonceHash: TEST_NONCE_HASH,
-      exp: Date.now() + DISCORD_LINK_STATE_TTL_MS,
-    },
-    "test-signing-secret",
-  );
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 400);
-  assert.equal(done.body?.error, "invalid_link");
-  assert.deepEqual(f.tokenCalls, []);
-});
+const BAD_STATES: Array<{
+  name: string;
+  body: (f: Awaited<ReturnType<typeof fixture>>) => Promise<Record<string, unknown>>;
+}> = [
+  {
+    name: "a state with wrong purpose",
+    body: async () => ({ code: "good", state: await signedState({ purpose: "other-purpose" }), nonce: TEST_NONCE }),
+  },
+  {
+    name: "a state with wrong org",
+    body: async () => ({ code: "good", state: await signedState({ org: "different-org" }), nonce: TEST_NONCE }),
+  },
+  {
+    name: "an expired state",
+    body: async () => ({ code: "good", state: await signedState({ exp: Date.now() - 1000 }), nonce: TEST_NONCE }),
+  },
+  {
+    name: "a tampered or unsigned state",
+    body: async () => ({ code: "good", state: "tampered.state.payload", nonce: TEST_NONCE }),
+  },
+  {
+    name: "a missing code",
+    body: async (f) => ({ state: await f.stateFor("ana@acme.com"), nonce: TEST_NONCE }),
+  },
+  {
+    name: "a missing state",
+    body: async () => ({ code: "good", nonce: TEST_NONCE }),
+  },
+];
 
-test("a state with wrong org is refused", async (t) => {
-  const f = await fixture(t);
-  const state = await mintSignedPayload(
-    {
-      purpose: "discord-account-link",
-      principal: "ana@acme.com",
-      org: "different-org",
-      nonceHash: TEST_NONCE_HASH,
-      exp: Date.now() + DISCORD_LINK_STATE_TTL_MS,
-    },
-    "test-signing-secret",
-  );
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 400);
-  assert.equal(done.body?.error, "invalid_link");
-  assert.deepEqual(f.tokenCalls, []);
-});
-
-test("an expired state is refused", async (t) => {
-  const f = await fixture(t);
-  const state = await mintSignedPayload(
+function signedState(over: Record<string, unknown>): Promise<string> {
+  return mintSignedPayload(
     {
       purpose: "discord-account-link",
       principal: "ana@acme.com",
       org: orgId(),
       nonceHash: TEST_NONCE_HASH,
-      exp: Date.now() - 1000,
+      exp: Date.now() + DISCORD_LINK_STATE_TTL_MS,
+      ...over,
     },
     "test-signing-secret",
   );
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 400);
-  assert.equal(done.body?.error, "invalid_link");
-  assert.deepEqual(f.tokenCalls, []);
-});
+}
 
-test("a tampered or unsigned state is refused", async (t) => {
-  const f = await fixture(t);
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: "tampered.state.payload", nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 400);
-  assert.equal(done.body?.error, "invalid_link");
-  assert.deepEqual(f.tokenCalls, []);
-});
-
-test("missing state or code is refused", async (t) => {
-  const f = await fixture(t);
-  const state = await f.stateFor("ana@acme.com");
-  const noCode = await f.call("POST", "/v1/discord/link/complete", { p: "ana@acme.com" }, { state, nonce: TEST_NONCE });
-  assert.equal(noCode.status, 400);
-  assert.equal(noCode.body?.error, "invalid_link");
-  const noState = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", nonce: TEST_NONCE },
-  );
-  assert.equal(noState.status, 400);
-  assert.equal(noState.body?.error, "invalid_link");
-  assert.deepEqual(f.tokenCalls, []);
-});
+for (const bad of BAD_STATES) {
+  test(`${bad.name} is refused before any code exchange`, async (t) => {
+    const f = await fixture(t);
+    const done = await f.call("POST", "/v1/discord/link/complete", { p: "ana@acme.com" }, await bad.body(f));
+    assert.equal(done.status, 400);
+    assert.equal(done.body?.error, "invalid_link");
+    assert.deepEqual(f.tokenCalls, []);
+  });
+}
 
 test("impersonating and capability callers are refused", async (t) => {
   const f = await fixture(t);
@@ -726,83 +684,26 @@ test("two concurrent completes with different Discord ids result in exactly one 
   assert.equal((await f.links.list()).length, 1);
 });
 
-test("Discord 5xx or 429 on token is 502 discord_unavailable", async (t) => {
-  const f500 = await fixture(t, { tokenStatus: 500 });
-  const state1 = await f500.stateFor("ana@acme.com");
-  const res500 = await f500.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: state1, nonce: TEST_NONCE },
-  );
-  assert.equal(res500.status, 502);
-  assert.equal(res500.body?.error, "discord_unavailable");
+for (const hop of ["tokenStatus", "meStatus"] as const) {
+  for (const status of [500, 429]) {
+    test(`Discord ${status} on ${hop === "tokenStatus" ? "token" : "/users/@me"} is 502 discord_unavailable`, async (t) => {
+      const f = await fixture(t, { [hop]: status });
+      const state = await f.stateFor("ana@acme.com");
+      const res = await f.call(
+        "POST",
+        "/v1/discord/link/complete",
+        { p: "ana@acme.com" },
+        { code: "good", state, nonce: TEST_NONCE },
+      );
+      assert.equal(res.status, 502);
+      assert.equal(res.body?.error, "discord_unavailable");
+    });
+  }
+}
 
-  const f429 = await fixture(t, { tokenStatus: 429 });
-  const state2 = await f429.stateFor("ana@acme.com");
-  const res429 = await f429.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: state2, nonce: TEST_NONCE },
-  );
-  assert.equal(res429.status, 502);
-  assert.equal(res429.body?.error, "discord_unavailable");
-});
-
-test("Discord 5xx or 429 on /users/@me is 502 discord_unavailable", async (t) => {
-  const f500 = await fixture(t, { meStatus: 500 });
-  const state1 = await f500.stateFor("ana@acme.com");
-  const res500 = await f500.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: state1, nonce: TEST_NONCE },
-  );
-  assert.equal(res500.status, 502);
-  assert.equal(res500.body?.error, "discord_unavailable");
-
-  const f429 = await fixture(t, { meStatus: 429 });
-  const state2 = await f429.stateFor("ana@acme.com");
-  const res429 = await f429.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: state2, nonce: TEST_NONCE },
-  );
-  assert.equal(res429.status, 502);
-  assert.equal(res429.body?.error, "discord_unavailable");
-});
-
-test("Discord 4xx other than 429 on token is 400 oauth_failed", async (t) => {
-  const f = await fixture(t, { tokenStatus: 403 });
-  const state = await f.stateFor("ana@acme.com");
-  const res = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(res.status, 400);
-  assert.equal(res.body?.error, "oauth_failed");
-});
-
-test("Discord 4xx other than 429 on /users/@me is 400 oauth_failed", async (t) => {
-  const f = await fixture(t, { meStatus: 403 });
-  const state = await f.stateFor("ana@acme.com");
-  const res = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(res.status, 400);
-  assert.equal(res.body?.error, "oauth_failed");
-});
-
-test("!token.ok guard: 4xx token response with valid-shaped body returns 400", async (t) => {
+test("Discord 4xx other than 429 on token is 400 oauth_failed and links nothing, even with a valid-shaped body", async (t) => {
   const f = await fixture(t, {
-    tokenStatus: 400,
+    tokenStatus: 403,
     tokenBody: { access_token: "user-token", token_type: "Bearer" },
   });
   const state = await f.stateFor("ana@acme.com");
@@ -817,7 +718,7 @@ test("!token.ok guard: 4xx token response with valid-shaped body returns 400", a
   assert.deepEqual(await f.links.list(), []);
 });
 
-test("!me.ok guard: 4xx /users/@me response with valid body returns 400", async (t) => {
+test("Discord 4xx other than 429 on /users/@me is 400 oauth_failed and links nothing, even with a valid body", async (t) => {
   const f = await fixture(t, {
     meStatus: 403,
     meBody: { id: PROVEN, username: "ana_d", discriminator: "0" },

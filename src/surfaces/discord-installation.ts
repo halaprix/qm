@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { decryptSecret, deriveConnectorKey, encryptSecret } from "../connectors/connector-client-store.ts";
 import { SNOWFLAKE } from "../util/snowflake.ts";
-import { discordPluginConfigFromEnv, type DiscordPluginConfig } from "../discord/config.ts";
+import type { DiscordPluginConfig } from "../discord/config.ts";
 import type { ReloadableSurfaceConfig } from "./surface-runtime.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 
@@ -11,8 +11,8 @@ const DISCORD_API_TIMEOUT_MS = 10_000;
 
 export class DiscordInstallationError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  constructor(status: number, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.status = status;
   }
 }
@@ -21,11 +21,9 @@ export interface DiscordInstallationSettings {
   allowUserIds: string[];
   guildIds: string[];
   internalRoleIds: string[];
-  principalDeliveries: boolean;
 }
 
-interface ActiveRecord extends DiscordInstallationSettings {
-  disabled: false;
+export interface StoredDiscordInstallation extends DiscordInstallationSettings {
   botTokenEnc: string;
   oauthClientSecretEnc: string | null;
   botUserId: string;
@@ -35,15 +33,6 @@ interface ActiveRecord extends DiscordInstallationSettings {
   updatedAt: number;
   updatedBy: string;
 }
-
-interface DisabledRecord {
-  disabled: true;
-  version: string;
-  updatedAt: number;
-  updatedBy: string;
-}
-
-export type StoredDiscordInstallation = ActiveRecord | DisabledRecord;
 
 export interface DiscordInstallation extends DiscordInstallationSettings {
   botToken: string;
@@ -56,7 +45,6 @@ export interface DiscordInstallation extends DiscordInstallationSettings {
 
 interface DiscordInstallationStatus extends DiscordInstallationSettings {
   configured: boolean;
-  disabled: boolean;
   botUserId?: string;
   botTag?: string;
   applicationId?: string;
@@ -87,14 +75,13 @@ export interface DiscordInstallationStore {
       updatedBy: string;
     },
   ): Promise<DiscordInstallationStatus>;
-  delete(updatedBy: string): Promise<void>;
+  delete(): Promise<void>;
 }
 
 const EMPTY_SETTINGS: DiscordInstallationSettings = {
   allowUserIds: [],
   guildIds: [],
   internalRoleIds: [],
-  principalDeliveries: true,
 };
 
 function idsFrom(raw: unknown, field: string): string[] {
@@ -137,7 +124,6 @@ export function parseDiscordSettings(
     allowUserIds,
     guildIds,
     internalRoleIds,
-    principalDeliveries: b.principalDeliveries !== false,
     ...(botToken ? { botToken } : {}),
     ...(oauthClientSecret ? { oauthClientSecret } : {}),
   };
@@ -151,20 +137,24 @@ async function botGet(path: string, token: string, fetchImpl: typeof fetch): Pro
       redirect: "error",
       signal: AbortSignal.timeout(DISCORD_API_TIMEOUT_MS),
     });
-  } catch {
-    throw new DiscordInstallationError(502, "Discord did not answer. Try again in a minute.");
+  } catch (cause) {
+    throw new DiscordInstallationError(502, "Discord did not answer. Try again in a minute.", { cause });
   }
   if (res.status === 429 || res.status >= 500) {
-    throw new DiscordInstallationError(502, "Discord did not answer. Try again in a minute.");
+    throw new DiscordInstallationError(502, "Discord did not answer. Try again in a minute.", {
+      cause: new Error(`Discord ${path} responded ${res.status}`),
+    });
   }
   if (!res.ok) {
-    throw new DiscordInstallationError(400, "Discord rejected the bot token");
+    throw new DiscordInstallationError(400, "Discord rejected the bot token", {
+      cause: new Error(`Discord ${path} responded ${res.status}`),
+    });
   }
   let data: unknown;
   try {
     data = await res.json();
-  } catch {
-    throw new DiscordInstallationError(502, "Discord returned an unexpected response");
+  } catch (cause) {
+    throw new DiscordInstallationError(502, "Discord returned an unexpected response", { cause });
   }
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new DiscordInstallationError(502, "Discord returned an unexpected response");
@@ -197,20 +187,9 @@ export function createDiscordInstallationStore(
   const read = () => map.get(orgId);
   const getStatus = async (): Promise<DiscordInstallationStatus> => {
     const r = await read();
-    if (!r) return { configured: false, disabled: false, oauthConfigured: false, ...EMPTY_SETTINGS };
-    if (r.disabled) {
-      return {
-        configured: false,
-        disabled: true,
-        oauthConfigured: false,
-        ...EMPTY_SETTINGS,
-        updatedAt: r.updatedAt,
-        updatedBy: r.updatedBy,
-      };
-    }
+    if (!r) return { configured: false, oauthConfigured: false, ...EMPTY_SETTINGS };
     return {
       configured: true,
-      disabled: false,
       botUserId: r.botUserId,
       botTag: r.botTag,
       applicationId: r.applicationId,
@@ -218,7 +197,6 @@ export function createDiscordInstallationStore(
       allowUserIds: r.allowUserIds,
       guildIds: r.guildIds,
       internalRoleIds: r.internalRoleIds,
-      principalDeliveries: r.principalDeliveries,
       updatedAt: r.updatedAt,
       updatedBy: r.updatedBy,
     };
@@ -226,7 +204,7 @@ export function createDiscordInstallationStore(
   return {
     async get() {
       const r = await read();
-      if (!r || r.disabled) return null;
+      if (!r) return null;
       return {
         botToken: decryptSecret(r.botTokenEnc, key),
         oauthClientSecret: r.oauthClientSecretEnc ? decryptSecret(r.oauthClientSecretEnc, key) : null,
@@ -236,7 +214,6 @@ export function createDiscordInstallationStore(
         allowUserIds: r.allowUserIds,
         guildIds: r.guildIds,
         internalRoleIds: r.internalRoleIds,
-        principalDeliveries: r.principalDeliveries,
         version: r.version,
       };
     },
@@ -244,10 +221,9 @@ export function createDiscordInstallationStore(
     async set(input) {
       if (!map.update) throw new Error("Atomic installation updates are required");
       const previous = await read();
-      const initialActive = previous && !previous.disabled ? previous : null;
-      if (!input.bot && !initialActive) throw new DiscordInstallationError(400, "a bot token is required");
+      if (!input.bot && !previous) throw new DiscordInstallationError(400, "a bot token is required");
       const updatedAt = Date.now();
-      const toRecord = (active: ActiveRecord | null): ActiveRecord => {
+      const toRecord = (active: StoredDiscordInstallation | null): StoredDiscordInstallation => {
         if (!input.bot && !active) throw new DiscordInstallationError(400, "a bot token is required");
         const botTokenEnc = input.bot ? encryptSecret(input.bot.token, key) : active!.botTokenEnc;
         let oauthClientSecretEnc: string | null = null;
@@ -262,7 +238,6 @@ export function createDiscordInstallationStore(
         const botTag = input.bot ? input.bot.tag : active!.botTag;
         const applicationId = input.bot ? input.bot.applicationId : active!.applicationId;
         return {
-          disabled: false,
           botTokenEnc,
           oauthClientSecretEnc,
           botUserId,
@@ -271,40 +246,22 @@ export function createDiscordInstallationStore(
           allowUserIds: input.allowUserIds,
           guildIds: input.guildIds,
           internalRoleIds: input.internalRoleIds,
-          principalDeliveries: input.principalDeliveries,
           version: `${updatedAt}:${randomUUID()}`,
           updatedAt,
           updatedBy: input.updatedBy,
         };
       };
-      if (!initialActive) {
+      if (!previous) {
         await map.putIfAbsent(orgId, toRecord(null));
       }
-      const stored = await map.update(orgId, (current) => {
-        const active = current && !current.disabled ? current : null;
-        return toRecord(active);
-      });
+      const stored = await map.update(orgId, toRecord);
       if (!stored) throw new Error("Discord installation disappeared during update");
       return getStatus();
     },
-    async delete(updatedBy) {
-      const updatedAt = Date.now();
-      const tombstone: DisabledRecord = {
-        disabled: true,
-        version: `${updatedAt}:${randomUUID()}`,
-        updatedAt,
-        updatedBy,
-      };
-      await map.put(orgId, tombstone);
+    async delete() {
+      await map.delete(orgId);
     },
   };
-}
-
-export function discordActive(
-  status: Pick<DiscordInstallationStatus, "configured" | "disabled">,
-  environmentConfigured: boolean,
-): boolean {
-  return !status.disabled && (status.configured || environmentConfigured);
 }
 
 export function discordPluginConfigFromInstallation(i: DiscordInstallation): DiscordPluginConfig {
@@ -317,15 +274,8 @@ export function discordPluginConfigFromInstallation(i: DiscordInstallation): Dis
 }
 
 export async function loadDiscordRuntimeConfig(
-  store: Pick<DiscordInstallationStore, "get" | "status">,
-  env: Record<string, string | undefined>,
+  store: Pick<DiscordInstallationStore, "get">,
 ): Promise<ReloadableSurfaceConfig<DiscordPluginConfig> | null> {
-  const status = await store.status();
-  if (status.disabled) return null;
-  if (status.configured) {
-    const stored = await store.get();
-    if (stored) return { version: stored.version, config: discordPluginConfigFromInstallation(stored) };
-  }
-  const fromEnv = discordPluginConfigFromEnv(env);
-  return fromEnv ? { version: "environment", config: fromEnv } : null;
+  const stored = await store.get();
+  return stored ? { version: stored.version, config: discordPluginConfigFromInstallation(stored) } : null;
 }

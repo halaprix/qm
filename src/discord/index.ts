@@ -2,15 +2,11 @@ import {
   ChannelType,
   Client,
   Events,
-  GatewayIntentBits,
   MessageFlags,
   MessageType,
   RESTJSONErrorCodes,
-  Partials,
   type AnyThreadChannel,
-  type ClientOptions,
   type Message,
-  type MessageCreateOptions,
   type MessageReaction,
   type PartialMessage,
   type PartialMessageReaction,
@@ -23,7 +19,8 @@ import type { DiscordCoreClient } from "../api/discord-core-client.ts";
 import type { IngestEvent } from "../surface-cache/types.ts";
 import { buildReactionTurnText, REACTION_ITEM_MESSAGE, shouldSurfaceReaction } from "../surfaces/reactions.ts";
 import type { ActorAssertion, SurfaceContextRequest } from "../types.ts";
-import { reportFailureAs, swallowAs } from "../util/errors.ts";
+import { jitteredBackoffMs } from "../util/async.ts";
+import { reportFailureAs, swallow, swallowAs } from "../util/errors.ts";
 import { createSweeper } from "../util/sweeper.ts";
 import { createDiscordAck } from "./ack.ts";
 import { createBackfill, type Backfill } from "./backfill.ts";
@@ -33,7 +30,7 @@ import {
   DISCORD_RETRY_BASE_MS,
   DISCORD_RETRY_MAX_MS,
   DISCORD_SURFACE,
-  discordUserIdOf,
+  recipientDiscordId,
   type DiscordPluginConfig,
 } from "./config.ts";
 import { createDeliveryGuard, createDiscordDispatcher } from "./deliveries.ts";
@@ -65,13 +62,14 @@ import {
   toInbound,
   type DiscordChannels,
 } from "./gateway.ts";
+import { DISCORD_CLIENT_OPTIONS, replyChannel } from "./client.ts";
 import { createMemberHydrator } from "./member-hydrator.ts";
 import { shouldMirror, toDeleteEvent, toEditEvent, toIngestEvent } from "./mirror.ts";
 import { audienceWith, channelReaders, turnPostGate, type ReaderResult } from "./readers.ts";
 import { createDiscordSender, NO_MENTIONS, sendable, type DiscordSender } from "./sender.ts";
 import { createStakeTracker, type StakeTracker } from "./thread-stake.ts";
 import { applyDiscordReactions, emojiDisplayName, reactionTallies, type MessageTarget } from "./reactions.ts";
-import { runDiscordTurn, type ReactHandler, type ReplyChannel } from "./turn-flow.ts";
+import { runDiscordTurn, type ReactHandler } from "./turn-flow.ts";
 
 type StreamGate = () => Promise<boolean>;
 const allowDmStream: StreamGate = async () => true;
@@ -91,20 +89,6 @@ export interface DiscordPlugin {
   stop(): Promise<void>;
 }
 
-export const DISCORD_CLIENT_OPTIONS: ClientOptions = {
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.DirectMessageReactions,
-  ],
-  partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
-  allowedMentions: NO_MENTIONS,
-};
-
 export interface DiscordPluginOptions {
   clientFactory?: () => Client;
   drainTimeoutMs: number;
@@ -121,33 +105,6 @@ interface ConnectionScope {
   backfill: Backfill;
 }
 
-function replyChannel(ch: {
-  send(options: MessageCreateOptions): Promise<{
-    id?: string;
-    edit(content: string): Promise<unknown>;
-    delete(): Promise<unknown>;
-  }>;
-  sendTyping?(): Promise<void>;
-}): ReplyChannel {
-  return {
-    send: async (content, files) => {
-      const sent = await ch.send({
-        content: content || undefined,
-        allowedMentions: NO_MENTIONS,
-        ...(files?.length ? { files } : {}),
-      });
-      return {
-        id: sent.id ?? "",
-        edit: (c) => sent.edit(c),
-        delete: () => sent.delete(),
-      };
-    },
-    typing: async () => {
-      if (typeof ch.sendTyping === "function") await ch.sendTyping();
-    },
-  };
-}
-
 export function createDiscordPlugin(
   cfg: DiscordPluginConfig,
   core: DiscordCoreClient,
@@ -161,7 +118,7 @@ export function createDiscordPlugin(
   let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
   let stopPromise: Promise<void> | null = null;
   let retryTimer: NodeJS.Timeout | null = null;
-  let retryDelay = DISCORD_RETRY_BASE_MS;
+  let loginFailures = 0;
   let stopped = true;
 
   const reactionsInFlight = new Set<string>();
@@ -563,7 +520,7 @@ export function createDiscordPlugin(
       guard,
       inFlightRuns,
       renderCard: createCardRenderer(core, opts.webUiPublicUrl),
-      recipientFor: (t) => discordUserIdOf(t) ?? core.discordUserIdsFor(t)[0] ?? null,
+      recipientFor: (t) => recipientDiscordId(t, core.discordUserIdsFor),
     });
 
     const interact = createInteractionHandler({
@@ -576,8 +533,8 @@ export function createDiscordPlugin(
         let ch;
         try {
           ch = await sendable(channels, target);
-        } catch {
-          return;
+        } catch (err) {
+          return swallow("discord continue turn target", err);
         }
         const isDm = body.conversation.kind === "dm";
         if (!isDm && !body.conversation.channelRef) return;
@@ -736,7 +693,7 @@ export function createDiscordPlugin(
 
     try {
       await c.login(cfg.botToken);
-      retryDelay = DISCORD_RETRY_BASE_MS;
+      loginFailures = 0;
     } catch (err) {
       reportFailureAs("discord plugin login", undefined)(err);
       detach();
@@ -747,12 +704,14 @@ export function createDiscordPlugin(
         detachClient = null;
       }
       if (!stopped && !retryTimer && isCurrent) {
-        const delay = retryDelay;
-        retryDelay = Math.min(retryDelay * 2, DISCORD_RETRY_MAX_MS);
-        retryTimer = setTimeout(() => {
-          retryTimer = null;
-          void connect();
-        }, delay);
+        loginFailures += 1;
+        retryTimer = setTimeout(
+          () => {
+            retryTimer = null;
+            void connect();
+          },
+          jitteredBackoffMs(loginFailures, { baseDelayMs: DISCORD_RETRY_BASE_MS, maxDelayMs: DISCORD_RETRY_MAX_MS }),
+        );
       }
     }
   }
@@ -770,7 +729,7 @@ export function createDiscordPlugin(
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      retryDelay = DISCORD_RETRY_BASE_MS;
+      loginFailures = 0;
       const detached = detachClient?.();
       client = null;
       detachClient = null;

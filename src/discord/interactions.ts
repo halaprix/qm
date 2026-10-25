@@ -2,11 +2,12 @@ import type { CoreTurnBody, SurfaceCoreClient } from "../api/surface-core-client
 import { approvalContinuation, approvalDeniedReason } from "../core/approval-continuation.ts";
 import { samePerson } from "../directory/person.ts";
 import type { ActorAssertion, Delivery, TurnResult } from "../types.ts";
-import { errMessage, reportFailureAs } from "../util/errors.ts";
+import { errMessage, reportFailure, reportFailureAs } from "../util/errors.ts";
 import { APPROVAL_EXPIRED_TEXT, keychainSettleText, parseCardCustomId, type CardKind } from "./approval-cards.ts";
-import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, discordUserIdOf } from "./config.ts";
+import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, recipientDiscordId } from "./config.ts";
 import { audienceWith, type ReaderResult } from "./readers.ts";
-import { FAILURE_TEXT, refusalText } from "./turn-flow.ts";
+import { GENERIC_FAILURE_TEXT } from "../../plugins/chassis/src/failure-copy.ts";
+import { refusalText } from "./turn-flow.ts";
 
 const ONLY_REQUESTER_TEXT = "Only the person who requested this command can approve or deny it.";
 const NOT_INTERNAL_TEXT = "Only people in the organization can decide this.";
@@ -16,7 +17,6 @@ const READERS_UNKNOWN_CLICK_TEXT =
   "I can't confirm who can read that conversation right now. Try the button again in a minute.";
 const CONTINUE_FAILED_TEXT = "I couldn't continue that yet. The card is still active, so try again.";
 const RETRY_PENDING_TEXT = "The request is still pending; use the web link in the thread to retry.";
-const RETRY_GONE_TEXT = "The request is no longer pending.";
 const KEYCHAIN_DECISION = { once: "once", standing: "standing", deny: "deny" } as const;
 
 export interface ButtonClick {
@@ -73,7 +73,7 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
     const quoted = `\`${approval.command}\``;
     let accepted = false;
     const finalText = async (result: TurnResult): Promise<string> => {
-      if (result.status === "failed") return FAILURE_TEXT;
+      if (result.status === "failed") return GENERIC_FAILURE_TEXT;
       if (result.status !== "refused") {
         return approved ? `Approved (${action}): ${quoted}` : `Denied: ${quoted}`;
       }
@@ -82,7 +82,7 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
         (a) => a !== null,
         () => true,
       );
-      return `Not approved: ${refusalText(result.reason)} ${pending ? RETRY_PENDING_TEXT : RETRY_GONE_TEXT}`;
+      return `Not approved: ${refusalText(result.reason)} ${pending ? RETRY_PENDING_TEXT : APPROVAL_EXPIRED_TEXT}`;
     };
     await deps.continueTurn(
       {
@@ -123,8 +123,7 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
     if (!d || kindOf(d) !== parsed.kind) return click.refuse(STALE_BUTTON_TEXT);
     if (d.destination.type !== DISCORD_DM_DELIVERY_TYPE) return click.refuse(STALE_BUTTON_TEXT);
     if (parsed.kind === "dep" && d.destination.copyOf) return click.refuse(STALE_BUTTON_TEXT);
-    const recipientUserId =
-      discordUserIdOf(d.destination.target) ?? deps.core.discordUserIdsFor(d.destination.target)[0] ?? null;
+    const recipientUserId = recipientDiscordId(d.destination.target, deps.core.discordUserIdsFor);
     if (recipientUserId !== click.userId) return click.refuse(STALE_BUTTON_TEXT);
     const subject = `${parsed.kind}:${subjectOf(d)}`;
     if (busy.has(subject)) return click.refuse(BUSY_TEXT);
@@ -148,6 +147,7 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
       );
       return await click.settle(text);
     } catch (err) {
+      reportFailure("discord: approval click", err, `subject=${subject}`);
       return click.refuse(`Couldn't complete that: ${errMessage(err)}`);
     } finally {
       busy.delete(subject);

@@ -20,3 +20,17 @@ test("the Slack codec still round-trips a ts and refuses a snowflake", () => {
   assert.equal(SLACK_MESSAGE_IDS.decode(SLACK_MESSAGE_IDS.encode("1717360800.000100")), "1717360800.000100");
   assert.equal(SLACK_MESSAGE_IDS.encode("1300000000000000001"), "");
 });
+
+test("the Discord comparator orders snowflakes numerically across digit-count boundaries", () => {
+  const ids = ["1300000000000000001", "999999999999999999", "1300000000000000000"];
+  assert.deepEqual([...ids].sort(DISCORD_MESSAGE_IDS.compare), [
+    "999999999999999999",
+    "1300000000000000000",
+    "1300000000000000001",
+  ]);
+  assert.deepEqual([...ids].sort(SLACK_MESSAGE_IDS.compare), [
+    "1300000000000000000",
+    "1300000000000000001",
+    "999999999999999999",
+  ]);
+});

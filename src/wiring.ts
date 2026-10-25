@@ -424,12 +424,9 @@ import {
 import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
 import { sleep, withTimeout } from "./util/async.ts";
+import { UUID } from "./util/uuid.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
-import {
-  createDiscordInstallationStore,
-  discordActive,
-  type DiscordInstallationStore,
-} from "./surfaces/discord-installation.ts";
+import { createDiscordInstallationStore, type DiscordInstallationStore } from "./surfaces/discord-installation.ts";
 
 export interface Runtime {
   start(): void;
@@ -1819,7 +1816,6 @@ export function buildApp(
     ),
     createDiscordPrincipalRoute({
       installation: discordInstallation,
-      environmentConfigured: config.discordEnvironmentConfigured,
       linkedDiscordUserIds,
     }),
   );
@@ -2061,7 +2057,7 @@ export function buildApp(
     puller: SurfaceContextPuller | undefined,
     query: Parameters<SurfacePull>[0],
   ): ReturnType<SurfacePull> => {
-    if (!discordActive(await discordInstallation.status(), config.discordEnvironmentConfigured)) return null;
+    if (!(await discordInstallation.status()).configured) return null;
     return (await puller?.pull(DISCORD_SURFACE, query)) ?? { messages: [], retry: true };
   };
   const discordLookup: SurfacePull = (query) => discordPull(orchestratorDeps.surfaceContext, query);
@@ -2174,11 +2170,10 @@ export function buildApp(
   };
   const orchestrator = createOrchestrator(orchestratorDeps);
 
-  const uuidId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const recoveryAdminBase = config.publicWebUrl?.replace(/\/$/, "");
   const recoveryAdminUrlFor = recoveryAdminBase
     ? (sessionId: string): string | undefined =>
-        uuidId.test(sessionId) ? adminSessionUrl(recoveryAdminBase, sessionId) : undefined
+        UUID.test(sessionId) ? adminSessionUrl(recoveryAdminBase, sessionId) : undefined
     : undefined;
   const runResultRecovery = wireRunResultDeliveries(runs, deliveries, recoveryAdminUrlFor, sessions);
   const idempotency = createIdempotencyStore(artifactMap<IdempotencyRecord>("idempotency"));
@@ -3184,7 +3179,6 @@ export function serverDeps(
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
     discordInstallation: built.discordInstallation,
-    discordEnvironmentConfigured: config.discordEnvironmentConfigured,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
     ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
     resolveClient: built.resolveClient,

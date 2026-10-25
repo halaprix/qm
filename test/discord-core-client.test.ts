@@ -69,6 +69,7 @@ describe("discord core client identity links", () => {
 
     assert.deepEqual(client.discordUserIdsFor("member@example.test"), ["discord-1", "discord-2"]);
     assert.deepEqual(client.discordUserIdsFor("other@example.test"), []);
+    assert.deepEqual(client.discordUserIdsFor("discord:111"), ["111"]);
   });
 
   it("active external member linked stays guest on Discord", async () => {

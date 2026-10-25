@@ -3,12 +3,31 @@ import { SNOWFLAKE } from "../util/snowflake.ts";
 export const MESSAGE_ID_TOKEN = /^~([0-9a-z]+)$/;
 const RADIX = 36;
 export const SLACK_CONTAINER = /^[CDG][A-Z0-9]+$/;
-export const SLACK_TS = /^(\d{6,})\.(\d{1,6})$/;
+const SLACK_TS = /^(\d{6,})\.(\d{1,6})$/;
 const MICROS_PER_SECOND = 1_000_000;
 
 export interface MessageIdCodec {
   encode(id: string): string;
   decode(token: string): string | null;
+  isRaw(id: string): boolean;
+  compare(a: string, b: string): number;
+}
+
+function compareText(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareTs(a: string, b: string): number {
+  const x = SLACK_TS.exec(a);
+  const y = SLACK_TS.exec(b);
+  if (!x || !y) return compareText(a, b);
+  return Number(x[1]) - Number(y[1]) || compareText(x[2]!.padEnd(6, "0"), y[2]!.padEnd(6, "0"));
+}
+
+function compareSnowflakes(a: string, b: string): number {
+  return a.length - b.length || compareText(a, b);
 }
 
 export function encodeTs(ts: string): string {
@@ -46,5 +65,15 @@ function decodeSnowflake(token: string): string | null {
   return SNOWFLAKE.test(id) ? id : null;
 }
 
-export const SLACK_MESSAGE_IDS: MessageIdCodec = { encode: encodeTs, decode: decodeTs };
-export const DISCORD_MESSAGE_IDS: MessageIdCodec = { encode: encodeSnowflake, decode: decodeSnowflake };
+export const SLACK_MESSAGE_IDS: MessageIdCodec = {
+  encode: encodeTs,
+  decode: decodeTs,
+  isRaw: (id) => SLACK_TS.test(id),
+  compare: compareTs,
+};
+export const DISCORD_MESSAGE_IDS: MessageIdCodec = {
+  encode: encodeSnowflake,
+  decode: decodeSnowflake,
+  isRaw: (id) => SNOWFLAKE.test(id),
+  compare: compareSnowflakes,
+};

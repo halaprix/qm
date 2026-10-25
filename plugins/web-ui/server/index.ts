@@ -6,6 +6,7 @@ import { swallow } from "../../chassis/src/errors.ts";
 import { appEditSlug } from "../src/app-edit.ts";
 import { composioCallbackUrl } from "./composio-return.ts";
 import { sharedSessionHtml } from "./shared-session.ts";
+import { discordLinkRoutes } from "./discord-link-routes.ts";
 import { uiCanvasRoutes } from "./ui-canvas-routes.ts";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -1375,47 +1376,7 @@ const apiRoutes: readonly WebRoute[] = [
       return relayCore(c.res, "POST", "/v1/composio/slack/complete", JSON.stringify({ ticket: body.ticket }));
     },
   },
-  {
-    method: "GET",
-    path: "/api/discord/link",
-    handle: (c) => {
-      c.res.setHeader("Cache-Control", "no-store");
-      return relayCore(c.res, "GET", "/v1/discord/link");
-    },
-  },
-  {
-    method: "POST",
-    path: "/api/discord/link/authorize",
-    handle: async (c) => {
-      const body = await readJson<{ nonceHash?: unknown }>(c.req, c.res, false);
-      if (!body) return;
-      c.res.setHeader("Cache-Control", "no-store");
-      return relayCore(c.res, "POST", "/v1/discord/link/authorize", JSON.stringify({ nonceHash: body.nonceHash }));
-    },
-  },
-  {
-    method: "POST",
-    path: "/api/discord/link/complete",
-    handle: async (c) => {
-      const body = await readJson<{ code?: unknown; state?: unknown; nonce?: unknown }>(c.req, c.res, false);
-      if (!body) return;
-      c.res.setHeader("Cache-Control", "no-store");
-      return relayCore(
-        c.res,
-        "POST",
-        "/v1/discord/link/complete",
-        JSON.stringify({ code: body.code, state: body.state, nonce: body.nonce }),
-      );
-    },
-  },
-  {
-    method: "DELETE",
-    path: "/api/discord/link",
-    handle: (c) => {
-      c.res.setHeader("Cache-Control", "no-store");
-      return relayCore(c.res, "DELETE", "/v1/discord/link");
-    },
-  },
+  ...discordLinkRoutes({ relayCore, readJson }),
   {
     method: "GET",
     path: "/api/composio/toolkits",

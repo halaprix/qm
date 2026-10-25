@@ -714,6 +714,24 @@ test("count is clamped between 1 and 100", async () => {
   assert.deepEqual(counts, [1, 100]);
 });
 
+test("a read with no count asks for the default window, and an explicit count may go up to the max", async () => {
+  const counts: number[] = [];
+  const fulfill = createContextFulfiller({
+    core: { fulfillContextRequest: async () => {}, discordUserIdsFor: () => ["111"] },
+    reader: {
+      recent: async (_channelId, opts) => {
+        counts.push(opts.count);
+        return [];
+      },
+      canView: async () => true,
+    },
+    botUserId: () => "999",
+  });
+  await fulfill(req({ conversationTarget: "t1", viewer: "ana@acme.com" }));
+  await fulfill(req({ conversationTarget: "t1", viewer: "ana@acme.com", count: 100 }));
+  assert.deepEqual(counts, [20, 100]);
+});
+
 test("before parameter is passed through to recent", async () => {
   let capturedBefore: string | undefined;
   const reader: Pick<DiscordHistoryReader, "recent" | "canView"> = {

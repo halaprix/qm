@@ -19,6 +19,7 @@ import { messageWithForwardedContent } from "./forwards.ts";
 export const RECENT_HISTORY_LIMIT = 200;
 export const RECENT_THREAD_LIMIT = 200;
 export const MAX_NAME_LOOKUPS = 10;
+const SLACK_MENTION_ID = /^[A-Z0-9]+$/i;
 const RECENT_KEEP_SUBTYPES = new Set(["file_share", "bot_message", "thread_broadcast"]);
 
 export const slackFileName = (f: SlackFile): string => f.name || f.title || f.id || "file";
@@ -199,21 +200,27 @@ export function createConversationSerializer(deps: {
     const raw = page.raw;
     if (inc.rawText !== undefined && !raw.some((m) => m.ts === inc.ts))
       raw.push({ ts: inc.ts, text: inc.rawText, user: inc.userId, thread_ts: inc.threadTs, files: inc.files });
-    const messages = recentWindow(await shapeRecentMessages(client, raw, inc.ts, nameById), RECENT_MESSAGE_WINDOW);
+    const messages = recentWindow(
+      await shapeRecentMessages(client, raw, inc.ts, nameById),
+      SLACK_MESSAGE_IDS,
+      RECENT_MESSAGE_WINDOW,
+    );
 
     const members =
       ctx.audience.length > 0 && ctx.audience.length <= MEMBERS_SHOW_MAX
         ? ctx.audience
             .filter((a) => a.displayName)
-            .map((a) => ({
-              id: a.externalId,
-              name: a.displayName as string,
-              ...(ctx.slackIdsByPrincipal?.get(a.externalId)
-                ? { mentionId: ctx.slackIdsByPrincipal.get(a.externalId) }
-                : {}),
-              ...(a.externalId === ids.botUserId ? { isYou: true } : {}),
-              ...(a.isBot ? { isBot: true } : {}),
-            }))
+            .map((a) => {
+              const mentionId =
+                ctx.slackIdsByPrincipal?.get(a.externalId) ?? (SLACK_MENTION_ID.test(a.externalId) ? a.externalId : "");
+              return {
+                id: a.externalId,
+                name: a.displayName as string,
+                ...(mentionId ? { mentionId } : {}),
+                ...(a.externalId === ids.botUserId ? { isYou: true } : {}),
+                ...(a.isBot ? { isBot: true } : {}),
+              };
+            })
         : [];
 
     let here: ConversationView["here"];

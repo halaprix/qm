@@ -1,3 +1,4 @@
+import { jitteredBackoffMs } from "../util/async.ts";
 import { DISCORD_RETRY_BASE_MS, DISCORD_RETRY_MAX_MS } from "./config.ts";
 
 export interface MemberHydrator {
@@ -20,7 +21,7 @@ export function createMemberHydrator(opts: {
   let stopped = false;
   const allReady = () => [...opts.guildIds].every((g) => ready.has(g));
 
-  function fetchGuild(guildId: string, delay: number, gen: number): void {
+  function fetchGuild(guildId: string, attempt: number, gen: number): void {
     void opts.fetchAll(guildId).then(
       () => {
         if (gen !== generation || stopped) return;
@@ -30,10 +31,13 @@ export function createMemberHydrator(opts: {
       (err: unknown) => {
         opts.onError?.(guildId, err);
         if (gen !== generation || stopped) return;
-        const retry = setTimeout(() => {
-          retries.delete(retry);
-          fetchGuild(guildId, Math.min(delay * 2, DISCORD_RETRY_MAX_MS), gen);
-        }, delay);
+        const retry = setTimeout(
+          () => {
+            retries.delete(retry);
+            fetchGuild(guildId, attempt + 1, gen);
+          },
+          jitteredBackoffMs(attempt, { baseDelayMs: DISCORD_RETRY_BASE_MS, maxDelayMs: DISCORD_RETRY_MAX_MS }),
+        );
         retries.add(retry);
       },
     );
@@ -50,7 +54,7 @@ export function createMemberHydrator(opts: {
     hydrate() {
       if (stopped) return;
       invalidate();
-      for (const guildId of opts.guildIds) fetchGuild(guildId, DISCORD_RETRY_BASE_MS, generation);
+      for (const guildId of opts.guildIds) fetchGuild(guildId, 1, generation);
     },
     invalidate,
     ready: (guildId) => ready.has(guildId),

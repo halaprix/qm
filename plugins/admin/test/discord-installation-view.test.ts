@@ -45,13 +45,10 @@ async function render(
 test("the Discord card shows the bot and lists and never renders a token", async () => {
   const { $ } = await render({
     configured: true,
-    disabled: false,
-    source: "admin",
     botTag: "qm-bot",
     allowUserIds: ["123456789012345678"],
     guildIds: ["900000000000000000"],
     internalRoleIds: [],
-    principalDeliveries: true,
     oauthConfigured: true,
     redirectUri: "https://agent.example/settings",
     botToken: "LEAKED_TOKEN",
@@ -64,20 +61,16 @@ test("the Discord card shows the bot and lists and never renders a token", async
   }
   assert.equal(($("discord-redirect-uri") as HTMLInputElement).value, "https://agent.example/settings");
   assert.equal(($("discord-guild-ids") as HTMLInputElement).value, "900000000000000000");
-  assert.equal(($("discord-principal-deliveries") as HTMLInputElement).checked, true);
+  assert.equal($("discord-principal-deliveries"), null);
   assert.equal($("card-discord-installation").innerHTML.includes("LEAKED_TOKEN"), false);
 });
 
-test("shows correct title for each configuration state", async () => {
-  const env = await render({ configured: false, source: "environment" });
-  assert.equal(env.$("discord-installation-state").textContent, "Using environment config");
-  assert.equal(env.$("discord-remove").classList.contains("hidden"), true);
+test("shows the connected title and a visible Disconnect only when configured", async () => {
+  const connected = await render({ configured: true, botTag: "qm-bot" });
+  assert.equal(connected.$("discord-installation-state").textContent, "Connected as qm-bot");
+  assert.equal(connected.$("discord-remove").classList.contains("hidden"), false);
 
-  const disabled = await render({ configured: false, disabled: true, source: "disabled" });
-  assert.equal(disabled.$("discord-installation-state").textContent, "Disconnected");
-  assert.equal(disabled.$("discord-remove").classList.contains("hidden"), true);
-
-  const unconfigured = await render({ configured: false, disabled: false, source: "none" });
+  const unconfigured = await render({ configured: false });
   assert.equal(unconfigured.$("discord-installation-state").textContent, "Not configured");
   assert.equal(unconfigured.$("discord-remove").classList.contains("hidden"), true);
 });
@@ -87,11 +80,9 @@ test("save sends the lists as arrays and omits an empty token and empty secret",
   const { $, dom } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: false,
     },
     (m: string, _p: string, b: unknown) => {
       if (m === "PUT") sent.push(b);
@@ -105,7 +96,6 @@ test("save sends the lists as arrays and omits an empty token and empty secret",
     allowUserIds: [],
     guildIds: ["900000000000000000", "900000000000000001"],
     internalRoleIds: [],
-    principalDeliveries: false,
   });
   assert.equal("botToken" in (sent[0] as Record<string, unknown>), false);
   assert.equal("oauthClientSecret" in (sent[0] as Record<string, unknown>), false);
@@ -116,11 +106,9 @@ test("save includes token and oauth secret when provided and clears inputs after
   const { $, dom } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: true,
     },
     (m: string, _p: string, b: unknown) => {
       if (m === "PUT") sent.push(b);
@@ -144,11 +132,9 @@ test("secrets are cleared after save even if the save fails", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: true,
     },
     (m: string) => {
       if (m === "PUT") return { ok: false, data: { message: "Invalid credentials" } };
@@ -170,11 +156,9 @@ test("error messages render as textContent and do not inject markup", async () =
   const { $ } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: true,
     },
     (m: string) => {
       if (m === "PUT") return { ok: false, data: { message: maliciousMessage } };
@@ -191,11 +175,9 @@ test("disconnect cancels when confirm returns false", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: true,
     },
     (m: string) => {
       sent.push(m);
@@ -212,11 +194,9 @@ test("disconnect calls DELETE when confirm returns true", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      source: "admin",
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
-      principalDeliveries: true,
     },
     (m: string) => {
       sent.push(m);
@@ -280,7 +260,7 @@ test("proxy allowlist forwards GET, PUT, and DELETE for discord-installation and
   assert.equal(postRes.status, 404);
 });
 
-test("save sends principalDeliveries true by default even if load fails", async () => {
+test("save never sends a principalDeliveries setting", async () => {
   const sent: unknown[] = [];
   const { $ } = await render({}, (m: string, _p: string, b: unknown) => {
     if (m === "GET") return { ok: false, data: { message: "Server error" } };
@@ -291,14 +271,13 @@ test("save sends principalDeliveries true by default even if load fails", async 
   });
   ($("discord-save") as HTMLButtonElement).click();
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal((sent[0] as Record<string, unknown>)?.principalDeliveries, true);
+  assert.equal("principalDeliveries" in (sent[0] as Record<string, unknown>), false);
 });
 
 test("renders application id and redirect URI and copies redirect URI to clipboard", async () => {
   let copied = "";
   const { $, dom } = await render({
     configured: true,
-    source: "admin",
     applicationId: "987654321098765432",
     redirectUri: "https://agent.example/settings",
   });
@@ -327,7 +306,6 @@ test("renders application id and redirect URI and copies redirect URI to clipboa
 test("typed but unsaved token is cleared when navigating away and back", async () => {
   const { $, dom } = await render({
     configured: true,
-    source: "admin",
   });
   ($("discord-bot-token") as HTMLInputElement).value = "unsaved-token";
   $("discord-bot-token").dispatchEvent(new dom.window.Event("input"));
@@ -342,7 +320,6 @@ test("typed but unsaved token is cleared when navigating away and back", async (
 test("copy redirect URI falls back to execCommand when clipboard is unavailable", async () => {
   const { $, dom } = await render({
     configured: true,
-    source: "admin",
     redirectUri: "https://agent.example/settings",
   });
   Object.defineProperty(dom.window.navigator, "clipboard", {

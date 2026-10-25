@@ -45,14 +45,15 @@ export function routeMessage(
 ): Routed | null {
   const botUserId = bot.id;
   if (msg.authorId === botUserId) return null;
-  const mention = new RegExp(`<@!?${botUserId}>`, "g");
-  const text = msg.content.replace(mention, `@${bot.name}`).trim();
+  const replaceMention = (replacement: string) =>
+    msg.content.replaceAll(`<@${botUserId}>`, replacement).replaceAll(`<@!${botUserId}>`, replacement);
+  const text = replaceMention(`@${bot.name}`).trim();
   if (!text && msg.attachments.length === 0) return null;
   if (msg.guildId === null) return { target: "dm", text };
   if (!guildIds.has(msg.guildId)) return null;
   const mentioned = msg.mentionedUserIds.includes(botUserId);
   if (msg.threadParentId !== null) return { target: "thread", text, unprompted: !mentioned };
-  return mentioned ? { target: "new-thread", text, title: msg.content.replace(mention, "").trim() } : null;
+  return mentioned ? { target: "new-thread", text, title: replaceMention("").trim() } : null;
 }
 
 export function conversationFor(

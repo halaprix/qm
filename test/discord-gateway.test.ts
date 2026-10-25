@@ -12,6 +12,7 @@ import {
 } from "../src/discord/gateway.ts";
 import { withReplyContext } from "../src/discord/forwards.ts";
 import { ChannelType, PermissionFlagsBits } from "discord.js";
+import { DISCORD_AUDIENCE_CAP, channelReaders } from "../src/discord/readers.ts";
 import { noLinkChannels } from "./support/discord-channels.ts";
 
 const member = (id: string, roles: string[], bot = false, guildId = "900") => ({
@@ -395,4 +396,75 @@ test("every channel the gateway resolves links a private thread before returning
   assert.deepEqual(links, ["p1>c1"]);
   await assert.rejects(reader(failing).find("p1"), /store down/);
   assert.deepEqual(await channelViewers(failing, "p1"), { ok: false, reason: "members_not_ready" });
+});
+
+test("channelViewers stops scanning past the audience cap and the readers come back as too many", async () => {
+  const members = Array.from({ length: DISCORD_AUDIENCE_CAP * 3 }, (_, i) => member(String(1000 + i), []));
+  const g = guild("900", members);
+  let checked = 0;
+  const channel = {
+    id: "c1",
+    guild: g,
+    isThread: () => false,
+    permissionsFor: () => {
+      checked += 1;
+      return { has: () => true };
+    },
+  };
+  const viewers = await channelViewers(noLinkChannels({ channels: { cache: new Map([["c1", channel]]) } }), "c1");
+  assert.ok(checked <= DISCORD_AUDIENCE_CAP + 2, `checked ${checked} members`);
+  const readers = await channelReaders({
+    viewers,
+    guildIds: new Set(["900"]),
+    ready: () => true,
+    botUserId: "bot",
+    classify: async () => assert.fail("must not classify an over-cap audience"),
+  });
+  assert.deepEqual(readers, { ok: false, retry: false, reason: "too_many_readers" });
+});
+
+test("an audience of exactly the cap plus the bot is still readable", async () => {
+  const members = [
+    ...Array.from({ length: DISCORD_AUDIENCE_CAP }, (_, i) => member(String(1000 + i), [])),
+    member("bot", [], true),
+  ];
+  const channel = {
+    id: "c1",
+    guild: guild("900", members),
+    isThread: () => false,
+    permissionsFor: () => ({ has: () => true }),
+  };
+  const viewers = await channelViewers(noLinkChannels({ channels: { cache: new Map([["c1", channel]]) } }), "c1");
+  const readers = await channelReaders({
+    viewers,
+    guildIds: new Set(["900"]),
+    ready: () => true,
+    botUserId: "bot",
+    classify: async (m) => ({ externalId: m.userId }) as never,
+  });
+  assert.equal(readers.ok, true);
+});
+
+test("a bot among the first permitted members cannot hide a larger audience behind the cap", async () => {
+  const humans = (from: number, n: number) => Array.from({ length: n }, (_, i) => member(String(from + i), []));
+  const members = [
+    ...humans(1000, DISCORD_AUDIENCE_CAP),
+    member("bot", [], true),
+    ...humans(5000, DISCORD_AUDIENCE_CAP),
+  ];
+  const channel = {
+    id: "c1",
+    guild: guild("900", members),
+    isThread: () => false,
+    permissionsFor: () => ({ has: () => true }),
+  };
+  const viewers = await channelViewers(noLinkChannels({ channels: { cache: new Map([["c1", channel]]) } }), "c1");
+  const readers = await channelReaders({
+    viewers,
+    guildIds: new Set(["900"]),
+    ready: () => true,
+    botUserId: "bot",
+    classify: async () => assert.fail("must not classify an over-cap audience"),
+  });
+  assert.deepEqual(readers, { ok: false, retry: false, reason: "too_many_readers" });
 });

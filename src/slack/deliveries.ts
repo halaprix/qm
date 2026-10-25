@@ -34,7 +34,7 @@ import { cleanAgentReplyForSlack, stripSlackDirectives } from "./messaging.ts";
 import { cronIdOf } from "../sessions/session-store.ts";
 import { slackErrorCode } from "./payloads.ts";
 import { relaySenderAttribution } from "../reach/reach.ts";
-import { sessionWebUrl } from "../surfaces/approval-limits.ts";
+import { conversationWebUrl } from "../util/conversation-links.ts";
 import { runIdOfDeliveryKey } from "../delivery/run-result-delivery.ts";
 
 const DELIVERY_CLAIM_MS = 15_000;
@@ -422,18 +422,18 @@ export function createDeliveryPoller(deps: {
                 return undefined;
               let card: { text: string; blocks: Array<Record<string, unknown>> } | null = null;
               if (d.destination.deploymentAccess) card = deployAccessMessage(d.destination.deploymentAccess, d.text);
-              if (commandApproval)
+              if (commandApproval) {
+                const originUrl = commandApproval.sessionId
+                  ? conversationWebUrl(deps.webUiPublicUrl, commandApproval.sessionId)
+                  : undefined;
                 card = approvalMessage([
                   {
                     ...commandApproval,
                     reason: commandApproval.reason ?? "Approval required",
-                    ...(deps.webUiPublicUrl && commandApproval.sessionId
-                      ? {
-                          originUrl: sessionWebUrl(deps.webUiPublicUrl, commandApproval.sessionId),
-                        }
-                      : {}),
+                    ...(originUrl ? { originUrl } : {}),
                   },
                 ]);
+              }
               let text = card?.text ?? toSlackMrkdwn(stripReactionDirectives(d.text));
               if (!text.trim() && !d.attachments?.length) return undefined;
               const channel = await openConversationFor(client, [d.destination.target]);

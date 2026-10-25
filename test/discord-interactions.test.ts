@@ -1,3 +1,6 @@
+import { installPrincipalLinks } from "../src/directory/person.ts";
+import { createPrincipalLinkService } from "../src/identity/principal-links.ts";
+import { linkedDiscordUserIds } from "../src/api/discord-core-client.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cardCustomId } from "../src/discord/approval-cards.ts";
@@ -50,7 +53,7 @@ function harness(opts: {
         return opts.approval === undefined ? { requestId: "A1", command: "rm", request } : opts.approval;
       },
       decideDeploymentAccess: async (_v: string, _a: unknown, approve: boolean) => (approve ? "Granted" : "Declined"),
-      discordUserIdsFor: () => [],
+      discordUserIdsFor: linkedDiscordUserIds,
       ...(opts.omitKeychainApprovals
         ? {}
         : {
@@ -320,7 +323,7 @@ test("a refusal after the approval record is gone says it is no longer pending",
     approvalGoneAfterFirstRead: true,
   });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
-  assert.ok(h.log.includes("final:Not approved: I can't do that: nope The request is no longer pending."));
+  assert.ok(h.log.includes("final:Not approved: I can't do that: nope That approval request is no longer pending."));
 });
 
 test("a deny click whose result is refused with approval denied shows Denied", async () => {
@@ -349,7 +352,7 @@ test("an approve click refused with approval denied text is not shown as Denied 
 test("a failed run shows the failure text on the final card", async () => {
   const h = harness({ destination: { commandApprovalId: "A1" }, submitResult: { status: "failed" } });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
-  assert.ok(h.log.includes("final:Something went wrong on my side and I couldn't finish that. Please try again."));
+  assert.ok(h.log.includes("final:Something went wrong on my end and I couldn't finish that. Try again in a moment."));
 });
 
 test("a failing final edit never throws into the click handler", async () => {
@@ -398,4 +401,20 @@ test("a clicker who is not the DM recipient refuses as a stale button", async ()
   });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
   assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
+});
+
+test("with two linked Discord accounts the card belongs to the account it was addressed to", async () => {
+  const links = createPrincipalLinkService();
+  installPrincipalLinks(links);
+  try {
+    for (const id of ["111", "1111", "2222"])
+      await links.link({ principalId: `discord:${id}`, canonicalId: "m@x.test", evidence: "e", linkedBy: "a" });
+    const h = harness({ destination: { commandApprovalId: "A1", target: "discord:2222" } });
+    await h.handler(h.click("1111", cardCustomId("cmd", "session", DID)));
+    assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
+    await h.handler(h.click("2222", cardCustomId("cmd", "session", DID)));
+    assert.ok(h.log.includes("settle:Approving `rm`…"));
+  } finally {
+    installPrincipalLinks(createPrincipalLinkService());
+  }
 });

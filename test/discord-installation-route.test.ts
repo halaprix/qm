@@ -13,10 +13,7 @@ import { createDiscordInstallationStore } from "../src/surfaces/discord-installa
 const TOKEN = "MTIzNDU2Nzg5MDEyMzQ1Njc4.SECRET.TOKENVALUE";
 const CLIENT_SECRET = "oauth-client-SECRET-value";
 
-async function fixture(
-  t: test.TestContext,
-  options: { discordEnvironmentConfigured?: boolean; omitStore?: boolean } = {},
-) {
+async function fixture(t: test.TestContext, options: { omitStore?: boolean } = {}) {
   const map = createMemoryMap();
   const store = options.omitStore
     ? undefined
@@ -24,7 +21,6 @@ async function fixture(
   const auditEntries: Array<{ action: string; resource: string; principalId: string }> = [];
   const deps = {
     discordInstallation: store,
-    discordEnvironmentConfigured: options.discordEnvironmentConfigured ?? false,
     portalUrl: "https://agent.example",
     discordInstallationFetch: (async (url: string | URL) => {
       const u = new URL(String(url));
@@ -100,9 +96,9 @@ test("no admin response contains the token or the OAuth client secret", async (t
   const body = JSON.parse(get.raw);
   assert.equal(body.configured, true);
   assert.equal(body.oauthConfigured, true);
-  assert.equal(body.principalDeliveries, true);
+  assert.equal("principalDeliveries" in body, false);
   assert.equal(body.redirectUri, "https://agent.example/settings");
-  assert.equal(JSON.parse((await call("GET")).raw).source, "disabled");
+  assert.equal(JSON.parse((await call("GET")).raw).configured, false);
 });
 
 test("non-admin caller is refused on every route", async (t) => {
@@ -159,13 +155,4 @@ test("invalid input produces 400 and does not echo secrets", async (t) => {
   assert.equal(res.raw.includes(TOKEN), false);
   const parsed = JSON.parse(res.raw);
   assert.equal(parsed.error, "invalid_discord_installation");
-});
-
-test("unconfigured installation reports environment source when configured in environment", async (t) => {
-  const { call } = await fixture(t, { discordEnvironmentConfigured: true });
-  const get = await call("GET");
-  assert.equal(get.status, 200);
-  const body = JSON.parse(get.raw);
-  assert.equal(body.configured, false);
-  assert.equal(body.source, "environment");
 });

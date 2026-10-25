@@ -18,7 +18,8 @@ import type {
   TurnRequest,
   TurnResult,
 } from "../types.ts";
-import { swallowAs } from "../util/errors.ts";
+import { sleep } from "../util/async.ts";
+import { errMessage, swallowAs } from "../util/errors.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
 import type { LeaderLease } from "../persistence/leader-lease.ts";
@@ -76,6 +77,22 @@ export interface SurfaceCoreClient {
   keychainApprovals?: KeychainApprovals;
 }
 
+const ACK_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
+
+export async function ackRunDeliveryWithRetry(
+  core: Pick<SurfaceCoreClient, "ackRunDelivery">,
+  runId: string,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await core.ackRunDelivery(runId);
+    } catch (err) {
+      if (attempt >= ACK_RETRY_DELAYS_MS.length) throw err;
+      await sleep(ACK_RETRY_DELAYS_MS[attempt]!);
+    }
+  }
+}
+
 export async function readOutgoingAttachment(
   source: Pick<SurfaceCoreClient, "readBlob" | "readFileArtifact">,
   a: OutgoingAttachment,
@@ -84,7 +101,9 @@ export async function readOutgoingAttachment(
     return await source.readBlob(a.blobId);
   } catch (err) {
     if (!a.artifactId || !a.artifactViewerId) throw err;
-    return source.readFileArtifact(a.artifactId, a.artifactViewerId);
+    return source.readFileArtifact(a.artifactId, a.artifactViewerId).catch((fallbackErr: unknown) => {
+      throw new AggregateError([err, fallbackErr], errMessage(fallbackErr));
+    });
   }
 }
 

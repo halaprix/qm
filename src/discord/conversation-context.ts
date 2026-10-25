@@ -11,7 +11,7 @@ import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 import type { ActorAssertion, ConversationTurn, GatewayContext, OverheardMessage } from "../types.ts";
 import { swallow } from "../util/errors.ts";
 import { DISCORD_SURFACE, discordUserIdOf } from "./config.ts";
-import { DISCORD_READ_MAX, type DiscordHistoryReader, type HistoryMessage } from "./context.ts";
+import { type DiscordHistoryReader, type HistoryMessage } from "./context.ts";
 import type { DiscordConversationTarget } from "./events.ts";
 
 const HISTORY_UNREADABLE_NOTE = "Discord context could not be read; earlier messages may be missing.";
@@ -20,7 +20,9 @@ const REACTION_TARGET_INSTRUCTION =
   "Each message in the conversation above carries an id in brackets like `[~abc123]`. To react to one of those messages, " +
   "pass that exact id, including the leading `~`, as the react action's `ts`.";
 
-const LEGACY_NICKNAME_MENTION = /<@!(\d+)>/g;
+const CONTEXT_FETCH_SLACK = 5;
+
+const NICKNAME_MENTION = /<@!(\d+)>/g;
 
 export interface DiscordTurnContext {
   conversationHeader?: string;
@@ -55,11 +57,32 @@ function shape(m: HistoryMessage, botUserId: string, triggerId: string): RecentM
     ts: m.id,
     name: m.authorName,
     authorId: m.authorId,
-    text: m.text.replace(LEGACY_NICKNAME_MENTION, "<@$1>").trim(),
+    text: m.text.replace(NICKNAME_MENTION, "<@$1>").trim(),
     ...(m.id === triggerId ? { isTrigger: true } : {}),
     ...(m.authorIsBot ? { isBot: true } : {}),
     ...(m.authorId === botUserId ? { isSelf: true } : {}),
   };
+}
+
+function memberList(
+  audience: readonly ActorAssertion[],
+  botUserId: string,
+  botName: string,
+): ConversationView["members"] {
+  if (audience.length === 0 || audience.length > MEMBERS_SHOW_MAX) return [];
+  const others = audience
+    .filter((a) => a.displayName && discordUserIdOf(a.externalId) !== botUserId)
+    .sort((a, b) => Number(a.externalId > b.externalId) - Number(a.externalId < b.externalId))
+    .map((a) => {
+      const mentionId = discordUserIdOf(a.externalId);
+      return {
+        id: a.externalId,
+        name: a.displayName as string,
+        ...(mentionId ? { mentionId } : {}),
+        ...(a.isBot ? { isBot: true } : {}),
+      };
+    });
+  return [{ id: botUserId, name: botName, mentionId: botUserId, isYou: true }, ...others];
 }
 
 export async function buildGuildTurnContext(
@@ -77,7 +100,10 @@ export async function buildGuildTurnContext(
   if (input.audience.some((a) => a.isExternalGuest)) return {};
   let note: string | undefined;
   const history = await reader
-    .recent(input.historyChannelId, { count: DISCORD_READ_MAX, ...(input.before ? { before: input.before } : {}) })
+    .recent(input.historyChannelId, {
+      count: MAX_RECENT_MESSAGES + CONTEXT_FETCH_SLACK,
+      ...(input.before ? { before: input.before } : {}),
+    })
     .catch((err: unknown) => {
       swallow("discord: conversation context", err);
       note = HISTORY_UNREADABLE_NOTE;
@@ -100,20 +126,7 @@ export async function buildGuildTurnContext(
     if (id && a.displayName) nameById.set(id, a.displayName);
   }
 
-  const members =
-    input.audience.length > 0 && input.audience.length <= MEMBERS_SHOW_MAX
-      ? [
-          { id: botUserId, name: botName, mentionId: botUserId, isYou: true },
-          ...input.audience
-            .filter((a) => a.displayName && discordUserIdOf(a.externalId) !== botUserId)
-            .map((a) => ({
-              id: a.externalId,
-              name: a.displayName as string,
-              ...(discordUserIdOf(a.externalId) ? { mentionId: discordUserIdOf(a.externalId)! } : {}),
-              ...(a.isBot ? { isBot: true } : {}),
-            })),
-        ]
-      : [];
+  const members = memberList(input.audience, botUserId, botName);
 
   const opening = input.threadId === null;
   const youOpenedIt = opening || info?.ownerId === botUserId;
@@ -131,6 +144,7 @@ export async function buildGuildTurnContext(
     members,
     messages: recentWindow(
       all.map((m) => shape(m, botUserId, input.triggerId)),
+      DISCORD_MESSAGE_IDS,
       MAX_RECENT_MESSAGES,
     ),
     here,

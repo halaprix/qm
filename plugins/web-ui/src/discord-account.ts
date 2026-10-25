@@ -1,5 +1,9 @@
-import { LitElement, html } from "lit";
+import { LitElement, html, nothing } from "lit";
+import { ArrowUpRight, Check, Link2, UserRound } from "lucide";
+import { discordMark } from "./discord-mark.ts";
+import { icon } from "./icons.ts";
 import { withBase } from "./core-bridge.ts";
+import { clearAttempt, createReturnCapture, loadAttempt, saveAttempt, type OAuthAttempt } from "./oauth-attempt.ts";
 
 interface LinkStatus {
   available: boolean;
@@ -8,28 +12,21 @@ interface LinkStatus {
   tag?: string;
 }
 
-interface DiscordAttempt {
-  user: string;
-  state: string;
+interface DiscordAttempt extends OAuthAttempt {
   nonce: string;
-  expiresAt: number;
 }
 
 const ATTEMPT_KEY = "qm-discord-account";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const RETURN_KEYS = ["code", "state", "error", "error_description"];
-let returnUrl: URL | null = null;
+const discordReturn = createReturnCapture((p) => p.has("state") && (p.has("code") || p.has("error")));
 
 function discordErrorMessage(error?: string, fallback = "Couldn't connect Discord."): string {
   if (error === "link_unavailable") return "Discord linking isn't set up. Ask an administrator.";
   return fallback;
 }
 
-export function captureDiscordReturn(url: string): void {
-  const parsed = new URL(url);
-  const p = parsed.searchParams;
-  returnUrl = p.has("state") && (p.has("code") || p.has("error")) ? parsed : null;
-}
+export const captureDiscordReturn = discordReturn.capture;
 
 export class DiscordAccount extends LitElement {
   static properties = { user: {}, status: { state: true }, note: { state: true }, busy: { state: true } };
@@ -44,8 +41,7 @@ export class DiscordAccount extends LitElement {
   }
 
   protected firstUpdated(): void {
-    const url = returnUrl ?? new URL(location.href);
-    returnUrl = null;
+    const url = discordReturn.take();
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const cancelled = url.searchParams.has("error");
@@ -53,8 +49,8 @@ export class DiscordAccount extends LitElement {
     const current = new URL(location.href);
     for (const key of RETURN_KEYS) current.searchParams.delete(key);
     history.replaceState(history.state, "", current);
-    const attempt = this.savedAttempt();
-    this.clearAttempt();
+    const attempt = loadAttempt<DiscordAttempt>(ATTEMPT_KEY, this.user);
+    clearAttempt(ATTEMPT_KEY);
     if (!attempt || attempt.state !== state) {
       this.note =
         "This connection expired or was started in another QM account. Sign in to the account you want to connect and try again.";
@@ -65,21 +61,6 @@ export class DiscordAccount extends LitElement {
       return void this.load();
     }
     void this.complete(code, state, attempt.nonce);
-  }
-
-  private savedAttempt(): DiscordAttempt | null {
-    try {
-      const raw = sessionStorage.getItem(ATTEMPT_KEY);
-      if (!raw) return null;
-      const saved = JSON.parse(raw) as DiscordAttempt;
-      return saved.user === this.user && saved.expiresAt > Date.now() ? saved : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private clearAttempt(): void {
-    sessionStorage.removeItem(ATTEMPT_KEY);
   }
 
   private async load(): Promise<void> {
@@ -129,10 +110,7 @@ export class DiscordAccount extends LitElement {
         redirectUri !== expectedRedirectUri
       )
         throw Error("Could not verify the Discord authorization link.");
-      sessionStorage.setItem(
-        ATTEMPT_KEY,
-        JSON.stringify({ user: this.user, state, nonce, expiresAt: Date.now() + ATTEMPT_TTL_MS }),
-      );
+      saveAttempt(ATTEMPT_KEY, { user: this.user, state, nonce, expiresAt: Date.now() + ATTEMPT_TTL_MS });
       this.navigate(url.href);
     } catch (error) {
       this.note = error instanceof Error ? error.message : "Couldn't connect Discord.";
@@ -184,23 +162,40 @@ export class DiscordAccount extends LitElement {
     }
   }
 
+  private renderLinked(s: LinkStatus) {
+    const onClick = () => void this.disconnect();
+    const disconnect = html`<button class="btn" ?disabled=${this.busy} @click=${onClick}>${"Disconnect"}</button>`;
+    return html`<div class="slack-connected" role="status">
+      ${icon(Check, 14)}<span>Connected as ${s.tag ?? "your Discord account"}</span>
+      ${s.canUnlink ? disconnect : html`<small>Linked by an administrator.</small>`}
+    </div>`;
+  }
+
+  private renderConnect() {
+    return html`<button class="welcome-slack" type="button" ?disabled=${this.busy} @click=${() => void this.connect()}>
+      <div class="slack-link-icon" aria-hidden="true">
+        <span class="slack-link-person">${icon(UserRound, 17)}</span>
+        <span class="slack-link-service">${discordMark(18)}</span>
+        <span class="slack-link-chain">${icon(Link2, 13)}</span>
+      </div>
+      <span
+        ><strong>${this.busy ? "Linking Discord…" : "Link your Discord account"}</strong
+        ><small>Reach QM from Discord as yourself.</small></span
+      >
+      ${icon(ArrowUpRight, 16)}
+    </button>`;
+  }
+
   render() {
     const s = this.status;
-    if (!s) return html``;
+    if (!s) return nothing;
     let body;
-    if (s.linked)
-      body = html`<p>Connected as ${s.tag ?? "your Discord account"}</p>
-        ${
-          s.canUnlink
-            ? html`<button ?disabled=${this.busy} @click=${() => this.disconnect()}>Disconnect</button>`
-            : html`<p class="hint">Linked by an administrator.</p>`
-        }`;
-    else if (s.available)
-      body = html`<button ?disabled=${this.busy} @click=${() => this.connect()}>Connect Discord</button>`;
-    else body = html`<p class="hint">Discord linking isn't set up. Ask an administrator.</p>`;
-    return html`<div class="discord-account">
-      <strong>Discord</strong> ${body} ${this.note ? html`<p class="hint">${this.note}</p>` : ""}
-    </div>`;
+    if (s.linked) body = this.renderLinked(s);
+    else if (s.available) body = this.renderConnect();
+    else body = html`<p class="slack-account-error">Discord linking isn't set up. Ask an administrator.</p>`;
+    return html`<section class="slack-account" aria-label="Your Discord account">
+      ${body} ${this.note ? html`<p class="slack-account-error" role="alert">${this.note}</p>` : nothing}
+    </section>`;
   }
 }
 

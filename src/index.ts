@@ -10,9 +10,8 @@ import { createServer } from "./api/server.ts";
 import { dockerDaemonFailure } from "./deploy/docker-deploy-provider.ts";
 import { errMessage, reportFailureAs } from "./util/errors.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
-import { createDiscordPlugin } from "./discord/index.ts";
+import { buildDiscordSurface } from "./discord/surface.ts";
 import { createSurfaceRuntimeReconciler } from "./surfaces/surface-runtime.ts";
-import { loadDiscordRuntimeConfig } from "./surfaces/discord-installation.ts";
 import { migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
 
 const config = loadConfig();
@@ -127,17 +126,12 @@ const slackAccountRuntimes = slackAccountConfigsFromEnv(process.env).map((accoun
   }),
 );
 
-const discordRuntime = createSurfaceRuntimeReconciler({
+const discordRuntime = buildDiscordSurface({
+  installation: built.discordInstallation,
+  core: built.discordCore,
   startPaused: Boolean(config.backgroundDeploymentId),
-  load: () => loadDiscordRuntimeConfig(built.discordInstallation, process.env),
-  startPlugin: async (desired) => {
-    const plugin = createDiscordPlugin(desired, built.discordCore, {
-      drainTimeoutMs: config.shutdownDrainMs,
-      webUiPublicUrl: config.publicWebUrl,
-    });
-    await plugin.start();
-    return plugin;
-  },
+  drainTimeoutMs: config.shutdownDrainMs,
+  webUiPublicUrl: config.publicWebUrl,
   onError: reportFailureAs("discord plugin reconciliation", undefined),
 });
 

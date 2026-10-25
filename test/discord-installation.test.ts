@@ -18,7 +18,6 @@ const settings = {
   allowUserIds: ["123456789012345678"],
   guildIds: [],
   internalRoleIds: [],
-  principalDeliveries: false,
 };
 
 test("the token and the OAuth client secret are encrypted at rest and absent from status", async () => {
@@ -35,9 +34,8 @@ test("the token and the OAuth client secret are encrypted at rest and absent fro
   assert.equal(got.oauthClientSecret, CLIENT_SECRET);
 });
 
-test("personal notices default to on", () => {
-  assert.equal(parseDiscordSettings({}).principalDeliveries, true);
-  assert.equal(parseDiscordSettings({ principalDeliveries: false }).principalDeliveries, false);
+test("parseDiscordSettings carries no per-delivery toggle", () => {
+  assert.equal("principalDeliveries" in parseDiscordSettings({ principalDeliveries: false }), false);
 });
 
 test("parseDiscordSettings rejects when internalRoleIds contains a guild id", () => {
@@ -69,44 +67,34 @@ test("a first save without a token is refused", async () => {
   await assert.rejects(store.set({ ...settings, updatedBy: "a" }), /bot token is required/);
 });
 
-test("delete leaves a disabled tombstone", async () => {
+test("delete removes the installation", async () => {
   const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });
-  await store.delete("a");
+  await store.delete();
   assert.equal(await store.get(), null);
-  assert.equal((await store.status()).disabled, true);
+  assert.equal((await store.status()).configured, false);
 });
 
-test("settings-only set fails if update callback sees a disabled record", async () => {
+test("settings-only set fails if the record vanished before the update", async () => {
   const map = createMemoryMap<StoredDiscordInstallation>();
   const store = createDiscordInstallationStore("acme", map, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });
   const realUpdate = map.update!.bind(map);
-  map.update = (async (id: string, fn: (v: StoredDiscordInstallation) => StoredDiscordInstallation) => {
-    return realUpdate(id, () =>
-      fn({ disabled: true, version: "v-disabled", updatedAt: Date.now(), updatedBy: "deleter" }),
-    );
+  map.update = (async (id: string, fn: (v: StoredDiscordInstallation | null) => StoredDiscordInstallation) => {
+    await map.delete(id);
+    return realUpdate(id, fn as never);
   }) as never;
-  await assert.rejects(
-    store.set({ ...settings, updatedBy: "a" }),
-    (err: unknown) =>
-      err instanceof DiscordInstallationError && err.status === 400 && /bot token is required/.test(err.message),
-  );
+  await assert.rejects(store.set({ ...settings, updatedBy: "a" }), /disappeared during update/);
 });
 
-test("a first set where update rejects leaves an active record and not a disabled placeholder", async () => {
+test("a first set where update rejects leaves the record in place", async () => {
   const map = createMemoryMap<StoredDiscordInstallation>();
   map.update = (async () => {
     throw new Error("db failure during update");
   }) as never;
   const store = createDiscordInstallationStore("acme", map, "k");
   await assert.rejects(store.set({ ...settings, bot: BOT, updatedBy: "a" }), /db failure during update/);
-  const status = await store.status();
-  assert.equal(status.disabled, false);
-  const raw = await map.get("acme");
-  assert.ok(raw);
-  assert.equal(raw.disabled, false);
-  assert.notEqual(raw.version, "initial");
+  assert.equal((await store.status()).configured, true);
 });
 
 test("a set without client secret reports oauthConfigured false", async () => {
@@ -244,7 +232,6 @@ test("discordPluginConfigFromInstallation maps installation fields", () => {
     allowUserIds: ["123456789012345678"],
     guildIds: ["987654321098765432"],
     internalRoleIds: ["111222333444555666"],
-    principalDeliveries: true,
     version: "v1",
   });
   assert.equal(cfg.botToken, TOKEN);

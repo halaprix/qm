@@ -1,6 +1,7 @@
 import type { DiscordCoreClient } from "../api/discord-core-client.ts";
 import type { SurfaceContextRequest } from "../types.ts";
-import { buildContextWindow, type RecentMessage } from "../surfaces/conversation.ts";
+import { buildContextWindow, MAX_RECENT_MESSAGES, type RecentMessage } from "../surfaces/conversation.ts";
+import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 import type { ReactionTally } from "../surfaces/reaction-tally.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
 import { snowflakeMs } from "../util/snowflake.ts";
@@ -30,7 +31,7 @@ export interface DiscordHistoryReader {
   find(query: string): Promise<Array<{ id: string; name: string; dm?: true }>>;
 }
 
-export const DISCORD_READ_MAX = 100;
+const DISCORD_READ_MAX = 100;
 const discordTime = (id: string): string => utcMinute(snowflakeMs(id));
 const NOT_VISIBLE = "You can't read that Discord channel.";
 const READERS_UNKNOWN = "I can't confirm who can read that Discord channel right now. Try again in a minute.";
@@ -49,7 +50,7 @@ export function createContextFulfiller(deps: {
     const viewers = q.viewer ? deps.core.discordUserIdsFor(q.viewer) : [];
     const visible = await Promise.all(viewers.map((id) => deps.reader.canView(channelId, id)));
     if (!visible.some(Boolean)) return { error: NOT_VISIBLE };
-    const count = Math.max(1, Math.min(DISCORD_READ_MAX, q.count ?? DISCORD_READ_MAX));
+    const count = Math.max(1, Math.min(DISCORD_READ_MAX, q.count ?? MAX_RECENT_MESSAGES));
     const scan = q.match ? DISCORD_READ_MAX : count;
     const rows = await deps.reader.recent(channelId, { count: scan, ...(q.before ? { before: q.before } : {}) });
     const bot = deps.botUserId();
@@ -65,6 +66,7 @@ export function createContextFulfiller(deps: {
     const window = buildContextWindow(shaped, {
       count,
       formatTs: discordTime,
+      messageIds: DISCORD_MESSAGE_IDS,
       ...(q.match ? { match: q.match } : {}),
       scanHasMore: rows.length >= scan,
     });

@@ -10,12 +10,7 @@ import {
 
 async function withSource(ctx: ApiCtx) {
   const store = ctx.deps.discordInstallation!;
-  const status = await store.status();
-  let source = "none";
-  if (status.configured) source = "admin";
-  else if (status.disabled) source = "disabled";
-  else if (ctx.deps.discordEnvironmentConfigured) source = "environment";
-  return { ...status, source, redirectUri: discordLinkRedirectUri(ctx.deps.portalUrl ?? "") };
+  return { ...(await store.status()), redirectUri: discordLinkRedirectUri(ctx.deps.portalUrl ?? "") };
 }
 
 export async function getDiscordInstallation(ctx: ApiCtx): Promise<void> {
@@ -68,7 +63,7 @@ export async function deleteDiscordInstallation(ctx: ApiCtx): Promise<void> {
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
   if (!ctx.deps.discordInstallation) return sendJson(ctx.res, 404, { error: "not_configured" });
-  await ctx.deps.discordInstallation.delete(actor.id);
+  await ctx.deps.discordInstallation.delete();
   audit(ctx.deps, {
     principalId: actor.id,
     action: "discord-installation.delete",

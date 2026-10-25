@@ -15,6 +15,7 @@ import type { DiscordSender } from "../src/discord/sender.ts";
 import type { Delivery, PendingApprovalRecord } from "../src/types.ts";
 import { buildApp } from "../src/wiring.ts";
 import { testConfig } from "./support/test-config.ts";
+import { installDiscord } from "./support/discord-channels.ts";
 
 const toDiscord = async (p: string) => (p === "ana@acme.com" ? DISCORD_DM_DELIVERY_TYPE : null);
 
@@ -305,12 +306,10 @@ test("relaySenderAttribution formats attribution string and discord dispatcher r
   ]);
 });
 
-function installationStatus(opts: { configured: boolean; disabled: boolean; principalDeliveries: boolean }) {
+function installationStatus(opts: { configured: boolean }) {
   return {
     status: async () => ({
       configured: opts.configured,
-      disabled: opts.disabled,
-      principalDeliveries: opts.principalDeliveries,
       allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
@@ -325,52 +324,16 @@ const linked = (p: string) => (p === "ana@acme.com" ? ["111"] : []);
 
 test("createDiscordPrincipalRoute uses status alone without calling decrypting get", async () => {
   const on = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: true, disabled: false, principalDeliveries: true }),
-    environmentConfigured: false,
-    linkedDiscordUserIds: linked,
-  });
-  const off = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: true, disabled: false, principalDeliveries: false }),
-    environmentConfigured: false,
-    linkedDiscordUserIds: linked,
-  });
-  const env = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: false, disabled: false, principalDeliveries: true }),
-    environmentConfigured: true,
-    linkedDiscordUserIds: linked,
-  });
-  const disconnected = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: false, disabled: true, principalDeliveries: true }),
-    environmentConfigured: true,
+    installation: installationStatus({ configured: true }),
     linkedDiscordUserIds: linked,
   });
   const none = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: false, disabled: false, principalDeliveries: true }),
-    environmentConfigured: false,
+    installation: installationStatus({ configured: false }),
     linkedDiscordUserIds: linked,
   });
   assert.equal(await on("ana@acme.com"), DISCORD_DM_DELIVERY_TYPE);
   assert.equal(await on("bob@acme.com"), null);
-  assert.equal(await off("ana@acme.com"), null);
-  assert.equal(await env("ana@acme.com"), DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(await disconnected("ana@acme.com"), null);
   assert.equal(await none("ana@acme.com"), null);
-});
-
-test("a Discord-only person is still reachable by Discord DM when extra personal-notice copies are off", async () => {
-  const off = createDiscordPrincipalRoute({
-    installation: installationStatus({ configured: true, disabled: false, principalDeliveries: false }),
-    environmentConfigured: false,
-    linkedDiscordUserIds,
-  });
-  const store = withPrincipalRouting(createDeliveryStore(), off);
-  const row = await store.enqueue({
-    destination: principalDestination(discordExternalId("4242"), "ana@acme.com"),
-    text: "hand-off",
-    idempotencyKey: "k-discord-only",
-  });
-  assert.equal(row.destination.type, DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(await off("ana@acme.com"), null);
 });
 
 test("linkedDiscordUserIds extracts linked discord user ids from principal links", async () => {
@@ -463,7 +426,8 @@ test("withPrincipalRouting feeds discord-dm copies to the discord dispatcher", a
 });
 
 test("buildApp person-addressed enqueue with linked alias and notices on yields both principal row and discord-dm copy", async () => {
-  const built = buildApp(testConfig({ discordEnvironmentConfigured: true }));
+  const built = buildApp(testConfig());
+  await installDiscord(built);
   await built.principalLinks.link({
     principalId: discordExternalId("discord-user-888"),
     canonicalId: "ana@acme.com",

@@ -1,10 +1,12 @@
+import { linkedDiscordUserIds } from "../src/api/discord-core-client.ts";
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { EventEmitter } from "node:events";
 import { ChannelType, Events, GatewayIntentBits, MessageType, Partials, PermissionFlagsBits } from "discord.js";
 import { principalEntitledToScope } from "../src/resolution/context-filter.ts";
 import { scopeId, type Principal } from "../src/types.ts";
-import { createDiscordPlugin, DISCORD_CLIENT_OPTIONS, DISCORD_DELIVERY_POLL_MS } from "../src/discord/index.ts";
+import { DISCORD_CLIENT_OPTIONS } from "../src/discord/client.ts";
+import { createDiscordPlugin, DISCORD_DELIVERY_POLL_MS } from "../src/discord/index.ts";
 import { DISCORD_RETRY_BASE_MS } from "../src/discord/config.ts";
 import { ACK_REACTION_DELAY_MS } from "../src/surfaces/ack-presenter.ts";
 import { DISCORD_DIRECTORY_SYNC_MS } from "../src/discord/directory.ts";
@@ -40,7 +42,7 @@ function fakeCore(): DiscordCoreClient {
     streamSnapshot: () => null,
     linkedInternal: async () => false,
     coreStatus: async () => ({ notInternal: false }),
-    discordUserIdsFor: () => [],
+    discordUserIdsFor: linkedDiscordUserIds,
     reportRunEditRef: async () => {},
     ackRunDelivery: async () => {},
     linkPrivateThread: async () => {},
@@ -726,7 +728,7 @@ function guildHarness(opts: {
     readFileArtifact: async () => Buffer.from(""),
   } as unknown as DiscordCoreClient;
   const message = {
-    id: "m1",
+    id: "1300000000000000001",
     channelId: "c1",
     guildId: "900",
     guild,
@@ -2071,7 +2073,7 @@ test("a thread turn carries prior turns, overheard lines, detect context, header
   });
   assert.deepEqual(
     h.fetchCalls.filter((c) => c.channel === "t1" && c.before !== undefined),
-    [{ channel: "t1", limit: 100, before: "1300000000000000009" }],
+    [{ channel: "t1", limit: 25, before: "1300000000000000009" }],
   );
   assert.equal(body.text, "@qm and now?");
 });
@@ -2092,7 +2094,7 @@ test("the first turn in a new thread reads the parent channel before the trigger
   assert.match(String(body.conversationHeader), /You are replying in a thread you started\.$/);
   assert.deepEqual(
     h.fetchCalls.filter((c) => c.before !== undefined),
-    [{ channel: "c1", limit: 100, before: "1300000000000000005" }],
+    [{ channel: "c1", limit: 25, before: "1300000000000000005" }],
   );
 });
 

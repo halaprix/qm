@@ -85,6 +85,7 @@ import type {
   ActiveThread,
   CachedMessage,
   ContainerSummary,
+  ContainerSurface,
   IngestEvent,
   ReadMessagesOpts,
   SearchOpts,
@@ -497,7 +498,7 @@ export interface App {
   searchSurface(query: string, opts?: SearchOpts): Promise<CachedMessage[]>;
   readSurfaceMessages(container: string, opts?: ReadMessagesOpts): Promise<CachedMessage[]>;
   activeSurfaceThreads(opts?: { container?: string; limit?: number }): Promise<ActiveThread[]>;
-  listSurfaceContainers(opts?: { limit?: number; containerPattern?: string }): Promise<ContainerSummary[]>;
+  listSurfaceContainers(opts?: { limit?: number; surface?: ContainerSurface }): Promise<ContainerSummary[]>;
   getChannelPolicy(container: string): Promise<ChannelPolicy | null>;
   setChannelPolicy(
     container: string,

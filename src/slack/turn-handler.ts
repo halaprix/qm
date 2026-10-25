@@ -63,7 +63,8 @@ import { buildReactionTurnText, shouldSurfaceReaction } from "../surfaces/reacti
 import type { GatewayContext, TurnResult } from "../types.ts";
 import type { AckGate } from "./deferred-ack.ts";
 import type { SlackCoreClient } from "../api/slack-core-client.ts";
-import type { CoreTurnBody, TurnFlow } from "./turn-flow.ts";
+import type { CoreTurnBody } from "../api/surface-core-client.ts";
+import type { TurnFlow } from "./turn-flow.ts";
 import type { BotIdentity, Directory } from "./directory.ts";
 import type { Mirror } from "./mirror.ts";
 import type { ConversationSerializer } from "./conversation-view.ts";

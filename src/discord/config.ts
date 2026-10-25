@@ -23,33 +23,19 @@ export interface DiscordPluginConfig {
   internalRoleIds: ReadonlySet<string>;
 }
 
-function idList(raw: string | undefined): Set<string> {
-  return new Set((raw ?? "").split(/[\s,]+/).filter(Boolean));
-}
-
-export function discordPluginConfigFromEnv(env: Record<string, string | undefined>): DiscordPluginConfig | null {
-  const botToken = env.DISCORD_BOT_TOKEN?.trim();
-  if (!botToken) return null;
-  const allowUserIds = idList(env.DISCORD_ALLOW_USER_IDS);
-  const guildIds = idList(env.DISCORD_GUILD_IDS);
-  const internalRoleIds = idList(env.DISCORD_INTERNAL_ROLE_IDS);
-  for (const roleId of internalRoleIds) {
-    if (guildIds.has(roleId)) {
-      throw new Error(`DISCORD_INTERNAL_ROLE_IDS cannot contain guild id: ${roleId}`);
-    }
-  }
-  return {
-    botToken,
-    allowUserIds,
-    guildIds,
-    internalRoleIds,
-  };
-}
-
 export function discordExternalId(userId: string): string {
   return `${EXTERNAL_PREFIX}${userId}`;
 }
 
 export function discordUserIdOf(externalId: string): string | null {
   return externalId.startsWith(EXTERNAL_PREFIX) ? externalId.slice(EXTERNAL_PREFIX.length) : null;
+}
+
+export function recipientDiscordId(
+  target: string,
+  linkedIds: (principalId: string) => readonly string[],
+): string | null {
+  const own = discordUserIdOf(target);
+  const linked = linkedIds(target);
+  return own !== null && linked.includes(own) ? own : (linked[0] ?? null);
 }

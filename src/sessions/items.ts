@@ -1,5 +1,6 @@
 import type { EntryType, ScopeId, SessionEntry } from "../types.ts";
 import { isObj } from "../util/objects.ts";
+import { UUID } from "../util/uuid.ts";
 import { type ItemKind, WAKE_CAUSES } from "./items-schema.ts";
 
 type WakeCause = (typeof WAKE_CAUSES)[number];
@@ -53,7 +54,6 @@ export interface ItemContext {
   author?: string | null;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const str = (value: unknown): string | null => (typeof value === "string" && value !== "" ? value : null);
 const AUTHORED_KINDS: ReadonlySet<ItemKind> = new Set([
   "UserMessage",

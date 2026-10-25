@@ -1,7 +1,6 @@
 import { type DirectoryMember } from "../directory/directory-store.ts";
 import { canonicalPerson, personIds } from "../directory/person.ts";
 import { DISCORD_SURFACE, discordExternalId, discordUserIdOf } from "../discord/config.ts";
-import { SNOWFLAKE } from "../util/snowflake.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
 import { scopeId } from "../types.ts";
 import { createSurfaceCoreClient, type SurfaceCoreClient, type SurfaceCoreClientDeps } from "./surface-core-client.ts";
@@ -40,7 +39,7 @@ export function createDiscordCoreClient(
     async channelWatermarks() {
       const containers = await deps.app.listSurfaceContainers({
         limit: WATERMARK_CONTAINERS_MAX,
-        containerPattern: SNOWFLAKE.source,
+        surface: DISCORD_SURFACE,
       });
       return containers.flatMap((c) => (c.lastTs ? [{ container: c.container, lastTs: c.lastTs }] : []));
     },

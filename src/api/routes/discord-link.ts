@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { exchangeAuthorizationCode, type FetchLike } from "../../connectors/oauth.ts";
 import { mintSignedPayload, verifySignedPayload } from "../../auth/signed-token.ts";
 import { orgId } from "../../config.ts";
 import { canonicalPerson, foldPrincipalId, personIds, samePerson } from "../../directory/person.ts";
@@ -153,40 +154,27 @@ async function provenDiscordUser(
 ): Promise<ProvenUserResult> {
   const fetchImpl = ctx.deps.discordInstallationFetch ?? fetch;
   const guarded = { redirect: "error" as const };
-  let token: Response;
+  let tokenStatus = 0;
+  const trackedFetch: FetchLike = async (url, init) => {
+    const res = await fetchImpl(url, { ...guarded, ...init, signal: AbortSignal.timeout(DISCORD_OAUTH_TIMEOUT_MS) });
+    tokenStatus = res.status;
+    return res;
+  };
+  let accessToken: string;
   try {
-    token = await fetchImpl(`${DISCORD_API}/oauth2/token`, {
-      ...guarded,
-      signal: AbortSignal.timeout(DISCORD_OAUTH_TIMEOUT_MS),
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: cfg.clientId,
-        client_secret: cfg.clientSecret,
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: cfg.redirectUri,
-      }).toString(),
-    });
+    ({ accessToken } = await exchangeAuthorizationCode(`${DISCORD_API}/oauth2/token`, code, cfg.redirectUri, {
+      client: { id: cfg.clientId, secret: cfg.clientSecret, clientRef: "discord" },
+      fetchImpl: trackedFetch,
+    }));
   } catch (err) {
-    logOAuthFailure(failureCategory(err));
-    return { ok: false, status: 502, error: "discord_unavailable" };
+    if (tokenStatus === 0) logOAuthFailure(failureCategory(err));
+    else if (tokenStatus < 300) logOAuthFailure("parse");
+    const unavailable = tokenStatus === 0 || tokenStatus < 300 || tokenStatus >= 500 || tokenStatus === 429;
+    return unavailable
+      ? { ok: false, status: 502, error: "discord_unavailable" }
+      : { ok: false, status: 400, error: "oauth_failed" };
   }
-  if (token.status >= 500 || token.status === 429) {
-    return { ok: false, status: 502, error: "discord_unavailable" };
-  }
-  if (!token.ok) {
-    return { ok: false, status: 400, error: "oauth_failed" };
-  }
-  let tokenBody: { access_token?: unknown };
-  try {
-    tokenBody = (await token.json()) as { access_token?: unknown };
-  } catch {
-    logOAuthFailure("parse");
-    return { ok: false, status: 502, error: "discord_unavailable" };
-  }
-  const { access_token: accessToken } = tokenBody;
-  if (typeof accessToken !== "string") {
+  if (!accessToken) {
     return { ok: false, status: 400, error: "oauth_failed" };
   }
 

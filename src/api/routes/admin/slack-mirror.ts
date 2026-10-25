@@ -3,7 +3,6 @@ import { sendJson } from "../../http.ts";
 import { audit, authorizeAdmin, orgScope } from "../shared.ts";
 import { type ApiCtx } from "../route.ts";
 import { mentionedUserIds } from "../../../slack/mrkdwn.ts";
-import { SLACK_CONTAINER } from "../../../surfaces/message-ids.ts";
 
 const SLACK_MIRROR_PAGE_MAX = 400;
 const SLACK_MIRROR_PAGE_DEFAULT = 200;
@@ -38,7 +37,7 @@ export async function listSlackMirrorContainers(ctx: ApiCtx): Promise<void> {
   audit(deps, { principalId: actor.id, action: "slack_mirror.read", resource: "slack-mirror", scopeLabel: scope });
   const raw = await app.listSurfaceContainers({
     limit: SLACK_MIRROR_PAGE_MAX + 1,
-    containerPattern: SLACK_CONTAINER.source,
+    surface: "slack",
   });
   const hasMore = raw.length > SLACK_MIRROR_PAGE_MAX;
   const channelsById = new Map((await app.directoryChannels()).map((c) => [c.channelId.toLowerCase(), c.name]));
@@ -77,7 +76,7 @@ export async function listSlackMirrorMessages(ctx: ApiCtx): Promise<void> {
   if (q) {
     const found = await app.searchSurface(q, {
       ...(container ? { container } : {}),
-      containerPattern: SLACK_CONTAINER.source,
+      surface: "slack",
       limit: limit + 1,
     });
     const truncated = found.length > limit;

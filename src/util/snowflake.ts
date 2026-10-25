@@ -1,4 +1,5 @@
-export const SNOWFLAKE = /^\d{17,20}$/;
+export const SNOWFLAKE_SOURCE = "\\d{17,20}";
+export const SNOWFLAKE = new RegExp(`^${SNOWFLAKE_SOURCE}$`);
 const SNOWFLAKE_EPOCH_MS = 1_420_070_400_000;
 const SNOWFLAKE_TIMESTAMP_SHIFT = 22n;
 

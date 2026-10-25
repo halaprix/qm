@@ -6130,19 +6130,23 @@
         font-weight: 400;
       }
 
-      #card-slack-installation > .head {
+      #card-slack-installation > .head,
+      #card-discord-installation > .head {
         border: 0;
         padding-bottom: 6px;
       }
-      #card-slack-installation > .head h2 {
+      #card-slack-installation > .head h2,
+      #card-discord-installation > .head h2 {
         font-size: 13px;
         font-weight: 500;
         color: var(--muted);
       }
-      #card-slack-installation > .body {
+      #card-slack-installation > .body,
+      #card-discord-installation > .body {
         padding-top: 0;
       }
-      #card-slack-installation .slack-connection {
+      #card-slack-installation .slack-connection,
+      #card-discord-installation .slack-connection {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -6150,13 +6154,15 @@
         padding: 10px 8px;
         border-radius: 8px;
       }
-      #card-slack-installation h3 {
+      #card-slack-installation h3,
+      #card-discord-installation h3 {
         font-size: 14px;
         font-weight: 500;
         margin: 0;
         line-height: 20px;
       }
-      #card-slack-installation .hint {
+      #card-slack-installation .hint,
+      #card-discord-installation .hint {
         margin: 2px 0 0;
         font-size: 12px;
         line-height: 18px;
@@ -6166,7 +6172,8 @@
         gap: 4px;
         flex-wrap: wrap;
       }
-      #card-slack-installation .slack-connection-actions button {
+      #card-slack-installation .slack-connection-actions button,
+      #card-discord-installation .slack-connection-actions button {
         min-height: 32px;
         padding: 6px 10px;
         border: 0;
@@ -6177,7 +6184,8 @@
         font-size: 13px;
         font-weight: 400;
       }
-      #card-slack-installation .slack-connection-actions button:hover {
+      #card-slack-installation .slack-connection-actions button:hover,
+      #card-discord-installation .slack-connection-actions button:hover {
         background: var(--subtle);
         color: var(--text);
       }
@@ -6255,7 +6263,8 @@
         margin-top: 16px;
       }
       @media (max-width: 640px) {
-        #card-slack-installation .slack-connection {
+        #card-slack-installation .slack-connection,
+        #card-discord-installation .slack-connection {
           align-items: flex-start;
           flex-direction: column;
           gap: 16px;

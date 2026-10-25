@@ -117,7 +117,6 @@ export interface ServerDeps {
   slackEnvBotToken?: string;
   discordInstallation?: DiscordInstallationStore;
   discordInstallationFetch?: typeof fetch;
-  discordEnvironmentConfigured?: boolean;
   oauthStateSecret?: string;
   oauthFetch?: FetchLike;
   oauthEnv?: NodeJS.ProcessEnv;

@@ -3,7 +3,6 @@ export { resolveMentions } from "./mentions.ts";
 import type { MessageIdCodec } from "./message-ids.ts";
 import { summarizeReactions, type ReactionTally } from "./reaction-tally.ts";
 import { utcMinute } from "../util/time.ts";
-import { SNOWFLAKE } from "../util/snowflake.ts";
 import { MAX_ATTACHMENTS_PER_TURN } from "./attachment-limits.ts";
 
 export interface ContextWireMessage {
@@ -18,24 +17,18 @@ export interface ContextWireMessage {
 
 const MAX_CONTEXT_MESSAGE_CHARS = 600;
 
-export function compareIds(a: string, b: string): number {
-  if (a.length !== b.length && SNOWFLAKE.test(a) && SNOWFLAKE.test(b)) return a.length - b.length;
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
 export function buildContextWindow(
   scanned: readonly RecentMessage[],
   opts: {
     count: number;
     formatTs: (ts: string) => string;
+    messageIds: MessageIdCodec;
     match?: string;
     scanHasMore?: boolean;
     nameById?: ReadonlyMap<string, string>;
   },
 ): { messages: ContextWireMessage[]; hasMore: boolean; nextBefore?: string; selfTs?: string[] } {
-  const asc = [...scanned].sort((a, b) => compareIds(a.ts, b.ts));
+  const asc = [...scanned].sort((a, b) => opts.messageIds.compare(a.ts, b.ts));
   const needle = opts.match?.trim().toLowerCase();
   const matched = needle ? asc.filter((m) => (m.text ?? "").toLowerCase().includes(needle)) : asc;
   const count = Math.max(1, Math.floor(opts.count));
@@ -83,21 +76,25 @@ const MAX_TURN_MESSAGE_CHARS = 4000;
 
 export function recentWindow(
   candidates: readonly RecentMessage[],
+  messageIds: MessageIdCodec,
   limit: number = MAX_RECENT_MESSAGES,
 ): RecentMessage[] {
   const usable = candidates.filter((m) => m.ts && (m.name || m.text?.trim() || m.files?.length));
   if (!usable.length) return [];
   const window = Math.max(1, Math.floor(limit));
-  const sorted = [...usable].sort((a, b) => compareIds(a.ts, b.ts));
+  const sorted = [...usable].sort((a, b) => messageIds.compare(a.ts, b.ts));
   const byTs = new Map(sorted.map((m) => [m.ts, m] as const));
   const chosen = new Map<string, RecentMessage>(sorted.slice(-window).map((m) => [m.ts, m] as const));
   for (const m of Array.from(chosen.values())) {
     if (m.parentTs && !chosen.has(m.parentTs) && byTs.has(m.parentTs)) chosen.set(m.parentTs, byTs.get(m.parentTs)!);
   }
-  return [...chosen.values()].sort((a, b) => compareIds(a.ts, b.ts));
+  return [...chosen.values()].sort((a, b) => messageIds.compare(a.ts, b.ts));
 }
 
-function arrangeForDisplay(messages: readonly RecentMessage[]): Array<{ message: RecentMessage; isReply: boolean }> {
+function arrangeForDisplay(
+  messages: readonly RecentMessage[],
+  messageIds: MessageIdCodec,
+): Array<{ message: RecentMessage; isReply: boolean }> {
   const present = new Set(messages.map((m) => m.ts));
   const childrenByParent = new Map<string, RecentMessage[]>();
   const roots: RecentMessage[] = [];
@@ -111,9 +108,9 @@ function arrangeForDisplay(messages: readonly RecentMessage[]): Array<{ message:
     }
   }
   const out: Array<{ message: RecentMessage; isReply: boolean }> = [];
-  for (const root of roots.sort((a, b) => compareIds(a.ts, b.ts))) {
+  for (const root of roots.sort((a, b) => messageIds.compare(a.ts, b.ts))) {
     out.push({ message: root, isReply: false });
-    for (const child of (childrenByParent.get(root.ts) ?? []).sort((a, b) => compareIds(a.ts, b.ts))) {
+    for (const child of (childrenByParent.get(root.ts) ?? []).sort((a, b) => messageIds.compare(a.ts, b.ts))) {
       out.push({ message: child, isReply: true });
     }
   }
@@ -194,7 +191,7 @@ export function renderConversationView(view: ConversationView): RenderedConversa
   const msgs = view.messages.filter((m) => m.ts && (m.name || m.text?.trim() || m.files?.length));
   const allowedTs = new Set<string>(msgs.map((m) => m.ts));
 
-  const display = arrangeForDisplay(msgs).filter(({ message: m }) => !m.isTrigger);
+  const display = arrangeForDisplay(msgs, view.messageIds).filter(({ message: m }) => !m.isTrigger);
   const rawTurns: ConversationTurn[] = display.map(({ message: m, isReply }) => {
     const text = messageTurnText(m, view.messageIds, isReply, view.nameById);
     if (m.isSelf) return { role: "assistant", text };
@@ -220,8 +217,7 @@ export function renderConversationView(view: ConversationView): RenderedConversa
   if (view.channel.kind === "dm") where = "This is a direct message.";
   else if (view.channel.kind === "group") where = "This is a group direct message.";
   const mentionable = (m: ConversationMember): string => {
-    const mentionId = m.mentionId ?? (/^[A-Z0-9]+$/i.test(m.id) ? m.id : undefined);
-    const tags = [mentionId ? `<@${mentionId}>` : "", m.isBot ? "agent" : ""].filter(Boolean);
+    const tags = [m.mentionId ? `<@${m.mentionId}>` : "", m.isBot ? "agent" : ""].filter(Boolean);
     return `@${m.name}${tags.length ? ` (${tags.join(", ")})` : ""}`;
   };
   const who = view.members.length

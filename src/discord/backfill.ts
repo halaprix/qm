@@ -1,5 +1,5 @@
 import { LRUCache } from "lru-cache";
-import { compareIds } from "../surfaces/conversation.ts";
+import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 import { swallowAs } from "../util/errors.ts";
 import { snowflakeAt } from "../util/snowflake.ts";
 
@@ -21,7 +21,8 @@ export interface Backfill {
   run(): Promise<void>;
 }
 
-const newest = (a: string | undefined, b: string): string => (a !== undefined && compareIds(a, b) >= 0 ? a : b);
+const newest = (a: string | undefined, b: string): string =>
+  a !== undefined && DISCORD_MESSAGE_IDS.compare(a, b) >= 0 ? a : b;
 
 export function createBackfill<M extends { id: string }>(deps: {
   watermarks(): Promise<Array<{ container: string; lastTs: string }>>;
@@ -43,9 +44,15 @@ export function createBackfill<M extends { id: string }>(deps: {
       const after = newest(since, floor);
       try {
         const channel = await deps.open(channelId);
-        if (!channel || (channel.lastMessageId !== null && compareIds(channel.lastMessageId, after) <= 0)) continue;
+        if (
+          !channel ||
+          (channel.lastMessageId !== null && DISCORD_MESSAGE_IDS.compare(channel.lastMessageId, after) <= 0)
+        )
+          continue;
         const page = await channel.newest(DISCORD_BACKFILL_PAGE);
-        const fresh = page.filter((m) => compareIds(m.id, after) > 0).sort((a, b) => compareIds(a.id, b.id));
+        const fresh = page
+          .filter((m) => DISCORD_MESSAGE_IDS.compare(m.id, after) > 0)
+          .sort((a, b) => DISCORD_MESSAGE_IDS.compare(a.id, b.id));
         for (const message of fresh) await deps.dispatch(message);
         if (page.length >= DISCORD_BACKFILL_PAGE && fresh.length === page.length)
           await deps.noteGap(channel.baseChannelId, BACKFILL_GAP_NOTE);

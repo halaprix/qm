@@ -408,8 +408,6 @@ cards["card-slack-installation"] = () => {
 };
 function discordTitle(d: Record<string, any>): string {
   if (d.configured) return `Connected as ${d.botTag}`;
-  if (d.source === "environment") return "Using environment config";
-  if (d.disabled) return "Disconnected";
   return "Not configured";
 }
 cards["card-discord-installation"] = () => {
@@ -421,78 +419,71 @@ cards["card-discord-installation"] = () => {
   return html`<section class="card" id="card-discord-installation">
     <div class="head"><h2>Discord</h2></div>
     <div class="body">
-      <h3 id="discord-installation-state">${discordTitle(d)}</h3>
-      <label for="discord-application-id">Application ID</label>
-      <input id="discord-application-id" readonly .value=${d.applicationId ?? ""} />
-      <label for="discord-bot-token">Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}</label>
-      <input
-        id="discord-bot-token"
-        type="password"
-        autocomplete="new-password"
-        .value=${live(s.botToken)}
-        @input=${(e: Event) => (s.botToken = (e.target as HTMLInputElement).value)}
-      />
-      <label for="discord-oauth-client-secret"
-        >OAuth2 client secret (for "Connect Discord" in user settings)
-        ${d.oauthConfigured ? "(set; leave empty to keep)" : ""}</label
-      >
-      <input
-        id="discord-oauth-client-secret"
-        type="password"
-        autocomplete="new-password"
-        .value=${live(s.oauthClientSecret)}
-        @input=${(e: Event) => (s.oauthClientSecret = (e.target as HTMLInputElement).value)}
-      />
-      <label for="discord-redirect-uri"
-        >OAuth2 redirect URI (add it under OAuth2 → Redirects in the Developer Portal)</label
-      >
-      <input id="discord-redirect-uri" readonly .value=${d.redirectUri ?? ""} />
-      <button
-        type="button"
-        class="copy"
-        id="discord-copy-redirect-uri"
-        @click=${async (e: MouseEvent) => {
-          const btn = e.currentTarget as HTMLButtonElement | null;
-          const ok = await copyText(d.redirectUri ?? "");
-          if (btn) {
-            btn.textContent = ok ? "Copied" : "Copy failed";
-            if (ok) {
-              btn.classList.add("copied");
-              setTimeout(() => {
-                btn.textContent = "Copy redirect URI";
-                btn.classList.remove("copied");
-              }, 1200);
-            }
-          }
-        }}
-      >
-        Copy redirect URI
-      </button>
-      ${field("discord-allow-user-ids", "Allowlisted user ids", "allowUserIds")}
-      ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
-      ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
-      <label
-        ><input
-          id="discord-principal-deliveries"
-          type="checkbox"
-          .checked=${s.principalDeliveries}
-          @change=${(e: Event) => (s.principalDeliveries = (e.target as HTMLInputElement).checked)}
-        />
-        Deliver personal notices (keychain requests, access requests, messages to a person) to linked Discord
-        accounts</label
-      >
-      <div class="actions">
-        <button id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>
-        <button
-          id="discord-remove"
-          class=${d.configured ? "" : "hidden"}
-          ?disabled=${!!s.busy}
-          @click=${() => s.remove()}
-        >
-          Disconnect
-        </button>
+      <div class="slack-connection">
+        <div class="slack-connection-info">
+          <h3 id="discord-installation-state">${discordTitle(d)}</h3>
+        </div>
+        <div class="slack-connection-actions">
+          <button
+            class=${classMap({ danger: true, hidden: !d.configured })}
+            id="discord-remove"
+            ?disabled=${!d.configured || !!s.busy}
+            @click=${() => s.remove()}
+          >
+            Disconnect
+          </button>
+        </div>
       </div>
-      <p class="hint ${s.tone}">${s.message}</p>
+      <details .open=${!d.configured}>
+        <summary>
+          <span>${d.configured ? "Edit Discord app" : "Set up Discord"}</span>
+          <span class="slack-guide-arrow" aria-hidden="true">›</span>
+        </summary>
+        <label for="discord-application-id">Application ID</label>
+        <input id="discord-application-id" readonly .value=${d.applicationId ?? ""} />
+        <label for="discord-bot-token">Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}</label>
+        <input
+          id="discord-bot-token"
+          type="password"
+          autocomplete="new-password"
+          .value=${live(s.botToken)}
+          @input=${(e: Event) => (s.botToken = (e.target as HTMLInputElement).value)}
+        />
+        <label for="discord-oauth-client-secret"
+          >OAuth2 client secret (for "Connect Discord" in user settings)
+          ${d.oauthConfigured ? "(set; leave empty to keep)" : ""}</label
+        >
+        <input
+          id="discord-oauth-client-secret"
+          type="password"
+          autocomplete="new-password"
+          .value=${live(s.oauthClientSecret)}
+          @input=${(e: Event) => (s.oauthClientSecret = (e.target as HTMLInputElement).value)}
+        />
+        <label for="discord-redirect-uri"
+          >OAuth2 redirect URI (add it under OAuth2 → Redirects in the Developer Portal)</label
+        >
+        <input id="discord-redirect-uri" readonly .value=${d.redirectUri ?? ""} />
+        <button
+          type="button"
+          id="discord-copy-redirect-uri"
+          @click=${async (e: MouseEvent) => {
+            const btn = e.currentTarget as HTMLButtonElement | null;
+            const ok = await copyText(d.redirectUri ?? "");
+            if (btn) {
+              btn.textContent = ok ? "Copied" : "Copy failed";
+              if (ok) setTimeout(() => (btn.textContent = "Copy redirect URI"), 1200);
+            }
+          }}
+        >
+          Copy redirect URI
+        </button>
+        ${field("discord-allow-user-ids", "Allowlisted user ids", "allowUserIds")}
+        ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
+        ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
+        <button class="primary" id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>
+      </details>
+      <span class=${"status " + s.tone} role="status" id="st-discord-installation">${s.message}</span>
     </div>
   </section>`;
 };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createSurfaceCoreClient,
+  ackRunDeliveryWithRetry,
   readOutgoingAttachment,
   type SurfaceCoreClientDeps,
 } from "../src/api/surface-core-client.ts";
@@ -161,4 +162,73 @@ test("ingestSurfaceEvents with no events does not call core", async () => {
   const record: string[] = [];
   await createSurfaceCoreClient(liftedDeps(record), "discord").ingestSurfaceEvents([]);
   assert.deepEqual(record, []);
+});
+
+test("readOutgoingAttachment keeps both the blob and the artifact failure when the fallback also fails", async () => {
+  const blobFailure = new Error("blob gone");
+  const artifactFailure = new Error("artifact gone");
+  const source = {
+    readBlob: async () => {
+      throw blobFailure;
+    },
+    readFileArtifact: async () => {
+      throw artifactFailure;
+    },
+  };
+  await assert.rejects(
+    () =>
+      readOutgoingAttachment(source, {
+        name: "f.txt",
+        mimetype: "text/plain",
+        sizeBytes: 1,
+        blobId: "b",
+        artifactId: "a",
+        artifactViewerId: "u",
+      }),
+    (err: Error) =>
+      err.message.includes("artifact gone") &&
+      err instanceof AggregateError &&
+      err.errors[0] === blobFailure &&
+      err.errors[1] === artifactFailure,
+  );
+});
+
+test("ackRunDeliveryWithRetry retries with growing delays, then gives up with the last error", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let attempts = 0;
+  const core = {
+    ackRunDelivery: async () => {
+      attempts += 1;
+      throw new Error(`down ${attempts}`);
+    },
+  };
+  const outcome = ackRunDeliveryWithRetry(core, "r1").then(
+    () => "acked",
+    (err: Error) => err.message,
+  );
+  let result: string | undefined;
+  void outcome.then((r) => void (result = r));
+  for (const delay of [2_000, 5_000, 15_000, 30_000]) {
+    await new Promise((r) => setImmediate(r));
+    assert.equal(result, undefined);
+    t.mock.timers.tick(delay);
+  }
+  assert.equal(await outcome, "down 5");
+  assert.equal(attempts, 5);
+});
+
+test("ackRunDeliveryWithRetry stops at the first successful ack", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let attempts = 0;
+  const core = {
+    ackRunDelivery: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("blip");
+    },
+  };
+  const done = ackRunDeliveryWithRetry(core, "r1");
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(2_000);
+  await done;
+  assert.equal(attempts, 2);
 });

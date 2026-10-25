@@ -1,6 +1,14 @@
 import { RESTJSONErrorCodes, type Client, type Message, type MessageCreateOptions } from "discord.js";
 import type { DiscordFile } from "./attachments.ts";
+import { SNOWFLAKE } from "../util/snowflake.ts";
 import type { DiscordChannels } from "./gateway.ts";
+
+export class InvalidMessageIdError extends Error {}
+
+function rawMessageId(id: string): string {
+  if (!SNOWFLAKE.test(id)) throw new InvalidMessageIdError(`"${id}" is not a message id from this conversation`);
+  return id;
+}
 
 export const NO_MENTIONS = { parse: [] as [], repliedUser: false as const };
 
@@ -66,7 +74,8 @@ export function createDiscordSender(client: Pick<Client, "users" | "user">, chan
       });
       return { id: sent.id };
     },
-    async edit(channelId, messageId, msg) {
+    async edit(channelId, ref, msg) {
+      const messageId = rawMessageId(ref);
       const ch = await sendable(channels, channelId);
       await ch.messages.edit(messageId, {
         content: msg.content,
@@ -74,7 +83,8 @@ export function createDiscordSender(client: Pick<Client, "users" | "user">, chan
         components: msg.components ?? [],
       });
     },
-    async react(channelId, messageId, emoji) {
+    async react(channelId, ref, emoji) {
+      const messageId = rawMessageId(ref);
       const ch = await sendable(channels, channelId);
       const msg = await ch.messages.fetch(messageId).catch(async (err: unknown) => {
         if ((err as { code?: number }).code !== RESTJSONErrorCodes.UnknownMessage || !ch.parentId) throw err;
@@ -82,11 +92,13 @@ export function createDiscordSender(client: Pick<Client, "users" | "user">, chan
       });
       await msg.react(emoji);
     },
-    async unreact(channelId, messageId, emoji) {
+    async unreact(channelId, ref, emoji) {
+      const messageId = rawMessageId(ref);
       const ch = await sendable(channels, channelId);
       await (await ch.messages.fetch(messageId)).reactions.resolve(emoji)?.users.remove();
     },
-    async remove(channelId, messageId) {
+    async remove(channelId, ref) {
+      const messageId = rawMessageId(ref);
       const ch = await sendable(channels, channelId);
       const msg = await ch.messages.fetch(messageId);
       if (msg.author.id !== client.user?.id) throw new Error("I can only delete my own Discord messages.");

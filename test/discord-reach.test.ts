@@ -19,7 +19,7 @@ import { mintCapabilityToken, CAPABILITY_TTL_MS } from "../src/auth/capability-t
 import { testConfig } from "./support/test-config.ts";
 import { scopeActor, scopeId } from "../src/types.ts";
 import type { SurfaceContextQuery, SurfaceContextRequest, SurfaceContextResult } from "../src/types.ts";
-import { noLinkChannels } from "./support/discord-channels.ts";
+import { installDiscord, noLinkChannels } from "./support/discord-channels.ts";
 
 const SLACK_CHANNEL = { channelId: "C-eng", name: "eng" };
 
@@ -822,7 +822,8 @@ test("a Discord-homed trigger defers, without claiming its fire key, while chann
 
 test("a one-shot cron homed in Discord stays enabled when it fires while channel readers are unknown", async () => {
   const CHAN = "1300000000000000010";
-  const built = buildApp(testConfig({ discordEnvironmentConfigured: true }));
+  const built = buildApp(testConfig());
+  await installDiscord(built);
   await built.app.upsertDirectory([{ principalId: "ana@acme.com", displayName: "Ana", type: "internal" }]);
   const seen: SurfaceContextQuery[] = [];
   let polling = true;
@@ -853,7 +854,8 @@ test("a one-shot cron homed in Discord stays enabled when it fires while channel
 
 test("a one-shot cron homed in Discord stays enabled when the Discord lookup times out", async () => {
   const CHAN = "1300000000000000011";
-  const built = buildApp(testConfig({ discordEnvironmentConfigured: true }));
+  const built = buildApp(testConfig());
+  await installDiscord(built);
   await built.app.upsertDirectory([{ principalId: "ana@acme.com", displayName: "Ana", type: "internal" }]);
   let asked = 0;
   let polling = true;
@@ -884,7 +886,8 @@ test("a one-shot cron homed in Discord stays enabled when the Discord lookup tim
 
 test("a cron homed in Discord gives up an unanswered channel lookup after the short trigger wait", async () => {
   const CHAN = "1300000000000000012";
-  const built = buildApp(testConfig({ discordEnvironmentConfigured: true }));
+  const built = buildApp(testConfig());
+  await installDiscord(built);
   await built.app.upsertDirectory([{ principalId: "ana@acme.com", displayName: "Ana", type: "internal" }]);
   let asked = 0;
   let polling = true;
@@ -917,7 +920,7 @@ test("a cron homed in Discord gives up an unanswered channel lookup after the sh
 });
 
 test("an inactive Discord surface never gets a channel lookup", async () => {
-  const built = buildApp(testConfig({ discordEnvironmentConfigured: false }));
+  const built = buildApp(testConfig());
   const seen: SurfaceContextQuery[] = [];
   let polling = true;
   const poller = (async () => {
@@ -946,7 +949,8 @@ describe("POST /v1/reach into a Discord channel", () => {
   let stopPolling = false;
 
   before(async () => {
-    built = buildApp(testConfig({ signingSecret: SECRET, discordEnvironmentConfigured: true }));
+    built = buildApp(testConfig({ signingSecret: SECRET }));
+    await installDiscord(built);
     await built.app.upsertDirectory([{ principalId: "U-carol", displayName: "Carol", type: "internal" }]);
     server = createServer(built.app, { signingSecret: SECRET });
     await new Promise<void>((resolve) => server.listen(0, resolve));

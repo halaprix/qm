@@ -335,7 +335,6 @@ class DiscordInstallationState extends InstallationState {
   allowUserIds = "";
   guildIds = "";
   internalRoleIds = "";
-  principalDeliveries = true;
   async load() {
     const result = await context.api("GET", "/api/discord-installation");
     if (!result.ok) return this.setStatus(result.data?.message || "Failed to load Discord status.", "err");
@@ -345,7 +344,6 @@ class DiscordInstallationState extends InstallationState {
     this.allowUserIds = (this.data.allowUserIds ?? []).join(", ");
     this.guildIds = (this.data.guildIds ?? []).join(", ");
     this.internalRoleIds = (this.data.internalRoleIds ?? []).join(", ");
-    this.principalDeliveries = this.data.principalDeliveries !== false;
     this.render();
   }
   async save() {
@@ -361,7 +359,6 @@ class DiscordInstallationState extends InstallationState {
         allowUserIds: splitIds(this.allowUserIds),
         guildIds: splitIds(this.guildIds),
         internalRoleIds: splitIds(this.internalRoleIds),
-        principalDeliveries: this.principalDeliveries,
       });
       if (!result.ok) return this.setStatus(result.data?.message || "Save failed.", "err");
       await this.load();

@@ -1,16 +1,16 @@
 import { RESTJSONErrorCodes } from "discord.js";
 import type { SurfaceCoreClient } from "../api/surface-core-client.ts";
 import type { ActorAssertion, Delivery } from "../types.ts";
-import { DISCORD_MESSAGE_IDS, MESSAGE_ID_TOKEN } from "../surfaces/message-ids.ts";
 import { errMessage } from "../util/errors.ts";
 import { toDiscordFiles } from "./attachments.ts";
 import { resolveDiscordEmoji } from "./emoji.ts";
 import { DISCORD_DM_DELIVERY_TYPE, DISCORD_SURFACE, discordDmThreadRef } from "./config.ts";
 import { chunkMessage } from "./format.ts";
 import type { ReaderResult } from "./readers.ts";
-import type { DiscordSender, OutboundMessage } from "./sender.ts";
+import { InvalidMessageIdError, type DiscordSender, type OutboundMessage } from "./sender.ts";
 import { relaySenderAttribution } from "../reach/reach.ts";
 import { runIdOfDeliveryKey } from "../delivery/run-result-delivery.ts";
+import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 
 export const DISCORD_DELIVERY_CLAIM_MS = 15_000;
 export const DISCORD_RUN_RECOVERY_GRACE_MS = 15_000;
@@ -84,6 +84,8 @@ export function createDiscordDispatcher(deps: {
     return deps.inFlightRuns.has(runId) || now() - d.createdAt < DISCORD_RUN_RECOVERY_GRACE_MS;
   }
 
+  const messageIdOf = (ref: string): string => DISCORD_MESSAGE_IDS.decode(ref) ?? ref;
+
   async function drop(d: Delivery, reason: string): Promise<void> {
     await deps.core.reportDeliveryUndeliverable(d.id, reason);
     await deps.core.ackDelivery(d.id);
@@ -97,18 +99,11 @@ export function createDiscordDispatcher(deps: {
         await deps.core.reportDeliveryUndeliverable(d.id, "Discord cannot resolve that emoji");
         return;
       }
-      const messageId = MESSAGE_ID_TOKEN.test(dest.react.messageTs)
-        ? DISCORD_MESSAGE_IDS.decode(dest.react.messageTs)
-        : dest.react.messageTs;
-      if (!messageId) {
-        await deps.core.reportDeliveryUndeliverable(d.id, "Discord cannot resolve that message id");
-        return;
-      }
-      await deps.sender.react(channelId, messageId, emoji);
+      await deps.sender.react(channelId, messageIdOf(dest.react.messageTs), emoji);
       return;
     }
     if (dest.delete) {
-      await deps.sender.remove(channelId, dest.delete.messageTs);
+      await deps.sender.remove(channelId, messageIdOf(dest.delete.messageTs));
       return;
     }
     const card = await deps.renderCard?.(d);
@@ -120,8 +115,9 @@ export function createDiscordDispatcher(deps: {
     const attribution = relaySenderAttribution(dest.relaySender);
     const chunks = chunkMessage([d.text, ...notes, attribution].filter(Boolean).join("\n\n"));
     const [first, ...rest] = chunks;
-    if (dest.editRef) await deps.sender.edit(channelId, dest.editRef, { content: first ?? EMPTY_TEXT });
-    else if (first) await deps.sender.send(channelId, { content: first, ...(replyTo ? { replyTo } : {}) });
+    if (dest.editRef) await deps.sender.edit(channelId, messageIdOf(dest.editRef), { content: first ?? EMPTY_TEXT });
+    else if (first)
+      await deps.sender.send(channelId, { content: first, ...(replyTo ? { replyTo: messageIdOf(replyTo) } : {}) });
     for (const chunk of rest) await deps.sender.send(channelId, { content: chunk });
     if (files.length) await deps.sender.send(channelId, { files });
   }
@@ -166,7 +162,11 @@ export function createDiscordDispatcher(deps: {
         for (const type of [DISCORD_SURFACE, DISCORD_DM_DELIVERY_TYPE]) {
           for (const d of await deps.core.claimDeliveries(type, DISCORD_DELIVERY_CLAIM_MS)) {
             if (leaseLost) break;
-            await deliverOne(d).catch((err: unknown) => deps.core.reportDeliveryUndeliverable(d.id, errMessage(err)));
+            await deliverOne(d).catch((err: unknown) =>
+              err instanceof InvalidMessageIdError
+                ? drop(d, errMessage(err))
+                : deps.core.reportDeliveryUndeliverable(d.id, errMessage(err)),
+            );
           }
           if (leaseLost) break;
         }

@@ -1,7 +1,7 @@
 import type { ActorAssertion } from "../types.ts";
 import type { DiscordMemberFacts } from "./members.ts";
 
-const DISCORD_AUDIENCE_CAP = 500;
+export const DISCORD_AUDIENCE_CAP = 500;
 
 export type ChannelViewers =
   | { ok: true; guildId: string; members: DiscordMemberFacts[] }
