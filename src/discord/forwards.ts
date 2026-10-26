@@ -1,7 +1,7 @@
 import { MessageReferenceType, type Message } from "discord.js";
 import { appendRenderedLines, bracketedLine, forwardLabel, MAX_RENDERED_FORWARDS } from "../surfaces/forwards.ts";
 import { swallow } from "../util/errors.ts";
-import { clipMessage } from "../surfaces/conversation.ts";
+import { clipMessage, SELF_AUTHOR } from "../surfaces/conversation.ts";
 import type { DiscordAttachmentRef } from "./events.ts";
 
 interface AttachmentSource {
@@ -29,7 +29,7 @@ export function withForwardedContent(
   };
 }
 
-export async function withReplyContext(message: Message, text: string): Promise<string> {
+export async function withReplyContext(message: Message, text: string, botUserId: string): Promise<string> {
   const ref = message.reference;
   if (!ref?.messageId || ref.type === MessageReferenceType.Forward) return text;
   let parent: Message;
@@ -39,6 +39,9 @@ export async function withReplyContext(message: Message, text: string): Promise<
     swallow("discord: reply reference", err);
     return text;
   }
-  const author = parent.member?.displayName ?? parent.author.globalName ?? parent.author.username;
+  const author =
+    parent.author.id === botUserId
+      ? SELF_AUTHOR
+      : (parent.member?.displayName ?? parent.author.globalName ?? parent.author.username);
   return `${bracketedLine(`in reply to ${author}`, clipMessage(parent.content))}\n${text}`;
 }

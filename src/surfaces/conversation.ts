@@ -15,6 +15,8 @@ export interface ContextWireMessage {
   reactions?: ReactionTally[];
 }
 
+export const SELF_AUTHOR = "you";
+
 const MAX_CONTEXT_MESSAGE_CHARS = 600;
 
 export function buildContextWindow(
@@ -38,7 +40,7 @@ export function buildContextWindow(
     return {
       ts: m.ts,
       ...(time ? { time } : {}),
-      author: m.isSelf ? "you" : m.name || "someone",
+      author: m.isSelf ? SELF_AUTHOR : m.name || "someone",
       text: clipMessage(resolveMentions(m.text ?? "", opts.nameById), MAX_CONTEXT_MESSAGE_CHARS),
       ...(m.parentTs ? { threadTs: m.parentTs } : {}),
       ...(m.files?.length ? { files: m.files } : {}),

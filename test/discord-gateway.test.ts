@@ -301,7 +301,22 @@ test("withReplyContext prefixes the referenced message with its author and a one
       content: "  the build\nis   red ",
     }),
   };
-  assert.equal(await withReplyContext(msg as never, "why?"), "[in reply to Bo] the build is red\nwhy?");
+  assert.equal(await withReplyContext(msg as never, "why?", "bot1"), "[in reply to Bo] the build is red\nwhy?");
+});
+
+test("withReplyContext labels the bot's own message as you, not by its display name", async () => {
+  const msg = {
+    reference: { messageId: "p1", type: 0 },
+    fetchReference: async () => ({
+      member: { displayName: "LogicalGuard" },
+      author: { id: "bot1", globalName: null, username: "LogicalGuard" },
+      content: "I can't answer here",
+    }),
+  };
+  assert.equal(
+    await withReplyContext(msg as never, "and now?", "bot1"),
+    "[in reply to you] I can't answer here\nand now?",
+  );
 });
 
 test("withReplyContext clips a long referenced message", async () => {
@@ -313,7 +328,7 @@ test("withReplyContext clips a long referenced message", async () => {
       content: "z".repeat(400),
     }),
   };
-  assert.equal(await withReplyContext(msg as never, "ok"), `[in reply to Bo] ${"z".repeat(300)}…\nok`);
+  assert.equal(await withReplyContext(msg as never, "ok", "bot1"), `[in reply to Bo] ${"z".repeat(300)}…\nok`);
 });
 
 test("withReplyContext leaves text alone for plain messages, forwards and unreadable references", async () => {
@@ -322,10 +337,18 @@ test("withReplyContext leaves text alone for plain messages, forwards and unread
     fetched += 1;
     throw new Error("Unknown Message");
   };
-  assert.equal(await withReplyContext({ reference: null, fetchReference } as never, "t"), "t");
-  assert.equal(await withReplyContext({ reference: { messageId: "p1", type: 1 }, fetchReference } as never, "t"), "t");
+  assert.equal(await withReplyContext({ reference: null, fetchReference } as never, "t", "bot1"), "t", "bot1");
+  assert.equal(
+    await withReplyContext({ reference: { messageId: "p1", type: 1 }, fetchReference } as never, "t", "bot1"),
+    "t",
+    "bot1",
+  );
   assert.equal(fetched, 0);
-  assert.equal(await withReplyContext({ reference: { messageId: "p1", type: 0 }, fetchReference } as never, "t"), "t");
+  assert.equal(
+    await withReplyContext({ reference: { messageId: "p1", type: 0 }, fetchReference } as never, "t", "bot1"),
+    "t",
+    "bot1",
+  );
   assert.equal(fetched, 1);
 });
 

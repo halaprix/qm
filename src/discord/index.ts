@@ -202,7 +202,7 @@ export function createDiscordPlugin(
     }
     const common = {
       actor,
-      text: await withReplyContext(message, routed.text),
+      text: await withReplyContext(message, routed.text, botUserId),
       redeliveryKey: `discord:${message.id}`,
       ...(actor.isBot ? { botActor: true } : {}),
     };
@@ -224,6 +224,7 @@ export function createDiscordPlugin(
           ...dmTurnBody(message.channelId),
           triggerTs: message.id,
           entryTs: message.id,
+          liveActor: true,
         },
       });
       return;
@@ -253,7 +254,9 @@ export function createDiscordPlugin(
           channelId: routed.target === "new-thread" ? scopeChannel : thread.id,
           threadId: routed.target === "new-thread" ? null : thread.id,
         },
-        trigger: prompted ? { triggerTs: message.id, entryTs: message.id } : { unprompted: true, entryTs: message.id },
+        trigger: prompted
+          ? { triggerTs: message.id, entryTs: message.id, liveActor: true }
+          : { unprompted: true, entryTs: message.id, ...(actor.isBot ? {} : { liveActor: true }) },
         reactTarget: { channelId: message.channelId, messageId: message.id },
       });
     } finally {
@@ -291,7 +294,7 @@ export function createDiscordPlugin(
       common: Pick<CoreTurnBody, "actor" | "text" | "redeliveryKey" | "botActor">;
       attachmentRefs: DiscordAttachmentRef[];
       history: { before?: string; channelId: string; threadId: string | null };
-      trigger: Pick<CoreTurnBody, "triggerTs" | "entryTs" | "unprompted">;
+      trigger: Pick<CoreTurnBody, "triggerTs" | "entryTs" | "unprompted" | "liveActor">;
       reactTarget: MessageTarget;
       onNoReply?: () => Promise<void>;
     },

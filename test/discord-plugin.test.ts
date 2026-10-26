@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { EventEmitter } from "node:events";
 import { ChannelType, Events, GatewayIntentBits, MessageType, Partials, PermissionFlagsBits } from "discord.js";
+import { resolveTurnOrigin } from "../src/core/turn-origin.ts";
 import { principalEntitledToScope } from "../src/resolution/context-filter.ts";
 import { scopeId, type Principal } from "../src/types.ts";
 import { DISCORD_CLIENT_OPTIONS } from "../src/discord/client.ts";
@@ -1233,6 +1234,28 @@ test("a staked unprompted follow-up in a thread submits a turn", async () => {
   await h.settle();
   await h.plugin.stop();
   assert.equal(h.submitted.length, 2);
+});
+
+test("a human mention and a human staked follow-up in a guild thread resolve to human and live ambient origins", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  h.emitter.emit("messageCreate", h.message);
+  await h.settle();
+  h.emitter.emit("messageCreate", {
+    ...h.message,
+    id: "m2",
+    channelId: "t1",
+    content: "no mention here",
+    mentions: { users: new Map() },
+    channel: h.thread,
+    reply: async () => ({ id: "r2" }),
+  });
+  await h.settle();
+  await h.plugin.stop();
+  const origins = h.submitted.map((b) => resolveTurnOrigin(b as never));
+  assert.equal(origins[0]!.kind, "human");
+  assert.deepEqual(origins[1], { kind: "ambient", entryTs: "m2", live: true });
 });
 
 test("an explicit mention in a thread the bot never marked does not fetch stake history", async () => {
