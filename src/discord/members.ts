@@ -6,6 +6,8 @@ export interface DiscordMemberFacts {
   displayName: string;
   roleIds: readonly string[];
   isBot: boolean;
+  pending?: true;
+  viewOnly?: true;
 }
 
 export type LinkedInternal = (userId: string) => Promise<boolean>;

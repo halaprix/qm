@@ -1,8 +1,13 @@
 import type { PrincipalType } from "../types.ts";
 import { discordUserIdOf } from "../discord/config.ts";
+import { SNOWFLAKE } from "../util/snowflake.ts";
 import { rosterIds, samePerson } from "./person.ts";
 
 export const isDiscordMember = (m: { principalId: string }): boolean => discordUserIdOf(m.principalId) !== null;
+export const isDiscordChannelId = (channelId: string): boolean => SNOWFLAKE.test(channelId);
+export type ChannelSurface = "slack" | "discord";
+export const isSurfaceChannel = (surface: ChannelSurface, channelId: string): boolean =>
+  isDiscordChannelId(channelId) === (surface === "discord");
 
 function hasPerson(members: ReadonlySet<string> | undefined, principalId: string): boolean {
   return !!members && rosterIds(principalId).some((id) => members.has(id));
@@ -65,6 +70,11 @@ export interface DirectoryStore {
     channelRosterIds?: string[],
     revocations?: ChannelMembership[],
     partial?: boolean,
+  ): Promise<boolean>;
+  replaceDiscordChannels(
+    channels: DirectoryChannel[],
+    channelMembers: ChannelMembership[],
+    syncedAt: number,
   ): Promise<boolean>;
   list(): Promise<DirectoryMember[]>;
   listChannels(): Promise<DirectoryChannel[]>;
@@ -168,6 +178,71 @@ export function createDirectoryStore(): DirectoryStore {
     return true;
   }
 
+  async function writeChannels(
+    surface: ChannelSurface,
+    nextChannels: DirectoryChannel[],
+    nextChannelMembers: ChannelMembership[] | undefined,
+    syncedAt: number | undefined,
+    nextChannelRosterIds: string[] | undefined,
+    revocations: ChannelMembership[],
+    partial: boolean,
+  ): Promise<boolean> {
+    const inSurface = (id: string) => isSurfaceChannel(surface, id);
+    const stamps = surface === "discord" ? "discord-channels" : "channels";
+    if (partial && (syncedAt === undefined || !Number.isFinite(syncedAt) || nextChannelMembers === undefined))
+      return false;
+    if (partial && (syncedAts.get(stamps) ?? 0) >= syncedAt!) return false;
+    const protectedIds = new Set(
+      [...channelObservedAts]
+        .filter(([, at]) => syncedAt !== undefined && (partial ? at >= syncedAt : at > syncedAt))
+        .map(([id]) => id),
+    );
+    if (partial && nextChannels.some((channel) => protectedIds.has(channel.channelId))) return false;
+    if (!partial && !acceptSync(stamps, syncedAt)) return false;
+    nextChannels = nextChannels.filter((channel) => inSurface(channel.channelId));
+    const updatedIds = new Set(nextChannels.map((channel) => channel.channelId));
+    channels = [
+      ...channels.filter((channel) =>
+        partial
+          ? !updatedIds.has(channel.channelId)
+          : protectedIds.has(channel.channelId) || !inSurface(channel.channelId),
+      ),
+      ...nextChannels.filter((c) => c.channelId && c.name && !protectedIds.has(c.channelId)),
+    ];
+    for (const id of updatedIds) {
+      if (partial) channelObservedAts.set(id, syncedAt!);
+      else if (!protectedIds.has(id)) channelObservedAts.delete(id);
+    }
+    const listed = new Set(channels.map((channel) => channel.channelId));
+    knownChannelRosters = knownChannelRosters
+      ? new Set([...knownChannelRosters].filter((channelId) => listed.has(channelId)))
+      : undefined;
+    if (nextChannelMembers !== undefined) {
+      const rosterIds = new Set(
+        (nextChannelRosterIds ?? nextChannels.map((channel) => channel.channelId)).filter(
+          (id) => updatedIds.has(id) && !protectedIds.has(id),
+        ),
+      );
+      const byChannel = new Map(
+        [...(channelMembers ?? [])].filter(([channelId]) => listed.has(channelId) && !rosterIds.has(channelId)),
+      );
+      for (const channelId of rosterIds) if (listed.has(channelId)) byChannel.set(channelId, new Set());
+      for (const m of nextChannelMembers) {
+        if (!m.channelId || !m.principalId || !rosterIds.has(m.channelId) || !listed.has(m.channelId)) continue;
+        (byChannel.get(m.channelId) ?? byChannel.set(m.channelId, new Set()).get(m.channelId)!).add(m.principalId);
+      }
+      channelMembers = byChannel;
+      knownChannelRosters ??= new Set();
+      for (const channelId of rosterIds) if (listed.has(channelId)) knownChannelRosters.add(channelId);
+    }
+    for (const member of revocations) {
+      if (updatedIds.has(member.channelId) && !protectedIds.has(member.channelId) && member.principalId)
+        channelMembers?.get(member.channelId)?.delete(member.principalId);
+    }
+    for (const id of channelObservedAts.keys()) if (!listed.has(id)) channelObservedAts.delete(id);
+    return true;
+  }
+
   return {
     async setWorkspaceUrl(url) {
       workspaceUrl = url;
@@ -189,63 +264,11 @@ export function createDirectoryStore(): DirectoryStore {
         ...next.filter((m) => m.type === "internal" && isDiscordMember(m)),
       ];
     },
-    async replaceChannels(
-      nextChannels,
-      nextChannelMembers,
-      syncedAt,
-      nextChannelRosterIds,
-      revocations = [],
-      partial = false,
-    ) {
-      if (partial && (syncedAt === undefined || !Number.isFinite(syncedAt) || nextChannelMembers === undefined))
-        return false;
-      if (partial && (syncedAts.get("channels") ?? 0) >= syncedAt!) return false;
-      const protectedIds = new Set(
-        [...channelObservedAts]
-          .filter(([, at]) => syncedAt !== undefined && (partial ? at >= syncedAt : at > syncedAt))
-          .map(([id]) => id),
-      );
-      if (partial && nextChannels.some((channel) => protectedIds.has(channel.channelId))) return false;
-      if (!partial && !acceptSync("channels", syncedAt)) return false;
-      const updatedIds = new Set(nextChannels.map((channel) => channel.channelId));
-      channels = [
-        ...channels.filter((channel) =>
-          partial ? !updatedIds.has(channel.channelId) : protectedIds.has(channel.channelId),
-        ),
-        ...nextChannels.filter((c) => c.channelId && c.name && !protectedIds.has(c.channelId)),
-      ];
-      for (const id of updatedIds) {
-        if (partial) channelObservedAts.set(id, syncedAt!);
-        else if (!protectedIds.has(id)) channelObservedAts.delete(id);
-      }
-      const listed = new Set(channels.map((channel) => channel.channelId));
-      knownChannelRosters = knownChannelRosters
-        ? new Set([...knownChannelRosters].filter((channelId) => listed.has(channelId)))
-        : undefined;
-      if (nextChannelMembers !== undefined) {
-        const rosterIds = new Set(
-          (nextChannelRosterIds ?? nextChannels.map((channel) => channel.channelId)).filter(
-            (id) => updatedIds.has(id) && !protectedIds.has(id),
-          ),
-        );
-        const byChannel = new Map(
-          [...(channelMembers ?? [])].filter(([channelId]) => listed.has(channelId) && !rosterIds.has(channelId)),
-        );
-        for (const channelId of rosterIds) if (listed.has(channelId)) byChannel.set(channelId, new Set());
-        for (const m of nextChannelMembers) {
-          if (!m.channelId || !m.principalId || !rosterIds.has(m.channelId) || !listed.has(m.channelId)) continue;
-          (byChannel.get(m.channelId) ?? byChannel.set(m.channelId, new Set()).get(m.channelId)!).add(m.principalId);
-        }
-        channelMembers = byChannel;
-        knownChannelRosters ??= new Set();
-        for (const channelId of rosterIds) if (listed.has(channelId)) knownChannelRosters.add(channelId);
-      }
-      for (const member of revocations) {
-        if (updatedIds.has(member.channelId) && !protectedIds.has(member.channelId) && member.principalId)
-          channelMembers?.get(member.channelId)?.delete(member.principalId);
-      }
-      for (const id of channelObservedAts.keys()) if (!listed.has(id)) channelObservedAts.delete(id);
-      return true;
+    replaceChannels(next, nextMembers, syncedAt, nextRosterIds, revocations = [], partial = false) {
+      return writeChannels("slack", next, nextMembers, syncedAt, nextRosterIds, revocations, partial);
+    },
+    replaceDiscordChannels(next, nextMembers, syncedAt) {
+      return writeChannels("discord", next, nextMembers, syncedAt, undefined, [], false);
     },
     async channelMember(channelId, principalId) {
       if (channels.some((channel) => channel.channelId === channelId && channel.isPrivate && channel.isExternal))
@@ -380,6 +403,7 @@ export function createDirectoryStore(): DirectoryStore {
         query,
         (x) => x.channelId,
         (x) => x.name,
+        (x) => isDiscordChannelId(x.channelId),
       );
       if (m.kind === "one") return { kind: "one", channel: m.item };
       if (m.kind === "ambiguous") return { kind: "ambiguous", candidates: m.items };

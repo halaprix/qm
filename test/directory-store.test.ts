@@ -1,6 +1,7 @@
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { createDirectoryStore, type DirectoryStore } from "../src/directory/directory-store.ts";
+import { assertSurfaceScopedFullSyncs } from "./support/channel-surface-scope.ts";
 
 describe("directory resolution (agent → teammate addressing, §10)", () => {
   const dir = async (): Promise<DirectoryStore> => {
@@ -420,4 +421,8 @@ it("a Discord nickname never wins a name that a Slack member also matches", asyn
   assert.equal(slackOnly.kind, "one");
   const byId = await d.resolve("discord:5");
   assert.equal(byId.kind, "one");
+});
+
+test("a Discord full channel sync and a Slack full channel sync never delete each other's rows", async () => {
+  await assertSurfaceScopedFullSyncs(createDirectoryStore());
 });

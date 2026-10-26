@@ -526,6 +526,12 @@ export interface App {
     revocations?: ChannelMembership[],
     partial?: boolean,
   ): Promise<boolean>;
+  upsertDiscordChannels(
+    channels: DirectoryChannel[],
+    channelMembers: ChannelMembership[],
+    syncedAt: number,
+    keep: string[],
+  ): Promise<boolean>;
   upsertGroups(
     groupMembers: GroupMembership[],
     syncedAt?: number,

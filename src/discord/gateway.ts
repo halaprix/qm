@@ -42,6 +42,7 @@ export function memberFacts(m: GuildMember): DiscordMemberFacts {
     displayName: m.displayName,
     roleIds: [...m.roles.cache.keys()].filter((id) => id !== m.guild.id),
     isBot: m.user.bot,
+    ...(m.pending ? { pending: true } : {}),
   };
 }
 
@@ -106,7 +107,14 @@ export function scopeChannelId(ch: {
   return ch.parentId ?? ch.id;
 }
 
-export async function channelViewers(channels: DiscordChannels, channelId: string): Promise<ChannelViewers> {
+const CAN_VIEW_CHANNEL = PermissionFlagsBits.ViewChannel;
+const CAN_READ_HISTORY = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory];
+
+export async function channelViewers(
+  channels: DiscordChannels,
+  channelId: string,
+  limit = VIEWER_SCAN_LIMIT,
+): Promise<ChannelViewers> {
   let ch;
   try {
     ch = await channels.cached(channelId);
@@ -127,11 +135,11 @@ export async function channelViewers(channels: DiscordChannels, channelId: strin
   }
   const members: DiscordMemberFacts[] = [];
   for (const m of base.guild.members.cache.values()) {
-    if (members.length >= VIEWER_SCAN_LIMIT) break;
+    if (members.length >= limit) break;
     const perms = base.permissionsFor(m);
-    if (!perms.has(PermissionFlagsBits.ViewChannel)) continue;
+    if (!perms.has(CAN_VIEW_CHANNEL)) continue;
     if (!threadMembers || threadMembers.has(m.id) || perms.has(PermissionFlagsBits.ManageThreads))
-      members.push(memberFacts(m));
+      members.push({ ...memberFacts(m), ...(perms.has(CAN_READ_HISTORY) ? {} : { viewOnly: true as const }) });
   }
   return { ok: true, guildId: base.guild.id, members };
 }
@@ -299,7 +307,7 @@ export function createDiscordHistoryReader(deps: {
         const member = base.guild.members.cache.get(userId);
         if (!member) return false;
         const perms = base.permissionsFor(member);
-        if (!perms.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])) return false;
+        if (!perms.has(CAN_READ_HISTORY)) return false;
         if (ch.type === ChannelType.PrivateThread) {
           if (ch.members.cache.has(userId) || perms.has(PermissionFlagsBits.ManageThreads)) return true;
           await ch.members.fetch({ member: userId, cache: false });

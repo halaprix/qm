@@ -8,7 +8,12 @@ import type {
 } from "../types.ts";
 import { scopeId as makeScopeId } from "../types.ts";
 import type { DeliveryStore } from "../delivery/delivery-store.ts";
-import type { ChannelResolution, GroupResolution, RecipientResolution } from "../directory/directory-store.ts";
+import {
+  isDiscordChannelId,
+  type ChannelResolution,
+  type GroupResolution,
+  type RecipientResolution,
+} from "../directory/directory-store.ts";
 import { isVisible } from "../directory/visibility.ts";
 import { swallow } from "../util/errors.ts";
 import { DISCORD_SURFACE } from "../discord/config.ts";
@@ -145,8 +150,15 @@ export async function resolveReachTarget(
   }
   if (wantsChannel) {
     const r = await dir.resolveChannel(target.channel!);
-    if (r.kind === "none" && dir.discordLookup) {
-      const found = await dir.discordLookup({ lookupChannel: target.channel!, postable: true, viewer: authorityId });
+    const storedDiscordId =
+      r.kind === "one" && isDiscordChannelId(r.channel.channelId) ? r.channel.channelId : undefined;
+    if (storedDiscordId && !dir.discordLookup) return membershipDenial(dir, authorityId, "channel");
+    if ((r.kind === "none" || storedDiscordId) && dir.discordLookup) {
+      const found = await dir.discordLookup({
+        lookupChannel: storedDiscordId ?? target.channel!,
+        postable: true,
+        viewer: authorityId,
+      });
       if (found?.channel) {
         const { channelId, name } = found.channel;
         return {
@@ -156,6 +168,7 @@ export async function resolveReachTarget(
         };
       }
       if (found?.note) return { ok: false, status: 403, error: "discord_channel_unavailable", message: found.note };
+      if (storedDiscordId) return membershipDenial(dir, authorityId, "channel");
     }
     if (r.kind === "none") {
       return {

@@ -43,6 +43,12 @@ import {
   type DiscordAttachmentRef,
   type DiscordInbound,
 } from "./events.ts";
+import {
+  computeDiscordRoster,
+  createChannelRosterSync,
+  DISCORD_ROSTER_RETRY_MS,
+  syncDirectoryAndRosters,
+} from "./channel-roster.ts";
 import { createDirectorySync, DISCORD_DIRECTORY_SYNC_MS } from "./directory.ts";
 import { createInteractionHandler } from "./interactions.ts";
 import { buildGuildTurnContext, gatewayContextFor } from "./conversation-context.ts";
@@ -469,7 +475,7 @@ export function createDiscordPlugin(
       guildIds: cfg.guildIds,
       onAllReady: () => {
         if (!accepting) return;
-        track(syncDirectory(), "discord: directory sync");
+        track(syncAll(), "discord: directory sync");
         if (backfill) track(backfill.run(), "discord: backfill");
       },
       fetchAll: async (g) => {
@@ -495,7 +501,24 @@ export function createDiscordPlugin(
       hold: (fn) => core.holdDirectorySync(fn),
       push: (members) => core.syncDirectory(members),
     });
-    const directorySweeper = createSweeper(syncDirectory, DISCORD_DIRECTORY_SYNC_MS, {
+    const lastMembersOk = new Map<string, number>();
+    const syncRosters = createChannelRosterSync({
+      compute: () =>
+        computeDiscordRoster({
+          channels,
+          guildIds: cfg.guildIds,
+          ready: (guildId) => hydrator.ready(guildId),
+          botUserId: c.user?.id ?? "",
+          lastMembersOk,
+          classify: mergedClassify,
+        }),
+      hold: (fn) => core.holdDirectorySync(fn),
+      push: (roster, syncedAt) => core.syncChannels(roster, syncedAt),
+      lastMembersOk,
+      retryMs: DISCORD_ROSTER_RETRY_MS,
+    });
+    const syncAll = syncDirectoryAndRosters(syncDirectory, syncRosters);
+    const directorySweeper = createSweeper(syncAll, DISCORD_DIRECTORY_SYNC_MS, {
       label: "discord directory sync",
     });
     const classifyUser = createUserClassifier({
@@ -648,7 +671,24 @@ export function createDiscordPlugin(
         .catch(swallowAs("discord: context request drain", undefined));
     });
 
+    const rosterChanged = (guildId: string | null | undefined): void => {
+      if (accepting && !unconfiguredGuild(guildId ?? null)) track(syncRosters(), "discord: channel roster sync");
+    };
+    c.on(Events.GuildMemberAdd, (m) => rosterChanged(m.guild.id));
+    c.on(Events.GuildMemberRemove, (m) => rosterChanged(m.guild.id));
+    c.on(Events.GuildMemberUpdate, (_old, m) => rosterChanged(m.guild.id));
+    c.on(Events.GuildRoleCreate, (r) => rosterChanged(r.guild.id));
+    c.on(Events.GuildRoleUpdate, (_old, r) => rosterChanged(r.guild.id));
+    c.on(Events.GuildRoleDelete, (r) => rosterChanged(r.guild.id));
+    c.on(Events.ChannelCreate, (ch) => rosterChanged(ch.guildId));
+    c.on(Events.ChannelUpdate, (_old, ch) => rosterChanged("guildId" in ch ? ch.guildId : null));
+    c.on(Events.ChannelDelete, (ch) => rosterChanged("guildId" in ch ? ch.guildId : null));
+    c.on(Events.ThreadUpdate, (_old, t) => rosterChanged(t.guildId));
+    c.on(Events.ThreadDelete, (t) => rosterChanged(t.guildId));
+    c.on(Events.ThreadMembersUpdate, (_added, _removed, t) => rosterChanged(t.guildId));
+
     c.on(Events.ThreadCreate, (thread) => {
+      rosterChanged(thread.guildId);
       if (accepting && !unconfiguredGuild(thread.guildId))
         track(
           channels.linked(thread).then(() => {}),

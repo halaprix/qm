@@ -105,6 +105,7 @@ export function createMessagingMethods(
   | "upsertDirectory"
   | "upsertDiscordDirectory"
   | "upsertChannels"
+  | "upsertDiscordChannels"
   | "upsertGroups"
   | "setDirectoryWorkspaceUrl"
   | "directoryMeta"
@@ -474,6 +475,24 @@ export function createMessagingMethods(
       );
       await h.syncLinkedProjectRosters();
       return applied;
+    },
+    async upsertDiscordChannels(channels, channelMembers, syncedAt, keep) {
+      const kept = (await deps.directory.listChannels()).filter((c) => keep.includes(c.channelId));
+      const keptMembers = (
+        await Promise.all(
+          kept.map(async (c) =>
+            ((await deps.directory.channelMemberIds(c.channelId)) ?? []).map((principalId) => ({
+              channelId: c.channelId,
+              principalId,
+            })),
+          ),
+        )
+      ).flat();
+      return deps.directory.replaceDiscordChannels(
+        [...channels, ...kept],
+        [...channelMembers, ...keptMembers],
+        syncedAt,
+      );
     },
     async upsertGroups(groupMembers, syncedAt, groupIds, groupRosterIds) {
       return deps.directory.replaceGroups(groupMembers, syncedAt, groupIds, groupRosterIds);

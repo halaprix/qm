@@ -1,4 +1,4 @@
-import { type DirectoryMember } from "../directory/directory-store.ts";
+import { type ChannelMembership, type DirectoryChannel, type DirectoryMember } from "../directory/directory-store.ts";
 import { canonicalPerson, personIds } from "../directory/person.ts";
 import { DISCORD_SURFACE, discordExternalId, discordUserIdOf } from "../discord/config.ts";
 import type { ScopedConfigStore } from "../resolution/config-store.ts";
@@ -22,6 +22,10 @@ export interface DiscordCoreClient extends SurfaceCoreClient {
   coreStatus(discordUserId: string): Promise<CoreStatus>;
   discordUserIdsFor(principalId: string): string[];
   syncDirectory(members: DirectoryMember[]): Promise<void>;
+  syncChannels(
+    roster: { channels: DirectoryChannel[]; members: ChannelMembership[]; keep: string[] },
+    syncedAt: number,
+  ): Promise<boolean>;
   linkPrivateThread(threadId: string, parentId: string): Promise<void>;
 }
 
@@ -64,6 +68,9 @@ export function createDiscordCoreClient(
     async syncDirectory(members) {
       await deps.identity.refresh();
       await deps.app.upsertDiscordDirectory(members);
+    },
+    syncChannels({ channels, members, keep }, syncedAt) {
+      return deps.app.upsertDiscordChannels(channels, members, syncedAt, keep);
     },
     linkPrivateThread(threadId, parentId) {
       return deps.config.linkConfigParent(scopeId("channel", threadId), scopeId("channel", parentId));

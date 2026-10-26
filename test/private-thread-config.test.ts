@@ -197,12 +197,13 @@ async function serverWith(
   const config = testConfig({ signingSecret: "private-thread-config-secret".repeat(2) });
   const built = buildApp(config);
   await built.app.upsertDirectory([{ principalId: "U1", displayName: "One", type: "internal" }]);
-  await built.directory.replaceChannels(
+  await built.directory.replaceDiscordChannels(
     [{ channelId: THREAD_ID, name: "private", isPrivate: true }],
     [
       { channelId: THREAD_ID, principalId: "U1" },
       { channelId: THREAD_ID, principalId: "admin-alice" },
     ],
+    Date.now(),
   );
   await configure(built);
   const server = createServer(built.app, serverDeps(config, built));
