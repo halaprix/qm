@@ -9,7 +9,7 @@ import {
 } from "../src/delivery/principal-routing.ts";
 import { linkedDiscordUserIds } from "../src/api/discord-core-client.ts";
 import { principalDestination, relaySenderAttribution } from "../src/reach/reach.ts";
-import { createPrincipalLinkService, type PrincipalLinkService } from "../src/identity/principal-links.ts";
+import { type PrincipalLinkService } from "../src/identity/principal-links.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { DISCORD_DM_DELIVERY_TYPE, discordExternalId } from "../src/discord/config.ts";
 import { createDiscordDispatcher, DISCORD_DELIVERY_CLAIM_MS, type DeliveryGuard } from "../src/discord/deliveries.ts";
@@ -18,6 +18,7 @@ import type { Delivery } from "../src/types.ts";
 import { buildApp } from "../src/wiring.ts";
 import { testConfig } from "./support/test-config.ts";
 import { installDiscord } from "./support/discord-channels.ts";
+import { memoryPrincipalLinks } from "./support/principal-links.ts";
 
 const toDiscord = async (p: string) => (p === "ana@acme.com" ? DISCORD_DM_DELIVERY_TYPE : null);
 
@@ -286,7 +287,7 @@ test("command-approval cards are never rerouted to discord-dm", async () => {
 });
 
 test("linkedDiscordUserIds extracts linked discord user ids from principal links", async () => {
-  const links: PrincipalLinkService = createPrincipalLinkService();
+  const links: PrincipalLinkService = memoryPrincipalLinks();
   installPrincipalLinks(links);
   await links.link({
     principalId: discordExternalId("discord-456"),

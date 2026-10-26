@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createDiscordCoreClient } from "../src/api/discord-core-client.ts";
 import { createIdentityService, type IdentityService } from "../src/identity/identity-service.ts";
-import { createPrincipalLinkService, type PrincipalLinkService } from "../src/identity/principal-links.ts";
+import { type PrincipalLinkService } from "../src/identity/principal-links.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { discordExternalId } from "../src/discord/config.ts";
+import { memoryPrincipalLinks } from "./support/principal-links.ts";
 
 type DiscordCoreDeps = Parameters<typeof createDiscordCoreClient>[0];
 
@@ -21,7 +22,7 @@ describe("discord core client identity links", () => {
   });
 
   it("classifies unlinked, linked internal, and deactivated discord users", async () => {
-    const links: PrincipalLinkService = createPrincipalLinkService();
+    const links: PrincipalLinkService = memoryPrincipalLinks();
     installPrincipalLinks(links);
     const identity = createIdentityService(undefined, { principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
@@ -43,7 +44,7 @@ describe("discord core client identity links", () => {
   });
 
   it("discordUserIdsFor returns only the discord ids linked to a principal", async () => {
-    const links: PrincipalLinkService = createPrincipalLinkService();
+    const links: PrincipalLinkService = memoryPrincipalLinks();
     installPrincipalLinks(links);
     const identity = createIdentityService(undefined, { principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
@@ -67,7 +68,7 @@ describe("discord core client identity links", () => {
   });
 
   it("active external member linked stays guest on Discord", async () => {
-    const links: PrincipalLinkService = createPrincipalLinkService();
+    const links: PrincipalLinkService = memoryPrincipalLinks();
     installPrincipalLinks(links);
     const identity = createIdentityService(undefined, { principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
@@ -101,7 +102,7 @@ describe("discord core client identity links", () => {
   });
 
   it("coreStatus.notInternal is true for deactivated user and false for normal user", async () => {
-    const links: PrincipalLinkService = createPrincipalLinkService();
+    const links: PrincipalLinkService = memoryPrincipalLinks();
     installPrincipalLinks(links);
     const identity = createIdentityService(undefined, { principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));

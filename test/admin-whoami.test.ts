@@ -9,8 +9,8 @@ import type { AddressInfo } from "node:net";
 import { createInsecureTestServer, createServer } from "../src/api/server.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
 import { buildApp } from "./support/build-app.ts";
-import { createAdminService } from "../src/admin/admin-service.ts";
 import { testConfig } from "./support/test-config.ts";
+import { memoryAdmin } from "./support/principal-links.ts";
 
 function start(withAdmin = true, signingSecret?: string) {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "admin-whoami-")) }));
@@ -130,7 +130,7 @@ test("with a signing secret set, a whoami GET with a BAD/missing signature is 40
 });
 
 test("adminStatusOf reads the grant list directly (org_admin reported; non-admin otherwise)", async () => {
-  const svc = createAdminService();
+  const svc = memoryAdmin();
   const alice = svc.resolveActor("admin-alice@default-org")!;
   assert.deepEqual(await svc.adminStatusOf(alice), { isAdmin: true, role: "org_admin", scopeId: "org:default-org" });
   const nobody = svc.resolveActor("U-nobody@default-org")!;

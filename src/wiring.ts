@@ -658,7 +658,17 @@ export function buildApp(
   const advisoryLock: AdvisoryLock = pgArtifactMap
     ? createPostgresAdvisoryLock(pgArtifactMap.pool)
     : createMemoryAdvisoryLock();
-  const principalLinks = createPrincipalLinkService(artifactMap<PrincipalLink>("principal_links"), advisoryLock);
+  const adminGrantPersist = config.databaseUrl
+    ? createPostgresAdminGrantStore(config.databaseUrl)
+    : createMapAdminGrantPersistence(createMemoryMap<AdminGrant>());
+  const adminGrantStore = createAdminGrantStore(adminGrantPersist, {
+    seed: bootAdminGrantSeed(config.adminGrants, config.orgId, !!config.databaseUrl),
+  });
+  const principalLinks = createPrincipalLinkService(
+    artifactMap<PrincipalLink>("principal_links"),
+    advisoryLock,
+    adminGrantStore,
+  );
   installPrincipalLinks(principalLinks);
   const identity = createIdentityService(artifactMap<DeactivationRecord>("deactivated_principals"), {
     directorySyncProtected: config.emailAuthPrincipals,
@@ -1770,13 +1780,10 @@ export function buildApp(
       "[wiring] aws deploy: no data bucket resolved (AWS_DEPLOY_DATA_BUCKET unset, sandbox is not aws) — deployed apps have NO durable /data",
     );
   }
-  const adminGrantPersist = config.databaseUrl
-    ? createPostgresAdminGrantStore(config.databaseUrl)
-    : createMapAdminGrantPersistence(createMemoryMap<AdminGrant>());
-  const adminGrantStore = createAdminGrantStore(adminGrantPersist, {
-    seed: bootAdminGrantSeed(config.adminGrants, config.orgId, !!config.databaseUrl),
+  const admin = createAdminService(adminGrantStore, {
+    trustedOidcAdminIssuer: config.trustedOidcAdminIssuer,
+    principalLinks,
   });
-  const admin = createAdminService(adminGrantStore, { trustedOidcAdminIssuer: config.trustedOidcAdminIssuer });
   const { strategy: memoryStrategy, memory } = createMemoryStrategy(config.memoryStrategy, {
     harness: harness.models,
     memory: baseMemory,

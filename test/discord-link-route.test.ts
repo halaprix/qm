@@ -7,8 +7,11 @@ import type { ApiCtx } from "../src/api/routes/route.ts";
 import { mintSignedPayload } from "../src/auth/signed-token.ts";
 import { orgId } from "../src/config.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
-import { createPrincipalLinkService, PrincipalLinkError } from "../src/identity/principal-links.ts";
+import { PrincipalLinkError } from "../src/identity/principal-links.ts";
+import { createAdminGrantStore, createMemoryAdminGrantPersistence } from "../src/admin/admin-grant-store.ts";
+import { scopeId } from "../src/types.ts";
 import { createMemoryMap } from "../src/persistence/durable-map.ts";
+import { memoryPrincipalLinks } from "./support/principal-links.ts";
 
 const PROVEN = "111111111111111111";
 const CLAIMED = "666666666666666666";
@@ -18,6 +21,7 @@ afterEach(() => installPrincipalLinks(null));
 
 interface FixtureOpts {
   internal?: Set<string>;
+  grants?: Array<{ principalId: string; role: "org_admin" }>;
   portalUrl?: string;
   discordDown?: boolean;
   unparsableUser?: boolean;
@@ -33,7 +37,10 @@ interface FixtureOpts {
 
 async function fixture(t: TestContext, opts: FixtureOpts = {}) {
   const internal = opts.internal ?? new Set(["ana@acme.com", "bob@acme.com"]);
-  const links = createPrincipalLinkService(createMemoryMap());
+  const grantStore = createAdminGrantStore(createMemoryAdminGrantPersistence(), {
+    seed: (opts.grants ?? []).map((g) => ({ ...g, scopeId: scopeId("org", orgId()) })),
+  });
+  const links = memoryPrincipalLinks(createMemoryMap(), grantStore);
   installPrincipalLinks(links);
   const tokenCalls: string[] = [];
   const tokenRedirects: Array<string | null> = [];
@@ -164,7 +171,7 @@ async function fixture(t: TestContext, opts: FixtureOpts = {}) {
     new URL(
       String((await call("POST", "/v1/discord/link/authorize", { p }, { nonceHash })).body!.url),
     ).searchParams.get("state")!;
-  return { call, stateFor, links, tokenCalls, tokenRedirects, recordedAudits, deps };
+  return { call, stateFor, links, grantStore, tokenCalls, tokenRedirects, recordedAudits, deps };
 }
 
 test("authorize returns Discord's identify URL with the stored client id and redirect", async (t) => {
@@ -392,6 +399,39 @@ test("refuses to link when the Discord identity already owns credentials", async
   assert.equal(done.status, 409);
   assert.equal(done.body?.error, "established_account");
   assert.deepEqual(await f.links.list(), []);
+});
+
+test("a Discord identity holding its own admin grant is never linked, whatever the canonical", async (t) => {
+  const alias = `discord:${PROVEN}`;
+  for (const canonicalAdmin of [false, true]) {
+    const grants = [{ principalId: alias, role: "org_admin" as const }];
+    if (canonicalAdmin) grants.push({ principalId: "ana@acme.com", role: "org_admin" as const });
+    const f = await fixture(t, { grants });
+    const done = await f.call(
+      "POST",
+      "/v1/discord/link/complete",
+      { p: "ana@acme.com" },
+      { code: "good", state: await f.stateFor("ana@acme.com"), nonce: TEST_NONCE },
+    );
+    assert.equal(done.status, 409);
+    assert.deepEqual(await f.links.list(), []);
+    assert.deepEqual(
+      (await f.grantStore.list()).map((g) => g.principalId).sort(),
+      grants.map((g) => g.principalId).sort(),
+    );
+  }
+});
+
+test("a Discord identity without an admin grant still links", async (t) => {
+  const f = await fixture(t, { grants: [{ principalId: "ana@acme.com", role: "org_admin" }] });
+  const done = await f.call(
+    "POST",
+    "/v1/discord/link/complete",
+    { p: "ana@acme.com" },
+    { code: "good", state: await f.stateFor("ana@acme.com"), nonce: TEST_NONCE },
+  );
+  assert.equal(done.status, 200);
+  assert.equal((await f.links.list()).length, 1);
 });
 
 test("re-linking to the same principal is idempotent", async (t) => {

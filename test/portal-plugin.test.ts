@@ -4,9 +4,10 @@ import { signRequest } from "../src/auth/source-auth.ts";
 import { canonicalPayload } from "../plugins/chassis/src/source-auth-sign.ts";
 import { signedHeaders } from "../plugins/chassis/src/core-client.ts";
 import { requestPort } from "../plugins/portal/src/proxy.ts";
-import { createAdminService, parseAdminGrants } from "../src/admin/admin-service.ts";
+import { parseAdminGrants } from "../src/admin/admin-service.ts";
 import { createAdminGrantStore, createMemoryAdminGrantPersistence } from "../src/admin/admin-grant-store.ts";
 import { scopeId } from "../src/types.ts";
+import { memoryAdmin } from "./support/principal-links.ts";
 
 test("portal signs /d/ ingress with the principal as the canonical tail (core-verifiable)", () => {
   const secret = "portal-source-auth-secret";
@@ -43,7 +44,7 @@ test("ADMIN_GRANTS-seeded admins resolve and authorize org-wide; non-admins do n
   const store = createAdminGrantStore(createMemoryAdminGrantPersistence(), {
     seed: parseAdminGrants("U1:org_admin", "default-org"),
   });
-  const svc = createAdminService(store);
+  const svc = memoryAdmin(store);
   const u1 = svc.resolveActor("U1@default-org");
   const u2 = svc.resolveActor("U2@default-org");
   assert.ok(u1 && u2);

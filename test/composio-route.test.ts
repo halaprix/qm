@@ -13,6 +13,7 @@ import { createAclStore } from "../src/acl/acl-store.ts";
 import { scopeId } from "../src/types.ts";
 import { orgId } from "../src/config.ts";
 import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
+import { memoryPrincipalLinks } from "./support/principal-links.ts";
 
 function fixture() {
   const keychain = createKeychain({
@@ -417,10 +418,9 @@ test("connections require credential access and fail visibly on upstream errors"
 test("Slack connection links verified workspace identity to the web owner and persists status", async () => {
   const f = fixture();
   await f.own();
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { createDirectoryStore } = await import("../src/directory/directory-store.ts");
   const { installPrincipalLinks, canonicalPerson } = await import("../src/directory/person.ts");
-  f.deps.principalLinks = createPrincipalLinkService();
+  f.deps.principalLinks = memoryPrincipalLinks();
   installPrincipalLinks(f.deps.principalLinks);
   f.deps.slackAccounts = createMemoryMap();
   f.deps.signingSecret = "qa-slack-link-secret";
@@ -461,7 +461,6 @@ test("Slack connection links verified workspace identity to the web owner and pe
 });
 
 test("Slack link rejects changed browser accounts, wrong owner, bots, other workspaces and inactive connections", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { createDirectoryStore } = await import("../src/directory/directory-store.ts");
   const { mintSignedPayload } = await import("../src/auth/signed-token.ts");
   for (const scenario of [
@@ -479,7 +478,7 @@ test("Slack link rejects changed browser accounts, wrong owner, bots, other work
     await f.own();
     await f.own("bob");
     f.deps.signingSecret = "slack-test";
-    f.deps.principalLinks = createPrincipalLinkService();
+    f.deps.principalLinks = memoryPrincipalLinks();
     f.deps.slackAccounts = createMemoryMap();
     f.deps.directory = createDirectoryStore();
     await f.deps.directory.replace([
@@ -812,12 +811,54 @@ test("expired callback returns are discarded after successful browser verificati
   assert.equal(await f.deps.composioReturns!.get(key), null);
 });
 
+test("Slack connection refuses to link a Slack identity that holds its own admin grant", async () => {
+  const f = fixture();
+  await f.own();
+  const { createDirectoryStore } = await import("../src/directory/directory-store.ts");
+  const { installPrincipalLinks } = await import("../src/directory/person.ts");
+  const { createAdminGrantStore, createMemoryAdminGrantPersistence } =
+    await import("../src/admin/admin-grant-store.ts");
+  const grantStore = createAdminGrantStore(createMemoryAdminGrantPersistence(), {
+    seed: [{ principalId: "work@example.test", scopeId: scopeId("org", orgId()), role: "org_admin" }],
+  });
+  f.deps.principalLinks = memoryPrincipalLinks(undefined, grantStore);
+  installPrincipalLinks(f.deps.principalLinks);
+  f.deps.slackAccounts = createMemoryMap();
+  f.deps.signingSecret = "qa-slack-link-secret";
+  f.deps.directory = createDirectoryStore();
+  await f.deps.directory.replace([
+    { principalId: "work@example.test", slackId: "U123", displayName: "Alice", type: "internal" },
+  ]);
+  f.deps.slackEnvBotToken = "bot-test";
+  f.deps.slackInstallationFetch = (async () => Response.json({ ok: true, team_id: "T123" })) as typeof fetch;
+  try {
+    f.replies.push(
+      { session_id: "trs_test" },
+      { redirect_url: "https://connect.composio.dev/link/lk_test", connected_account_id: "ca_test" },
+    );
+    const started = await f.invoke("/v1/composio/slack/authorize", {});
+    const account = {
+      id: "ca_test",
+      user_id: composioUserId(orgId(), "alice"),
+      toolkit: { slug: "slack" },
+      status: "ACTIVE",
+    };
+    f.replies.push(account, { data: { ok: true, user_id: "U123", team_id: "T123", user: "alice", team: "Acme" } });
+    f.replies.push({ items: [] });
+    const refused = await f.invoke("/v1/composio/slack/complete", { ticket: started.data.ticket });
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await f.deps.principalLinks.list(), []);
+    assert.equal((await grantStore.list()).length, 1);
+  } finally {
+    installPrincipalLinks(null);
+  }
+});
+
 test("linked aliases can execute their existing accounts until the identity link is removed", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { installPrincipalLinks } = await import("../src/directory/person.ts");
   const f = fixture();
   await f.shared();
-  const links = createPrincipalLinkService();
+  const links = memoryPrincipalLinks();
   installPrincipalLinks(links);
   const aliasId = "oidc:alice";
   const aliasUserId = composioUserId(orgId(), aliasId);
@@ -849,11 +890,10 @@ test("linked aliases can execute their existing accounts until the identity link
 });
 
 test("linked account discovery and Slack status preserve historical aliases without exposing other owners", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { installPrincipalLinks } = await import("../src/directory/person.ts");
   const f = fixture();
   await f.shared();
-  const links = createPrincipalLinkService();
+  const links = memoryPrincipalLinks();
   f.deps.principalLinks = links;
   f.deps.slackAccounts = createMemoryMap();
   installPrincipalLinks(links);
@@ -905,11 +945,10 @@ test("linked account discovery and Slack status preserve historical aliases with
 });
 
 test("unlinking an account owner during tool lookup prevents provider execution", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { installPrincipalLinks } = await import("../src/directory/person.ts");
   const f = fixture();
   await f.shared();
-  const links = createPrincipalLinkService();
+  const links = memoryPrincipalLinks();
   installPrincipalLinks(links);
   const aliasId = "oidc:alice";
   try {
@@ -932,11 +971,10 @@ test("unlinking an account owner during tool lookup prevents provider execution"
 });
 
 test("consent and browser verification use the canonical identity when signed in through an alias", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { installPrincipalLinks } = await import("../src/directory/person.ts");
   const f = fixture();
   await f.shared();
-  const links = createPrincipalLinkService();
+  const links = memoryPrincipalLinks();
   installPrincipalLinks(links);
   const aliasId = "oidc:alice";
   const userId = composioUserId(orgId(), "alice");
@@ -962,11 +1000,10 @@ test("consent and browser verification use the canonical identity when signed in
 });
 
 test("linked identities retain provider accounts and Slack status until unlinked", async () => {
-  const { createPrincipalLinkService } = await import("../src/identity/principal-links.ts");
   const { installPrincipalLinks } = await import("../src/directory/person.ts");
   const f = fixture();
   await f.shared();
-  f.deps.principalLinks = createPrincipalLinkService();
+  f.deps.principalLinks = memoryPrincipalLinks();
   f.deps.slackAccounts = createMemoryMap();
   installPrincipalLinks(f.deps.principalLinks);
   const canonical = composioUserId(orgId(), "alice");
