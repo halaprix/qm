@@ -83,7 +83,6 @@ import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces
 import type { DiscordInstallationStore } from "../surfaces/discord-installation.ts";
 
 import type { SlackAccountLink, ComposioReturn } from "./routes/composio.ts";
-import type { DiscordAccountLink } from "./routes/discord-link.ts";
 
 export interface ServerDeps {
   externalSlackPolicies?: ExternalSlackPolicies;
@@ -91,7 +90,6 @@ export interface ServerDeps {
   browserModelGateway?: ModelGatewayTransportConfig;
   resolveBrowserCompanyKeys?: (includeSubscription?: boolean) => Promise<ProviderKeys>;
   slackAccounts?: DurableMap<SlackAccountLink>;
-  discordAccounts?: DurableMap<DiscordAccountLink>;
   composioReturns?: DurableMap<ComposioReturn>;
   composioFetch?: typeof fetch;
   suggestedActivities?: ReturnType<typeof createSuggestedActivityService>;

@@ -2,11 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { afterEach, test, type TestContext } from "node:test";
-import {
-  discordLinkRoutes,
-  DISCORD_LINK_STATE_TTL_MS,
-  type DiscordAccountLink,
-} from "../src/api/routes/discord-link.ts";
+import { discordLinkRoutes, DISCORD_LINK_STATE_TTL_MS } from "../src/api/routes/discord-link.ts";
 import type { ApiCtx } from "../src/api/routes/route.ts";
 import { mintSignedPayload } from "../src/auth/signed-token.ts";
 import { orgId } from "../src/config.ts";
@@ -46,7 +42,6 @@ async function fixture(t: TestContext, opts: FixtureOpts = {}) {
     signingSecret: "test-signing-secret",
     portalUrl: opts.portalUrl ?? "https://agent.example",
     principalLinks: links,
-    discordAccounts: createMemoryMap<DiscordAccountLink>(),
     keychain: {
       listByOwner: async (owner: string) =>
         opts.hasExistingCredentials && owner === `discord:${PROVEN}` ? [{ id: "key-1" }] : [],
@@ -432,13 +427,26 @@ test("status and self-unlink touch only the caller's own link", async (t) => {
     available: true,
     linked: true,
     canUnlink: true,
-    tag: "ana_d",
   });
   assert.equal((await f.call("DELETE", "/v1/discord/link", { p: "bob@acme.com" })).status, 404);
   assert.equal((await f.links.list()).length, 1);
   assert.equal((await f.call("DELETE", "/v1/discord/link", { p: "ana@acme.com" })).status, 200);
   assert.deepEqual(await f.links.list(), []);
   assert.equal((await f.call("GET", "/v1/discord/link", { p: "ana@acme.com" })).body!.linked, false);
+});
+
+test("status shows the Discord directory member's name as the tag", async (t) => {
+  const f = await fixture(t);
+  (f.deps as Record<string, unknown>).directory = {
+    list: async () => [{ principalId: `discord:${PROVEN}`, displayName: "Ana D", type: "internal" }],
+  };
+  await f.call(
+    "POST",
+    "/v1/discord/link/complete",
+    { p: "ana@acme.com" },
+    { code: "good", state: await f.stateFor("ana@acme.com"), nonce: TEST_NONCE },
+  );
+  assert.equal((await f.call("GET", "/v1/discord/link", { p: "ana@acme.com" })).body!.tag, "Ana D");
 });
 
 test("self-unlink when not linked returns 404", async (t) => {
@@ -551,29 +559,6 @@ test("a principal already admin-linked to Discord A cannot self-link Discord B",
   assert.equal((await f.links.list()).length, 1);
 });
 
-test("unlink when an admin link remains returns linked: true", async (t) => {
-  const f = await fixture(t);
-  const state = await f.stateFor("ana@acme.com");
-  const linked = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(linked.status, 200);
-  await f.links.link({
-    principalId: "discord:999999999999999999",
-    canonicalId: "ana@acme.com",
-    evidence: "verified by an administrator",
-    linkedBy: "admin@acme.com",
-  });
-  const del = await f.call("DELETE", "/v1/discord/link", { p: "ana@acme.com" });
-  assert.equal(del.status, 200);
-  assert.equal(del.body?.linked, true);
-  assert.equal((await f.links.list()).length, 1);
-  assert.equal((await f.links.list())[0]!.principalId, "discord:999999999999999999");
-});
-
 test("authorize rejects missing or malformed nonceHash with 400", async (t) => {
   const f = await fixture(t);
   const noBody = await f.call("POST", "/v1/discord/link/authorize", { p: "ana@acme.com" });
@@ -618,20 +603,16 @@ test("complete requires correct nonce matching state nonceHash", async (t) => {
 
 test("two concurrent completes with different Discord ids result in exactly one link and one 409", async (t) => {
   const f = await fixture(t);
-  let getCalls = 0;
+  let arrived = 0;
   let releaseBarrier: () => void = () => {};
   const barrier = new Promise<void>((resolve) => {
     releaseBarrier = resolve;
   });
-  const originalGet = f.deps.discordAccounts.get.bind(f.deps.discordAccounts);
-  f.deps.discordAccounts.get = async (id: string) => {
-    getCalls++;
-    if (getCalls === 1) {
-      await barrier;
-    } else {
-      releaseBarrier();
-    }
-    return originalGet(id);
+  const originalLink = f.links.link.bind(f.links);
+  f.links.link = async (input) => {
+    if (++arrived === 2) releaseBarrier();
+    await barrier;
+    return originalLink(input);
   };
 
   const stateA = await f.stateFor("ana@acme.com");
@@ -655,6 +636,7 @@ test("two concurrent completes with different Discord ids result in exactly one 
   const rejected = resA.status === 409 ? resA : resB;
   assert.equal(rejected.body?.error, "other_account_linked");
   assert.equal((await f.links.list()).length, 1);
+  assert.equal(arrived, 2);
 });
 
 const TOKEN_BODY = { access_token: "user-token", token_type: "Bearer" };
@@ -718,25 +700,6 @@ test("SNOWFLAKE guard: /users/@me returns short id returns 400 and links nothing
   assert.deepEqual(await f.links.list(), []);
 });
 
-test("other_account_linked through self-link record path refuses second Discord id", async (t) => {
-  const f = await fixture(t);
-  await f.deps.discordAccounts.put("ana@acme.com", {
-    discordUserId: "222222222222222222",
-    tag: "ana_prior",
-    linkedAt: Date.now() - 10000,
-  });
-  const state = await f.stateFor("ana@acme.com");
-  const res = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(res.status, 409);
-  assert.equal(res.body?.error, "other_account_linked");
-  assert.deepEqual(await f.links.list(), []);
-});
-
 test("a link with no record created by the caller has canUnlink true and DELETE unlinks it", async (t) => {
   const f = await fixture(t);
   await f.links.link({
@@ -791,9 +754,7 @@ test("same-id double-click concurrent completes leave record intact and allow se
   for (const s of statuses) {
     assert.ok(s === 200 || s === 409);
   }
-  const rec = await f.deps.discordAccounts.get("ana@acme.com");
-  assert.ok(rec);
-  assert.equal(rec.discordUserId, PROVEN);
+  assert.equal((await f.links.list()).length, 1);
   const del = await f.call("DELETE", "/v1/discord/link", { p: "ana@acme.com" });
   assert.equal(del.status, 200);
   assert.equal(del.body?.linked, false);
@@ -825,102 +786,18 @@ test("link rejects after persisting leaves user able to self-unlink", async (t) 
   assert.deepEqual(await f.links.list(), []);
 });
 
-test("complete requires atomic accounts map methods", async (t) => {
+test("a link conflict from the store answers 409 and links nothing", async (t) => {
   const f = await fixture(t);
-  delete (f.deps.discordAccounts as { insertIfAbsent?: unknown }).insertIfAbsent;
-  const state = await f.stateFor("ana@acme.com");
-  const completeRoute = discordLinkRoutes.find(
-    (r) => "method" in r && r.method === "POST" && r.path === "/v1/discord/link/complete",
-  )!;
-  await assert.rejects(
-    async () =>
-      completeRoute.handle({
-        req: {} as unknown as ApiCtx["req"],
-        res: { setHeader: () => {}, writeHead: () => {}, end: () => {} } as unknown as ApiCtx["res"],
-        deps: f.deps,
-        body: { code: "good", state, nonce: TEST_NONCE },
-        actor: { p: "ana@acme.com", exp: 9e12 },
-        capability: null,
-      } as unknown as ApiCtx),
-    /Atomic Discord account updates are required/,
-  );
-
-  const f2 = await fixture(t);
-  delete (f2.deps.discordAccounts as { deleteIf?: unknown }).deleteIf;
-  const state2 = await f2.stateFor("ana@acme.com");
-  await assert.rejects(
-    async () =>
-      completeRoute.handle({
-        req: {} as unknown as ApiCtx["req"],
-        res: { setHeader: () => {}, writeHead: () => {}, end: () => {} } as unknown as ApiCtx["res"],
-        deps: f2.deps,
-        body: { code: "good", state: state2, nonce: TEST_NONCE },
-        actor: { p: "ana@acme.com", exp: 9e12 },
-        capability: null,
-      } as unknown as ApiCtx),
-    /Atomic Discord account updates are required/,
-  );
-});
-
-test("a failed second attempt does not delete the first attempt's record", async (t) => {
-  t.mock.method(Date, "now", () => 1_700_000_000_000);
-  const f = await fixture(t);
-  const stateA = await f.stateFor("ana@acme.com");
-  const first = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: stateA, nonce: TEST_NONCE },
-  );
-  assert.equal(first.status, 200);
-  const firstRecord = await f.deps.discordAccounts.get("ana@acme.com");
-  assert.ok(firstRecord);
-  assert.equal(firstRecord.linkedAt, 1_700_000_000_000);
-
-  await f.links.unlink(`discord:${PROVEN}`);
   f.links.link = async () => {
     throw new PrincipalLinkError(409, "simulated conflict");
   };
-
-  const stateB = await f.stateFor("ana@acme.com");
-  const second = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state: stateB, nonce: TEST_NONCE },
-  );
-  assert.equal(second.status, 409);
-  const remaining = await f.deps.discordAccounts.get("ana@acme.com");
-  assert.ok(remaining);
-  assert.equal(remaining.linkedAt, firstRecord.linkedAt);
-  assert.equal(remaining.discordUserId, PROVEN);
-});
-
-test("rollback removes only this attempt's own record", async (t) => {
-  const f = await fixture(t);
-  let replacedLinkedAt = 0;
-  f.links.link = async () => {
-    const inserted = await f.deps.discordAccounts.get("ana@acme.com");
-    assert.ok(inserted);
-    replacedLinkedAt = inserted.linkedAt + 10_000;
-    await f.deps.discordAccounts.put("ana@acme.com", {
-      discordUserId: PROVEN,
-      tag: "ana_concurrent",
-      linkedAt: replacedLinkedAt,
-    });
-    throw new PrincipalLinkError(409, "simulated link failure");
-  };
-
-  const state = await f.stateFor("ana@acme.com");
   const res = await f.call(
     "POST",
     "/v1/discord/link/complete",
     { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
+    { code: "good", state: await f.stateFor("ana@acme.com"), nonce: TEST_NONCE },
   );
   assert.equal(res.status, 409);
-  const remaining = await f.deps.discordAccounts.get("ana@acme.com");
-  assert.ok(remaining);
-  assert.equal(remaining.tag, "ana_concurrent");
-  assert.equal(remaining.linkedAt, replacedLinkedAt);
+  assert.equal(res.body?.error, "already_linked");
+  assert.deepEqual(await f.links.list(), []);
 });

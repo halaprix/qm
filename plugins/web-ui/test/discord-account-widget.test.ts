@@ -190,11 +190,49 @@ test("a self-linked user can disconnect; an admin link shows no Disconnect", asy
   }
 });
 
-test("unavailable status shows linking not set up", async () => {
-  const m = await mount({ status: { available: false, linked: false, canUnlink: false } });
+test("unavailable and unlinked renders nothing", async () => {
+  const m = await mount({
+    status: { available: false, linked: false, canUnlink: false },
+    handler: (url, init) =>
+      url.endsWith("/api/discord/link") && (init?.method ?? "GET") === "GET"
+        ? Response.json({ available: false, linked: false, canUnlink: false })
+        : null,
+  });
   try {
-    await m.until(() => /isn't set up/.test(m.el.textContent ?? ""));
-    assert.equal(m.el.querySelector("button"), null);
+    await m.until(() => m.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(m.el.querySelector("section"), null);
+    assert.equal((m.el.textContent ?? "").trim(), "");
+  } finally {
+    m.restore();
+  }
+});
+
+test("disconnecting while linking is unavailable leaves nothing rendered", async () => {
+  let disconnected = false;
+  const m = await mount({
+    status: {},
+    handler: (url, init) => {
+      const method = init?.method ?? "GET";
+      if (!url.endsWith("/api/discord/link")) return null;
+      if (method === "DELETE") {
+        disconnected = true;
+        return Response.json({ linked: false });
+      }
+      return Response.json(
+        disconnected
+          ? { available: false, linked: false, canUnlink: false }
+          : { available: false, linked: true, canUnlink: true, tag: "ana_d" },
+      );
+    },
+  });
+  try {
+    await m.until(() => Boolean(m.el.querySelector("button")));
+    (m.el.querySelector("button") as HTMLButtonElement).click();
+    await m.until(() => disconnected);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(m.el.querySelector("section"), null);
+    assert.equal((m.el.textContent ?? "").trim(), "");
   } finally {
     m.restore();
   }

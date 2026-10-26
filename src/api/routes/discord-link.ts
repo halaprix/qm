@@ -5,18 +5,13 @@ import { orgId } from "../../config.ts";
 import { canonicalPerson, foldPrincipalId, personIds, samePerson } from "../../directory/person.ts";
 import { SNOWFLAKE } from "../../util/snowflake.ts";
 import { discordExternalId, discordUserIdOf } from "../../discord/config.ts";
+import { isDiscordMember } from "../../directory/directory-store.ts";
 import { PrincipalLinkError } from "../../identity/principal-links.ts";
 import { DISCORD_API, discordLinkRedirectUri } from "../../surfaces/discord-installation.ts";
 import { scopeId } from "../../types.ts";
 import { sendJson } from "../http.ts";
 import type { ApiCtx, Route } from "./route.ts";
 import { activePrincipal, audit } from "./shared.ts";
-
-export interface DiscordAccountLink {
-  discordUserId: string;
-  tag: string;
-  linkedAt: number;
-}
 
 export const DISCORD_LINK_STATE_TTL_MS = 10 * 60_000;
 const DISCORD_OAUTH_TIMEOUT_MS = 10_000;
@@ -42,41 +37,39 @@ async function linkingPrincipal(ctx: ApiCtx): Promise<string | null> {
 
 async function oauthConfig(ctx: ApiCtx) {
   const install = await ctx.deps.discordInstallation?.get();
-  if (
-    !install?.applicationId ||
-    !install?.oauthClientSecret ||
-    !ctx.deps.signingSecret ||
-    !ctx.deps.portalUrl ||
-    !ctx.deps.discordAccounts
-  )
+  if (!install?.applicationId || !install?.oauthClientSecret || !ctx.deps.signingSecret || !ctx.deps.portalUrl)
     return null;
   return {
     clientId: install.applicationId,
     clientSecret: install.oauthClientSecret,
     redirectUri: discordLinkRedirectUri(ctx.deps.portalUrl),
     signingSecret: ctx.deps.signingSecret,
-    accounts: ctx.deps.discordAccounts,
   };
 }
 
 async function selfLink(ctx: ApiCtx, principal: string) {
-  const record = (await ctx.deps.discordAccounts?.get(foldPrincipalId(principal))) ?? null;
   const links = ctx.deps.principalLinks ? await ctx.deps.principalLinks.list() : [];
-  const discordAliases = personIds(principal).filter((id) => discordUserIdOf(id) !== null);
-
-  const linkFor = (alias: string) => links.find((l) => foldPrincipalId(l.principalId) === foldPrincipalId(alias));
-  const matches = discordAliases.flatMap((alias) => {
-    const link = linkFor(alias);
+  const matches = personIds(principal).flatMap((alias) => {
+    if (discordUserIdOf(alias) === null) return [];
+    const link = links.find((l) => foldPrincipalId(l.principalId) === foldPrincipalId(alias));
     return link ? [{ link, alias }] : [];
   });
-  let target = matches.find((m) => ownedBy(m.link, principal)) ?? matches[0];
-  if (!target && record) {
-    const alias = discordExternalId(record.discordUserId);
-    const link = linkFor(alias);
-    if (link) target = { link, alias };
-  }
+  const target = matches.find((m) => ownedBy(m.link, principal)) ?? matches[0];
+  return { link: target?.link ?? null, alias: target?.alias ?? null };
+}
 
-  return { record, link: target?.link ?? null, alias: target?.alias ?? null };
+function hasOtherDiscordLink(principal: string, discordUserId: string): boolean {
+  return personIds(principal).some((id) => {
+    const did = discordUserIdOf(id);
+    return did !== null && did !== discordUserId;
+  });
+}
+
+function otherAccountLinked(ctx: ApiCtx): void {
+  return sendJson(ctx.res, 409, {
+    error: "other_account_linked",
+    message: "Disconnect your current Discord account first.",
+  });
 }
 
 function invalidLink(ctx: ApiCtx): void {
@@ -94,12 +87,17 @@ async function status(ctx: ApiCtx): Promise<void> {
   const principal = await linkingPrincipal(ctx);
   if (!principal) return;
   const cfg = await oauthConfig(ctx);
-  const { record, link } = await selfLink(ctx, principal);
+  const { link, alias } = await selfLink(ctx, principal);
+  const member = alias
+    ? (await ctx.deps.directory?.list())?.find(
+        (m) => isDiscordMember(m) && foldPrincipalId(m.principalId) === foldPrincipalId(alias),
+      )
+    : undefined;
   return sendJson(ctx.res, 200, {
     available: cfg !== null,
     linked: personIds(principal).some((id) => discordUserIdOf(id) !== null),
     canUnlink: ownedBy(link, principal),
-    ...(record ? { tag: record.tag } : {}),
+    ...(member ? { tag: member.displayName } : {}),
   });
 }
 
@@ -254,58 +252,21 @@ async function complete(ctx: ApiCtx): Promise<void> {
   }
   const user = proven.user;
   const alias = discordExternalId(user.id);
-  const key = foldPrincipalId(principal);
   const existing = canonicalPerson(alias);
   if (existing !== alias && !samePerson(existing, principal))
     return sendJson(ctx.res, 409, {
       error: "already_linked",
       message: "This Discord account is connected to another QM account. Ask your administrator for help.",
     });
-  const hasOtherDiscordLink = personIds(principal).some((id) => {
-    const did = discordUserIdOf(id);
-    return did !== null && did !== user.id;
-  });
-  if (hasOtherDiscordLink)
-    return sendJson(ctx.res, 409, {
-      error: "other_account_linked",
-      message: "Disconnect your current Discord account first.",
-    });
-  const record: DiscordAccountLink = { discordUserId: user.id, tag: user.tag, linkedAt: Date.now() };
-  const current = await cfg.accounts.get(key);
-  if (current && current.discordUserId !== user.id)
-    return sendJson(ctx.res, 409, {
-      error: "other_account_linked",
-      message: "Disconnect your current Discord account first.",
-    });
-
-  if (!cfg.accounts.insertIfAbsent || !cfg.accounts.deleteIf)
-    throw new Error("Atomic Discord account updates are required");
-  const deleteIf = cfg.accounts.deleteIf;
-
-  const newlyClaimed = await cfg.accounts.insertIfAbsent(key, record);
-  if (!newlyClaimed) {
-    const existingRecord = await cfg.accounts.get(key);
-    if (existingRecord && existingRecord.discordUserId !== user.id)
-      return sendJson(ctx.res, 409, {
-        error: "other_account_linked",
-        message: "Disconnect your current Discord account first.",
-      });
-  }
-
-  const rollbackClaim = async () => {
-    if (!newlyClaimed) return;
-    await deleteIf(key, (r) => r.linkedAt === record.linkedAt && r.discordUserId === record.discordUserId);
-  };
+  if (hasOtherDiscordLink(principal, user.id)) return otherAccountLinked(ctx);
 
   if (existing === alias) {
     const credentials = (await ctx.deps.keychain?.listByOwner(alias)) ?? [];
-    if (credentials.length) {
-      await rollbackClaim();
+    if (credentials.length)
       return sendJson(ctx.res, 409, {
         error: "established_account",
         message: "This Discord identity already has saved credentials. Ask your administrator to combine the accounts.",
       });
-    }
     try {
       await ctx.deps.principalLinks.link({
         principalId: alias,
@@ -314,9 +275,10 @@ async function complete(ctx: ApiCtx): Promise<void> {
         linkedBy: principal,
       });
     } catch (err) {
-      await rollbackClaim();
-      if (err instanceof PrincipalLinkError)
+      if (err instanceof PrincipalLinkError) {
+        if (hasOtherDiscordLink(principal, user.id)) return otherAccountLinked(ctx);
         return sendJson(ctx.res, 409, { error: "already_linked", message: "Ask your administrator for help." });
+      }
       throw err;
     }
     audit(ctx.deps, {
@@ -326,7 +288,6 @@ async function complete(ctx: ApiCtx): Promise<void> {
       scopeLabel: scopeId("org", orgId()),
     });
   }
-  await cfg.accounts.put(key, record);
   await ctx.deps.identity?.refresh(true);
   return sendJson(ctx.res, 200, { linked: true, tag: user.tag });
 }
@@ -334,14 +295,9 @@ async function complete(ctx: ApiCtx): Promise<void> {
 async function unlink(ctx: ApiCtx): Promise<void> {
   const principal = await linkingPrincipal(ctx);
   if (!principal) return;
-  if (!ctx.deps.principalLinks || !ctx.deps.discordAccounts) return sendJson(ctx.res, 404, { error: "not_linked" });
-  const key = foldPrincipalId(principal);
-  const { record, link, alias } = await selfLink(ctx, principal);
+  if (!ctx.deps.principalLinks) return sendJson(ctx.res, 404, { error: "not_linked" });
+  const { link, alias } = await selfLink(ctx, principal);
   const linked = personIds(principal).some((id) => discordUserIdOf(id) !== null);
-  if (record && !link) {
-    await ctx.deps.discordAccounts.delete(key);
-    return sendJson(ctx.res, 200, { linked });
-  }
   if (!ownedBy(link, principal)) {
     if (!linked) return sendJson(ctx.res, 404, { error: "not_linked" });
     return sendJson(ctx.res, 409, {
@@ -351,9 +307,6 @@ async function unlink(ctx: ApiCtx): Promise<void> {
   }
   const targetAlias = alias ?? link!.principalId;
   await ctx.deps.principalLinks.unlink(targetAlias);
-  if (record) {
-    await ctx.deps.discordAccounts.delete(key);
-  }
   await ctx.deps.identity?.refresh(true);
   audit(ctx.deps, {
     principalId: principal,

@@ -55,19 +55,13 @@ describe("discord core client identity links", () => {
       linkedBy: "admin",
     });
     await links.link({
-      principalId: discordExternalId("discord-2"),
-      canonicalId: "member@example.test",
-      evidence: "admin link 2",
-      linkedBy: "admin",
-    });
-    await links.link({
       principalId: "slack:U12345",
       canonicalId: "member@example.test",
       evidence: "admin link slack",
       linkedBy: "admin",
     });
 
-    assert.deepEqual(client.discordUserIdsFor("member@example.test"), ["discord-1", "discord-2"]);
+    assert.deepEqual(client.discordUserIdsFor("member@example.test"), ["discord-1"]);
     assert.deepEqual(client.discordUserIdsFor("other@example.test"), []);
     assert.deepEqual(client.discordUserIdsFor("discord:111"), ["111"]);
   });

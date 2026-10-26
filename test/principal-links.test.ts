@@ -53,6 +53,27 @@ describe("principal link service: one person, several sign-ins", () => {
     assert.equal(await links.unlink(OIDC), null);
   });
 
+  it("a person holds at most one discord alias, even under a race", async () => {
+    const links = createPrincipalLinkService();
+    const link = (principalId: string) =>
+      links.link({ principalId, canonicalId: EMAIL, evidence: EVIDENCE, linkedBy: "a" });
+    const settled = await Promise.allSettled([link("discord:1"), link("discord:2")]);
+    assert.deepEqual(settled.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+    assert.equal((await links.list()).length, 1);
+    await link(OIDC);
+    assert.equal((await links.list()).length, 2);
+  });
+
+  it("a person whose canonical id is a discord id cannot take a second discord alias", async () => {
+    const links = createPrincipalLinkService();
+    await links.link({ principalId: OIDC, canonicalId: "discord:1", evidence: EVIDENCE, linkedBy: "a" });
+    await assert.rejects(
+      links.link({ principalId: "discord:2", canonicalId: "discord:1", evidence: EVIDENCE, linkedBy: "a" }),
+      (e: unknown) => e instanceof PrincipalLinkError && e.status === 409,
+    );
+    assert.equal((await links.list()).length, 1);
+  });
+
   it("refuses self-links, chains, reversed links, missing evidence, and conflicting re-links", async () => {
     const links = createPrincipalLinkService();
     const reject = async (input: Parameters<typeof links.link>[0], status: number, re: RegExp) => {
@@ -335,6 +356,17 @@ describe("linked sign-ins across the HTTP surface", () => {
       admin,
     );
     assert.equal(linked.status, 200);
+    const second = await signed(
+      "POST",
+      "/v1/admin/principal-links",
+      JSON.stringify({ principalId: "discord:78", canonicalId: "casey@acme.test", evidence: EVIDENCE }),
+      admin,
+    );
+    assert.equal(second.status, 409, "one person never holds two Discord accounts");
+    assert.deepEqual(
+      (await built.principalLinks.list()).filter((l) => l.principalId.startsWith("discord:")).map((l) => l.principalId),
+      ["discord:77"],
+    );
     await built.principalLinks.unlink("discord:77");
     await built.app.upsertDiscordDirectory([]);
   });

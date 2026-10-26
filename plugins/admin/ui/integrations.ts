@@ -361,7 +361,7 @@ cards["card-slack-installation"] = () => {
         >
           I have both tokens
         </button>
-        <div class=${s.editor ? "" : "hidden"} id="slack-token-editor">
+        <div class=${classMap({ "token-editor": true, hidden: !s.editor })} id="slack-token-editor">
           <label style="display: block; margin-bottom: 8px"
             >Bot User OAuth Token
             <input
@@ -420,9 +420,12 @@ function discordDescription(d: Record<string, any>): string {
 cards["card-discord-installation"] = () => {
   const s = discordInstallation,
     d = s.data;
+  const LABEL = "display: block; margin-bottom: 8px";
   const field = (id: string, label: string, key: "guildIds" | "internalRoleIds") =>
-    html`<label for=${id}>${label}</label>
-      <input id=${id} .value=${s[key]} @input=${(e: Event) => (s[key] = (e.target as HTMLInputElement).value)} />`;
+    html`<label style=${LABEL}
+      >${label}
+      <input id=${id} .value=${s[key]} @input=${(e: Event) => (s[key] = (e.target as HTMLInputElement).value)}
+    /></label>`;
   return html`<section class="card" id="card-discord-installation">
     <div class="head"><h2>${discordMark(20)} Discord</h2></div>
     <div class="body">
@@ -452,48 +455,51 @@ cards["card-discord-installation"] = () => {
           <strong>Message Content</strong> privileged intents, invite the bot with the <code>bot</code> scope only, and
           add the redirect URI below under OAuth2 → Redirects.
         </p>
-        <label for="discord-application-id">Application ID</label>
-        <input id="discord-application-id" readonly .value=${d.applicationId ?? ""} />
-        <label for="discord-bot-token">Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}</label>
-        <input
-          id="discord-bot-token"
-          type="password"
-          autocomplete="new-password"
-          .value=${live(s.botToken)}
-          @input=${(e: Event) => (s.botToken = (e.target as HTMLInputElement).value)}
-        />
-        <label for="discord-oauth-client-secret"
-          >OAuth2 client secret (for "Connect Discord" in user settings)
-          ${d.oauthConfigured ? "(set; leave empty to keep)" : ""}</label
-        >
-        <input
-          id="discord-oauth-client-secret"
-          type="password"
-          autocomplete="new-password"
-          .value=${live(s.oauthClientSecret)}
-          @input=${(e: Event) => (s.oauthClientSecret = (e.target as HTMLInputElement).value)}
-        />
-        <label for="discord-redirect-uri"
-          >OAuth2 redirect URI (add it under OAuth2 → Redirects in the Developer Portal)</label
-        >
-        <input id="discord-redirect-uri" readonly .value=${d.redirectUri ?? ""} />
-        <button
-          type="button"
-          id="discord-copy-redirect-uri"
-          @click=${async (e: MouseEvent) => {
-            const btn = e.currentTarget as HTMLButtonElement | null;
-            const ok = await copyText(d.redirectUri ?? "");
-            if (btn) {
-              btn.textContent = ok ? "Copied" : "Copy failed";
-              if (ok) setTimeout(() => (btn.textContent = "Copy redirect URI"), 1200);
-            }
-          }}
-        >
-          Copy redirect URI
-        </button>
-        ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
-        ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
-        <button class="primary" id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>
+        <div class="token-editor">
+          <label style=${LABEL}
+            >Application ID <input id="discord-application-id" readonly .value=${d.applicationId ?? ""}
+          /></label>
+          <label style=${LABEL}
+            >Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}
+            <input
+              id="discord-bot-token"
+              type="password"
+              autocomplete="new-password"
+              .value=${live(s.botToken)}
+              @input=${(e: Event) => (s.botToken = (e.target as HTMLInputElement).value)}
+          /></label>
+          <label style=${LABEL}
+            >OAuth2 client secret (for "Connect Discord" in user settings)
+            ${d.oauthConfigured ? "(set; leave empty to keep)" : ""}
+            <input
+              id="discord-oauth-client-secret"
+              type="password"
+              autocomplete="new-password"
+              .value=${live(s.oauthClientSecret)}
+              @input=${(e: Event) => (s.oauthClientSecret = (e.target as HTMLInputElement).value)}
+          /></label>
+          <label style=${LABEL}
+            >OAuth2 redirect URI (add it under OAuth2 → Redirects in the Developer Portal)
+            <input id="discord-redirect-uri" readonly .value=${d.redirectUri ?? ""}
+          /></label>
+          <button
+            type="button"
+            id="discord-copy-redirect-uri"
+            @click=${async (e: MouseEvent) => {
+              const btn = e.currentTarget as HTMLButtonElement | null;
+              const ok = await copyText(d.redirectUri ?? "");
+              if (btn) {
+                btn.textContent = ok ? "Copied" : "Copy failed";
+                if (ok) setTimeout(() => (btn.textContent = "Copy redirect URI"), 1200);
+              }
+            }}
+          >
+            Copy redirect URI
+          </button>
+          ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
+          ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
+          <button class="primary" id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>
+        </div>
       </details>
       <span class=${"status " + s.tone} role="status" id="st-discord-installation">${s.message}</span>
     </div>

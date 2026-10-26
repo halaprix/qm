@@ -1,5 +1,3 @@
-import { installPrincipalLinks } from "../src/directory/person.ts";
-import { createPrincipalLinkService } from "../src/identity/principal-links.ts";
 import { linkedDiscordUserIds } from "../src/api/discord-core-client.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -393,20 +391,4 @@ test("a clicker who is not the DM recipient refuses as a stale button", async ()
   });
   await h.handler(h.click("111", cardCustomId("cmd", "once", DID)));
   assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
-});
-
-test("with two linked Discord accounts the card belongs to the account it was addressed to", async () => {
-  const links = createPrincipalLinkService();
-  installPrincipalLinks(links);
-  try {
-    for (const id of ["111", "1111", "2222"])
-      await links.link({ principalId: `discord:${id}`, canonicalId: "m@x.test", evidence: "e", linkedBy: "a" });
-    const h = harness({ destination: { commandApprovalId: "A1", target: "discord:2222" } });
-    await h.handler(h.click("1111", cardCustomId("cmd", "session", DID)));
-    assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
-    await h.handler(h.click("2222", cardCustomId("cmd", "session", DID)));
-    assert.ok(h.log.includes("settle:Approving `rm`…"));
-  } finally {
-    installPrincipalLinks(createPrincipalLinkService());
-  }
 });

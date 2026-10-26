@@ -30,8 +30,10 @@ const ATTEMPT_TTL_MS = 10 * 60_000;
 const RETURN_KEYS = ["code", "state", "error", "error_description"];
 const discordReturn = createReturnCapture((p) => p.has("state") && (p.has("code") || p.has("error")));
 
+const LINK_UNAVAILABLE = "Discord linking isn't set up. Ask an administrator.";
+
 function discordErrorMessage(error?: string, fallback = "Couldn't connect Discord."): string {
-  if (error === "link_unavailable") return "Discord linking isn't set up. Ask an administrator.";
+  if (error === "link_unavailable") return LINK_UNAVAILABLE;
   return fallback;
 }
 
@@ -210,10 +212,11 @@ export class DiscordAccount extends LitElement {
   render() {
     const s = this.status;
     if (!s) return nothing;
+    if (!s.linked && !s.available && this.note !== LINK_UNAVAILABLE) return nothing;
     let body;
     if (s.linked) body = this.renderLinked(s);
     else if (s.available) body = this.renderConnect();
-    else body = html`<p class="slack-account-error">Discord linking isn't set up. Ask an administrator.</p>`;
+    else body = nothing;
     return html`<section class="slack-account" aria-label="Your Discord account">
       ${body} ${this.note ? html`<p class="slack-account-error" role="alert">${this.note}</p>` : nothing}
     </section>`;

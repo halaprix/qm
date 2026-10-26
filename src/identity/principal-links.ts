@@ -1,5 +1,6 @@
 import { createMemoryAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createMemoryMap, type DurableMap } from "../persistence/durable-map.ts";
+import { discordUserIdOf } from "../discord/config.ts";
 import { foldPrincipalId, type PrincipalLinkResolver } from "../directory/person.ts";
 
 export interface PrincipalLink {
@@ -124,6 +125,14 @@ export function createPrincipalLinkService(
             400,
             `${principalId} is the canonical principal of other links; unlink those first`,
           );
+        if (discordUserIdOf(principalId) !== null) {
+          const sibling =
+            discordUserIdOf(canonicalId) !== null
+              ? canonicalId
+              : (byCanonical.get(canonicalKey) ?? []).find((row) => discordUserIdOf(row.principalId) !== null)
+                  ?.principalId;
+          if (sibling) throw new PrincipalLinkError(409, `${canonicalId} is already linked to ${sibling}`);
+        }
         const stored = await store.putIfAbsent(aliasKey, {
           principalId,
           canonicalId,

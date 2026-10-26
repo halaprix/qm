@@ -84,7 +84,6 @@ import {
   type PrincipalLinkService,
 } from "./identity/principal-links.ts";
 import type { SlackAccountLink, ComposioReturn } from "./api/routes/composio.ts";
-import type { DiscordAccountLink } from "./api/routes/discord-link.ts";
 import { installPrincipalLinks } from "./directory/person.ts";
 import type { ExternalMember } from "./identity/external-members.ts";
 import { resendMailer } from "../plugins/chassis/src/resend.ts";
@@ -527,7 +526,6 @@ export interface BuiltApp {
   identity: IdentityService;
   principalLinks: PrincipalLinkService;
   slackAccounts: DurableMap<SlackAccountLink>;
-  discordAccounts: DurableMap<DiscordAccountLink>;
   composioReturns: DurableMap<ComposioReturn>;
   keychain?: Keychain;
   serviceCreds: ServiceCredentialStore;
@@ -3077,7 +3075,6 @@ export function buildApp(
     identity,
     principalLinks,
     slackAccounts: artifactMap<SlackAccountLink>("slack_accounts"),
-    discordAccounts: artifactMap<DiscordAccountLink>("discord_accounts"),
     composioReturns,
     workspace,
     memory,
@@ -3223,7 +3220,6 @@ export function serverDeps(
     identity: built.identity,
     principalLinks: built.principalLinks,
     slackAccounts: built.slackAccounts,
-    discordAccounts: built.discordAccounts,
     composioReturns: built.composioReturns,
     ...(built.keychain ? { keychain: built.keychain } : {}),
     serviceCreds: built.serviceCreds,
