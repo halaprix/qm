@@ -405,30 +405,33 @@ test("pg config store: settings written on one core reach another core through r
   assert.equal(b.getApprovedHarnesses(), null);
 });
 
-test("pg config store: a private-thread link and a link conflict persist across cores", { skip }, async () => {
-  const f = createPostgresMapFactory(URL!);
-  const parent = scopeId("channel", "1300000000000000010");
-  const thread = scopeId("channel", "1300000000000000077");
-  const conflicted = scopeId("channel", "1300000000000000078");
-  const m = maps(f);
-  const a = createMemoryConfigStore("default-org", m);
-  const b = createMemoryConfigStore("default-org", maps(f));
-  await a.hydrate?.();
-  await b.hydrate?.();
+test(
+  "pg config store: a private-thread link persists across cores and a thread with its own config is refused",
+  { skip },
+  async () => {
+    const f = createPostgresMapFactory(URL!);
+    const parent = scopeId("channel", "1300000000000000010");
+    const thread = scopeId("channel", "1300000000000000077");
+    const conflicted = scopeId("channel", "1300000000000000078");
+    const m = maps(f);
+    const a = createMemoryConfigStore("default-org", m);
+    const b = createMemoryConfigStore("default-org", maps(f));
+    await a.hydrate?.();
+    await b.hydrate?.();
 
-  await a.setSecurityPosture(parent, "strict");
-  await a.linkConfigParent(thread, parent);
-  assert.deepEqual(await m.configParents.get(thread), { scopeId: thread, parent });
-  assert.equal(await b.getSecurityPostureDurable(thread), "strict");
-  await assert.rejects(b.setSecurityPosture(thread, "auto"), ConfigInheritedError);
+    await a.setSecurityPosture(parent, "strict");
+    await a.linkConfigParent(thread, parent);
+    assert.deepEqual(await m.configParents.get(thread), { scopeId: thread, parent });
+    assert.equal(await b.getSecurityPostureDurable(thread), "strict");
+    await assert.rejects(b.setSecurityPosture(thread, "auto"), ConfigInheritedError);
 
-  await a.setEgress(conflicted, { allowedHosts: [], deniedHosts: ["thread-bad.test"] });
-  await a.linkConfigParent(conflicted, parent);
-  assert.deepEqual(await m.configParents.get(conflicted), { scopeId: conflicted, parent, conflict: true });
-  await assert.rejects(b.refreshSecurity([conflicted]), ConfigConflictError);
+    await a.setEgress(conflicted, { allowedHosts: [], deniedHosts: ["thread-bad.test"] });
+    await assert.rejects(a.linkConfigParent(conflicted, parent), ConfigConflictError);
+    assert.equal(await m.configParents.get(conflicted), null);
 
-  await m.egressPolicies.delete(conflicted);
-  await b.linkConfigParent(conflicted, parent);
-  assert.deepEqual(await m.configParents.get(conflicted), { scopeId: conflicted, parent });
-  assert.equal(await a.getSecurityPostureDurable(conflicted), "strict");
-});
+    await m.egressPolicies.delete(conflicted);
+    await b.linkConfigParent(conflicted, parent);
+    assert.deepEqual(await m.configParents.get(conflicted), { scopeId: conflicted, parent });
+    assert.equal(await a.getSecurityPostureDurable(conflicted), "strict");
+  },
+);

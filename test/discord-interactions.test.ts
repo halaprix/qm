@@ -365,9 +365,9 @@ test("a failing final edit never throws into the click handler", async () => {
   );
 });
 
-test("a keychain copy click by the recipient decides the ask", async () => {
+test("a keychain click by the recipient decides the ask", async () => {
   const h = harness({
-    destination: { keychainAskId: "k1", copyOf: "orig-1" },
+    destination: { keychainAskId: "k1" },
     keychainView: {
       ask: { id: "k1", status: "approved", requesterScopeId: "s" },
       service: "github",
@@ -377,14 +377,6 @@ test("a keychain copy click by the recipient decides the ask", async () => {
   });
   await h.handler(h.click("111", cardCustomId("key", "once", DID)));
   assert.equal(h.log.at(-1), "settle:Allowed once.");
-});
-
-test("a deploy-access copy refuses as a stale button even with a forged dep custom id", async () => {
-  const h = harness({
-    destination: { deploymentAccess: { deploymentId: "d", requesterId: "bob@acme.com" }, copyOf: "orig-1" },
-  });
-  await h.handler(h.click("111", cardCustomId("dep", "approve", DID)));
-  assert.equal(h.log.at(-1), "refuse:This button is no longer valid.");
 });
 
 test("a delivery whose type is not discord-dm refuses as a stale button", async () => {

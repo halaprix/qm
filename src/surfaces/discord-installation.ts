@@ -18,7 +18,6 @@ export class DiscordInstallationError extends Error {
 }
 
 export interface DiscordInstallationSettings {
-  allowUserIds: string[];
   guildIds: string[];
   internalRoleIds: string[];
 }
@@ -79,7 +78,6 @@ export interface DiscordInstallationStore {
 }
 
 const EMPTY_SETTINGS: DiscordInstallationSettings = {
-  allowUserIds: [],
   guildIds: [],
   internalRoleIds: [],
 };
@@ -113,7 +111,6 @@ export function parseDiscordSettings(
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   const botToken = secretFrom(b.botToken);
   const oauthClientSecret = secretFrom(b.oauthClientSecret);
-  const allowUserIds = idsFrom(b.allowUserIds, "allowUserIds");
   const guildIds = idsFrom(b.guildIds, "guildIds");
   const internalRoleIds = idsFrom(b.internalRoleIds, "internalRoleIds");
   const guildSet = new Set(guildIds);
@@ -121,7 +118,6 @@ export function parseDiscordSettings(
     throw new DiscordInstallationError(400, "internalRoleIds cannot contain guild ids");
   }
   return {
-    allowUserIds,
     guildIds,
     internalRoleIds,
     ...(botToken ? { botToken } : {}),
@@ -194,7 +190,6 @@ export function createDiscordInstallationStore(
       botTag: r.botTag,
       applicationId: r.applicationId,
       oauthConfigured: r.oauthClientSecretEnc !== null,
-      allowUserIds: r.allowUserIds,
       guildIds: r.guildIds,
       internalRoleIds: r.internalRoleIds,
       updatedAt: r.updatedAt,
@@ -211,7 +206,6 @@ export function createDiscordInstallationStore(
         botUserId: r.botUserId,
         botTag: r.botTag,
         applicationId: r.applicationId,
-        allowUserIds: r.allowUserIds,
         guildIds: r.guildIds,
         internalRoleIds: r.internalRoleIds,
         version: r.version,
@@ -243,7 +237,6 @@ export function createDiscordInstallationStore(
           botUserId,
           botTag,
           applicationId,
-          allowUserIds: input.allowUserIds,
           guildIds: input.guildIds,
           internalRoleIds: input.internalRoleIds,
           version: `${updatedAt}:${randomUUID()}`,
@@ -267,7 +260,6 @@ export function createDiscordInstallationStore(
 export function discordPluginConfigFromInstallation(i: DiscordInstallation): DiscordPluginConfig {
   return {
     botToken: i.botToken,
-    allowUserIds: new Set(i.allowUserIds),
     guildIds: new Set(i.guildIds),
     internalRoleIds: new Set(i.internalRoleIds),
   };

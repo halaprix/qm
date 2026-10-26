@@ -4,7 +4,7 @@ import { classifyMember, mergeMemberships } from "../src/discord/members.ts";
 import { createDiscordCoreClient } from "../src/api/discord-core-client.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 
-const cfg = { allowUserIds: new Set(["1"]), internalRoleIds: new Set(["r-staff"]) };
+const cfg = { internalRoleIds: new Set(["r-staff"]) };
 const notLinked = async () => false;
 const member = (userId: string, roleIds: string[] = [], isBot = false) => ({
   userId,
@@ -17,8 +17,9 @@ const defaultCore = async () => ({ notInternal: false });
 
 afterEach(() => installPrincipalLinks(null));
 
-test("allowlisted, internal-role and linked-internal members are internal", async () => {
-  assert.equal((await classifyMember(member("1"), cfg, notLinked, defaultCore)).isExternalGuest, undefined);
+test("internal-role and linked-internal members are internal; a user id in an allow list is not enough", async () => {
+  const withAllowList = { ...cfg, allowUserIds: new Set(["1"]) } as never;
+  assert.equal((await classifyMember(member("1"), withAllowList, notLinked, defaultCore)).isExternalGuest, true);
   assert.equal(
     (await classifyMember(member("2", ["r-staff"]), cfg, notLinked, defaultCore)).isExternalGuest,
     undefined,

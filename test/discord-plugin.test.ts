@@ -15,7 +15,6 @@ import type { DiscordCoreClient } from "../src/api/discord-core-client.ts";
 
 const cfg: DiscordPluginConfig = {
   botToken: "fake-token",
-  allowUserIds: new Set(["111"]),
   guildIds: new Set(),
   internalRoleIds: new Set(),
 };
@@ -40,7 +39,7 @@ function fakeCore(): DiscordCoreClient {
     submitTurn: async () => ({ status: "queued", runId: "r1" }),
     waitRun: async () => ({ status: "ok", reply: "done" }),
     streamSnapshot: () => null,
-    linkedInternal: async () => false,
+    linkedInternal: async (id: string) => id === "111",
     coreStatus: async () => ({ notInternal: false }),
     discordUserIdsFor: linkedDiscordUserIds,
     reportRunEditRef: async () => {},
@@ -549,7 +548,7 @@ function guildHarness(opts: {
   threadOwnerId?: string;
   threadStarter?: HistoryRow;
   threadHistoryFails?: boolean;
-  allowUserIds?: string[];
+  internalUserIds?: string[];
   watermarks?: Array<{ container: string; lastTs: string }>;
   backfillRows?: Array<Record<string, unknown>>;
   threadMessages?: Map<string, unknown>;
@@ -557,6 +556,7 @@ function guildHarness(opts: {
   directoryGate?: () => Promise<void> | undefined;
   probeGate?: Promise<void>;
   activeThreads?: Array<{ id: string; type: ChannelType; parentId: string }>;
+  linkRefuses?: string[];
 }) {
   const gapNotes: Array<{ channelId: string; note: string }> = [];
   const threadDeletes: string[] = [];
@@ -700,9 +700,11 @@ function guildHarness(opts: {
       if (opts.submitResult) return await opts.submitResult(b);
       return { status: "silent" };
     },
-    linkPrivateThread: async (threadId: string, parentId: string) =>
-      void links.push({ threadId, parentId, submittedBefore: submitted.length }),
-    linkedInternal: async () => false,
+    linkPrivateThread: async (threadId: string, parentId: string) => {
+      if (opts.linkRefuses?.includes(threadId)) throw new Error(`thread ${threadId} has its own config`);
+      links.push({ threadId, parentId, submittedBefore: submitted.length });
+    },
+    linkedInternal: async (id: string) => (opts.internalUserIds ?? []).includes(id),
     coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async (events: unknown[]) => {
       ingested.push(events);
@@ -759,7 +761,6 @@ function guildHarness(opts: {
   const plugin = createDiscordPlugin(
     {
       botToken: "t",
-      allowUserIds: new Set(opts.allowUserIds ?? []),
       guildIds: new Set(extraGuild ? ["900", extraGuild.id] : ["900"]),
       internalRoleIds: new Set(["staff"]),
     },
@@ -895,6 +896,22 @@ test("on ready every active private thread in a configured guild is linked to it
   await h.settle();
   await h.plugin.stop();
   assert.deepEqual(h.links, [{ threadId: "t5", parentId: "c1", submittedBefore: 0 }]);
+});
+
+test("a refused private thread link does not stop the startup scan from linking later threads", async () => {
+  const h = guildHarness({
+    authorRoles: ["staff"],
+    viewers: [{ id: "111", roles: ["staff"] }],
+    linkRefuses: ["t5"],
+    activeThreads: [
+      { id: "t5", type: ChannelType.PrivateThread, parentId: "c1" },
+      { id: "t7", type: ChannelType.PrivateThread, parentId: "c1" },
+    ],
+  });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.deepEqual(h.links, [{ threadId: "t7", parentId: "c1", submittedBefore: 0 }]);
 });
 
 test("a private thread is its own scope whose audience is its members, and its scope is not entitled from the parent or a public sibling thread", async () => {
@@ -1356,7 +1373,7 @@ test("a member removed from the guild between hydrations is dropped from the cac
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
-    { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
+    { botToken: "t", guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
     { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
@@ -1451,7 +1468,7 @@ test("a member added to the cache while the fetch is pending is still cached aft
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
-    { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
+    { botToken: "t", guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
     { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
@@ -1530,7 +1547,7 @@ test("a rejected fetch prunes nothing", async () => {
     guilds: { cache: new Map([["900", guild]]), fetch: async () => guild },
   });
   const plugin = createDiscordPlugin(
-    { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
+    { botToken: "t", guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
     { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
@@ -1545,7 +1562,6 @@ test("a run in flight from a stopping connection is not delivered by the next co
   const acked: string[] = [];
   const dmCfg: DiscordPluginConfig = {
     botToken: "t",
-    allowUserIds: new Set(["111"]),
     guildIds: new Set(),
     internalRoleIds: new Set(),
   };
@@ -1560,7 +1576,7 @@ test("a run in flight from a stopping connection is not delivered by the next co
     submitTurn: async () => ({ status: "queued", runId: "r1" }),
     waitRun: () => waitRunPromise,
     reportRunEditRef: async () => {},
-    linkedInternal: async () => false,
+    linkedInternal: async (id: string) => id === "111",
     coreStatus: async () => ({ notInternal: false }),
     ingestSurfaceEvents: async () => {},
     onDeliveryEnqueued: () => () => {},
@@ -1758,7 +1774,7 @@ function continuationHarness(opts: { members: Array<{ id: string; roles: string[
   });
 
   const plugin = createDiscordPlugin(
-    { botToken: "t", allowUserIds: new Set(), guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
+    { botToken: "t", guildIds: new Set(["900"]), internalRoleIds: new Set(["staff"]) },
     core,
     { clientFactory: () => client as never, drainTimeoutMs: 1000 },
   );
@@ -2207,11 +2223,11 @@ test("a DM turn sends the gateway context and no history", async () => {
   assert.equal(h.fetchCalls.length, 0);
 });
 
-test("an allow-listed bot mention opens a bot-actor turn even when the bot is not in the member cache", async () => {
+test("a linked-internal bot mention opens a bot-actor turn even when the bot is not in the member cache", async () => {
   const h = guildHarness({
     authorRoles: [],
     viewers: [{ id: "111", roles: ["staff"] }],
-    allowUserIds: ["555"],
+    internalUserIds: ["555"],
   });
   await h.plugin.start();
   await h.settle();
@@ -2230,7 +2246,7 @@ test("an allow-listed bot mention opens a bot-actor turn even when the bot is no
   assert.equal(body.text, "@qm deploy failed");
 });
 
-test("a bot that is not allow-listed is an outside guest and submits nothing even when it mentions the bot", async () => {
+test("a bot that is not linked-internal is an outside guest and submits nothing even when it mentions the bot", async () => {
   const h = guildHarness({ authorRoles: [], viewers: [{ id: "111", roles: ["staff"] }] });
   await h.plugin.start();
   await h.settle();
@@ -2675,11 +2691,11 @@ test("a root with a thread the bot never spoke in starts no turn", async () => {
   assert.deepEqual(h.submitted, []);
 });
 
-test("the bot's own reaction starts no turn even when the bot is allow-listed as internal", async () => {
+test("the bot's own reaction starts no turn even when the bot is linked as internal", async () => {
   const h = guildHarness({
     authorRoles: ["staff"],
     viewers: [{ id: "111", roles: ["staff"] }],
-    allowUserIds: ["999"],
+    internalUserIds: ["999"],
   });
   const { reaction } = reactionEvent(h);
   await emitAndSettle(h, "messageReactionAdd", reaction, { ...REACTOR, id: "999", bot: true });
@@ -2755,30 +2771,6 @@ test("a reaction in a DM starts an unprompted dm turn", async () => {
   assert.equal((body.conversation as Record<string, unknown>).kind, "dm");
   assert.equal(body.unprompted, true);
   assert.equal(body.text, REACTION_TEXT);
-});
-
-for (const status of ["silent", "react"] as const) {
-  test(`a thread opened for a reaction is deleted when the turn ends ${status} with nothing to post`, async () => {
-    const h = guildHarness({
-      authorRoles: ["staff"],
-      viewers: [{ id: "111", roles: ["staff"] }],
-      submitResult: async () => (status === "react" ? { status, reactions: ["tada"] } : { status }),
-    });
-    const { reaction } = reactionEvent(h, { channel: h.message.channel });
-    await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
-    assert.deepEqual([h.threads, h.threadDeletes], [["t1"], ["t1"]]);
-  });
-}
-
-test("a thread opened for a reaction stays when the turn has a reply to deliver", async () => {
-  const h = guildHarness({
-    authorRoles: ["staff"],
-    viewers: [{ id: "111", roles: ["staff"] }],
-    submitResult: async () => ({ status: "ok", reply: "hi" }),
-  });
-  const { reaction } = reactionEvent(h, { channel: h.message.channel });
-  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
-  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
 });
 
 test("removing a reaction from a top-level bot message opens no thread and runs no turn", async () => {
@@ -2959,18 +2951,6 @@ test("a backfilled unprompted message in a staked thread is mirrored only and st
   assert.equal(h.submitted.length, 1);
 });
 
-test("a thread opened for a reaction is kept when it already has messages", async () => {
-  const h = guildHarness({
-    authorRoles: ["staff"],
-    viewers: [{ id: "111", roles: ["staff"] }],
-    submitResult: async () => ({ status: "silent" }),
-    threadMessages: new Map([["m1", {}]]),
-  });
-  const { reaction } = reactionEvent(h, { channel: h.message.channel });
-  await emitAndSettle(h, "messageReactionAdd", reaction, REACTOR);
-  assert.deepEqual([h.threads, h.threadDeletes], [["t1"], []]);
-});
-
 test("a thread opened for a reaction is kept once another turn has resolved it, even if that turn ends first", async () => {
   const releases: Array<() => void> = [];
   const h = guildHarness({
@@ -3068,6 +3048,27 @@ const REACTION_THREAD_CASES: Array<{
   threadMessages?: Map<string, unknown>;
   deleted: boolean;
 }> = [
+  {
+    label: "the turn ends silent with nothing to post",
+    submitResult: async () => ({ status: "silent" }),
+    deleted: true,
+  },
+  {
+    label: "the turn ends with only a reaction",
+    submitResult: async () => ({ status: "react", reactions: ["tada"] }),
+    deleted: true,
+  },
+  {
+    label: "the turn has a reply to deliver",
+    submitResult: async () => ({ status: "ok", reply: "hi" }),
+    deleted: false,
+  },
+  {
+    label: "the thread already has messages",
+    submitResult: async () => ({ status: "silent" }),
+    threadMessages: new Map([["m1", {}]]),
+    deleted: false,
+  },
   {
     label: "a thread holding only the starter message counts as empty and is deleted",
     submitResult: async () => ({ status: "silent" }),

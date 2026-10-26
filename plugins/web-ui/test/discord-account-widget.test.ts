@@ -40,7 +40,6 @@ async function mount(opts: { status: Record<string, unknown>; handler?: Handler;
   };
   sessionStorage.removeItem("qm-discord-account");
   history.replaceState(null, "", "http://localhost/");
-  await import("../src/discord-account.ts");
   const el = document.createElement("qm-discord-account") as HTMLElement & {
     user: string;
     navigate: (u: string) => void;
@@ -230,5 +229,47 @@ test("disconnect errors show clear messages", async () => {
     } finally {
       m.restore();
     }
+  }
+});
+
+test("in the desktop app connect hands off to the system browser and starts no authorization", async () => {
+  const opened: string[] = [];
+  (window as unknown as { qmDesktop: unknown }).qmDesktop = {
+    openBrowser: async (url: string) => void opened.push(url),
+  };
+  const m = await mount({ status: { available: true, linked: false, canUnlink: false } });
+  try {
+    await m.until(() => Boolean(m.el.querySelector("button")));
+    (m.el.querySelector("button") as HTMLButtonElement).click();
+    await m.until(() => opened.length > 0);
+    assert.deepEqual(opened, ["/settings"]);
+    assert.equal(
+      m.calls.some((c) => c.url.endsWith("/api/discord/link/authorize")),
+      false,
+    );
+    assert.deepEqual(m.navigated, []);
+  } finally {
+    delete (window as unknown as { qmDesktop?: unknown }).qmDesktop;
+    m.restore();
+  }
+});
+
+test("returning focus to the window refreshes the link status", async () => {
+  let linked = false;
+  const m = await mount({
+    status: { available: true, linked: false, canUnlink: false },
+    handler: (url, init) =>
+      url.endsWith("/api/discord/link") && (init?.method ?? "GET") === "GET" && linked
+        ? Response.json({ available: true, linked: true, canUnlink: true, tag: "ana_d" })
+        : null,
+  });
+  try {
+    await m.until(() => Boolean(m.el.querySelector("button")));
+    linked = true;
+    window.dispatchEvent(new window.Event("focus"));
+    await m.until(() => /Connected as ana_d/.test(m.el.textContent ?? ""));
+    assert.match(m.el.textContent ?? "", /Connected as ana_d/);
+  } finally {
+    m.restore();
   }
 });

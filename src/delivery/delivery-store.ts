@@ -210,9 +210,7 @@ export function createDeliveryStore(opts?: { maxAgeMs?: number }): DeliveryStore
       const limit = Math.max(1, opts?.limit ?? 20);
       return [...deliveries.values()]
         .filter(
-          (d) =>
-            !d.destination.copyOf &&
-            (d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef),
+          (d) => d.provenance?.sourceSessionId === sourceSessionId || d.provenance?.sourceThreadRef === sourceThreadRef,
         )
         .sort((a, b) => a.createdAt - b.createdAt)
         .slice(-limit);

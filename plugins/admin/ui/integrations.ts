@@ -2,6 +2,7 @@ import { choiceGroup, settingStatus, saveFooter } from "./setting-controls.ts";
 import { html, render, nothing } from "lit";
 import { classMap } from "lit/directives/class-map.js";
 import { live } from "lit/directives/live.js";
+import { discordMark } from "../../web-ui/src/discord-mark.ts";
 import { slackMark } from "../../web-ui/src/slack-mark.ts";
 import { repeat } from "lit/directives/repeat.js";
 import {
@@ -298,6 +299,7 @@ cards["card-slack-installation"] = () => {
         </div>
       </div>
       <details
+        class="app-guide"
         id="slack-own-app-guide"
         .open=${s.guide}
         @toggle=${(e: Event) => {
@@ -410,18 +412,24 @@ function discordTitle(d: Record<string, any>): string {
   if (d.configured) return `Connected as ${d.botTag}`;
   return "Not configured";
 }
+function discordDescription(d: Record<string, any>): string {
+  return d.configured
+    ? "People reach QM in the configured servers and by DM, and link their account in user settings."
+    : "Connect a Discord bot so people can reach QM from Discord.";
+}
 cards["card-discord-installation"] = () => {
   const s = discordInstallation,
     d = s.data;
-  const field = (id: string, label: string, key: "allowUserIds" | "guildIds" | "internalRoleIds") =>
+  const field = (id: string, label: string, key: "guildIds" | "internalRoleIds") =>
     html`<label for=${id}>${label}</label>
       <input id=${id} .value=${s[key]} @input=${(e: Event) => (s[key] = (e.target as HTMLInputElement).value)} />`;
   return html`<section class="card" id="card-discord-installation">
-    <div class="head"><h2>Discord</h2></div>
+    <div class="head"><h2>${discordMark(20)} Discord</h2></div>
     <div class="body">
       <div class="slack-connection">
         <div class="slack-connection-info">
           <h3 id="discord-installation-state">${discordTitle(d)}</h3>
+          <p class="hint" id="discord-installation-description">${discordDescription(d)}</p>
         </div>
         <div class="slack-connection-actions">
           <button
@@ -434,11 +442,16 @@ cards["card-discord-installation"] = () => {
           </button>
         </div>
       </div>
-      <details .open=${!d.configured}>
+      <details class="app-guide" id="discord-app-guide" .open=${!d.configured}>
         <summary>
           <span>${d.configured ? "Edit Discord app" : "Set up Discord"}</span>
           <span class="slack-guide-arrow" aria-hidden="true">›</span>
         </summary>
+        <p>
+          In the Developer Portal, turn on the <strong>Server Members</strong> and
+          <strong>Message Content</strong> privileged intents, invite the bot with the <code>bot</code> scope only, and
+          add the redirect URI below under OAuth2 → Redirects.
+        </p>
         <label for="discord-application-id">Application ID</label>
         <input id="discord-application-id" readonly .value=${d.applicationId ?? ""} />
         <label for="discord-bot-token">Bot token ${d.configured ? "(leave empty to keep the current one)" : ""}</label>
@@ -478,7 +491,6 @@ cards["card-discord-installation"] = () => {
         >
           Copy redirect URI
         </button>
-        ${field("discord-allow-user-ids", "Allowlisted user ids", "allowUserIds")}
         ${field("discord-guild-ids", "Server (guild) ids", "guildIds")}
         ${field("discord-internal-role-ids", "Internal role ids", "internalRoleIds")}
         <button class="primary" id="discord-save" ?disabled=${!!s.busy} @click=${() => s.save()}>Save</button>

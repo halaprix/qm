@@ -46,7 +46,6 @@ test("the Discord card shows the bot and lists and never renders a token", async
   const { $ } = await render({
     configured: true,
     botTag: "qm-bot",
-    allowUserIds: ["123456789012345678"],
     guildIds: ["900000000000000000"],
     internalRoleIds: [],
     oauthConfigured: true,
@@ -62,6 +61,7 @@ test("the Discord card shows the bot and lists and never renders a token", async
   assert.equal(($("discord-redirect-uri") as HTMLInputElement).value, "https://agent.example/settings");
   assert.equal(($("discord-guild-ids") as HTMLInputElement).value, "900000000000000000");
   assert.equal($("discord-principal-deliveries"), null);
+  assert.equal($("discord-allow-user-ids"), null);
   assert.equal($("card-discord-installation").innerHTML.includes("LEAKED_TOKEN"), false);
 });
 
@@ -80,7 +80,6 @@ test("save sends the lists as arrays and omits an empty token and empty secret",
   const { $, dom } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -93,7 +92,6 @@ test("save sends the lists as arrays and omits an empty token and empty secret",
   ($("discord-save") as HTMLButtonElement).click();
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(JSON.parse(JSON.stringify(sent[0])), {
-    allowUserIds: [],
     guildIds: ["900000000000000000", "900000000000000001"],
     internalRoleIds: [],
   });
@@ -106,7 +104,6 @@ test("save includes token and oauth secret when provided and clears inputs after
   const { $, dom } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -132,7 +129,6 @@ test("secrets are cleared after save even if the save fails", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -156,7 +152,6 @@ test("error messages render as textContent and do not inject markup", async () =
   const { $ } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -175,7 +170,6 @@ test("disconnect cancels when confirm returns false", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -194,7 +188,6 @@ test("disconnect calls DELETE when confirm returns true", async () => {
   const { $, dom } = await render(
     {
       configured: true,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
     },
@@ -238,7 +231,7 @@ test("proxy allowlist forwards GET, PUT, and DELETE for discord-installation and
   const putRes = await fetch(`${base}/api/discord-installation`, {
     method: "PUT",
     headers: { ...auth, "content-type": "application/json" },
-    body: JSON.stringify({ allowUserIds: [] }),
+    body: JSON.stringify({ guildIds: [] }),
   });
   assert.equal(putRes.status, 200);
   assert.equal(calls.at(-1)?.method, "PUT");
@@ -335,4 +328,16 @@ test("copy redirect URI falls back to execCommand when clipboard is unavailable"
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(execCalledWith, "copy");
   assert.equal(($("discord-copy-redirect-uri") as HTMLButtonElement).textContent, "Copied");
+});
+
+test("the Discord card matches the Slack card: shared guide class, hint line, setup note and header mark", async () => {
+  const { $, dom } = await render({ configured: false });
+  const guide = $("discord-app-guide");
+  assert.equal(guide.classList.contains("app-guide"), true);
+  assert.equal(guide.open, true);
+  assert.match(guide.querySelector("p").textContent, /Server Members.*Message Content.*bot.*redirect URI/s);
+  assert.match($("discord-installation-description").textContent, /Connect a Discord bot/);
+  assert.ok(dom.window.document.querySelector("#card-discord-installation .head h2 svg.discord-mark"));
+  const css = dom.window.document.querySelector("style")?.textContent ?? "";
+  assert.match(css, /\.app-guide summary/);
 });

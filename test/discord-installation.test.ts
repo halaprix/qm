@@ -15,7 +15,6 @@ const TOKEN = "MTIzNDU2Nzg5MDEyMzQ1Njc4.SECRET.TOKENVALUE";
 const CLIENT_SECRET = "oauth-client-SECRET-value";
 const BOT = { token: TOKEN, userId: "123456789012345678", tag: "qm#1", applicationId: "123456789012345678" };
 const settings = {
-  allowUserIds: ["123456789012345678"],
   guildIds: [],
   internalRoleIds: [],
 };
@@ -229,13 +228,19 @@ test("discordPluginConfigFromInstallation maps installation fields", () => {
     botTag: "qm#0",
     applicationId: "123456789012345678",
     oauthClientSecret: CLIENT_SECRET,
-    allowUserIds: ["123456789012345678"],
     guildIds: ["987654321098765432"],
     internalRoleIds: ["111222333444555666"],
     version: "v1",
   });
   assert.equal(cfg.botToken, TOKEN);
-  assert.deepEqual([...cfg.allowUserIds], ["123456789012345678"]);
   assert.deepEqual([...cfg.guildIds], ["987654321098765432"]);
   assert.deepEqual([...cfg.internalRoleIds], ["111222333444555666"]);
+});
+
+test("settings carry guild and role ids only: a user allow list is neither parsed, stored nor reported", async () => {
+  const parsed = parseDiscordSettings({ allowUserIds: ["123456789012345678"], guildIds: [], internalRoleIds: [] });
+  assert.deepEqual(Object.keys(parsed).sort(), ["guildIds", "internalRoleIds"]);
+  const store = createDiscordInstallationStore("org", createMemoryMap<StoredDiscordInstallation>(), "key-material");
+  const status = await store.set({ ...parsed, bot: BOT, updatedBy: "admin" });
+  assert.equal("allowUserIds" in status, false);
 });

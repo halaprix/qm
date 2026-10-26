@@ -43,7 +43,7 @@ import { errMessage, swallowAs } from "../../util/errors.ts";
 import { adminSessionUrl } from "../../util/admin-links.ts";
 import { headLooksLikeText, replaceThreadSegment, type TurnPostKeys } from "./turn-helpers.ts";
 import type { OrchestratorDeps, OrchestratorInput } from "./types.ts";
-import { surfaceCapabilities } from "../../surfaces/surface-capabilities.ts";
+import { surfaceCapabilities, surfaceForDeliveryType } from "../../surfaces/surface-capabilities.ts";
 
 const SURFACE_READ_MAX = 200;
 const SURFACE_SEARCH_DEFAULT = 10;
@@ -163,6 +163,14 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     if (!r.ok) return { ok: false, message: r.message };
     return { ok: true, destination: r.destination };
   };
+  const messageRef = (
+    destination: Destination,
+    ref: string,
+  ): { ok: true; ref: string } | { ok: false; message: string } => {
+    if (surfaceForDeliveryType(destination.type) !== DISCORD_SURFACE) return { ok: true, ref };
+    const id = DISCORD_MESSAGE_IDS.decode(ref) ?? (DISCORD_MESSAGE_IDS.isRaw(ref) ? ref : null);
+    return id ? { ok: true, ref: id } : { ok: false, message: `"${ref}" is not a message id from this conversation` };
+  };
   const enqueue = async (
     destination: Destination,
     postText: string,
@@ -237,7 +245,9 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const seq = postKeys.take();
       let destination = currentDestination;
       if (opts?.ts && destination.type !== "principal") {
-        destination = { ...destination, target: replaceThreadSegment(destination.target, opts.ts) };
+        const replyTo = messageRef(destination, opts.ts);
+        if (!replyTo.ok) return replyTo;
+        destination = { ...destination, target: replaceThreadSegment(destination.target, replyTo.ref) };
       } else if (opts?.broadcast && destination.type !== "principal" && conversation.channelRef) {
         destination = { ...destination, target: conversation.channelRef };
       }
@@ -289,7 +299,9 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!d.ok) return { ok: false, message: d.message };
       if (d.destination.type === "principal")
         return { ok: false, message: "I can only react to a message in a channel, group DM, or this conversation." };
-      return enqueue(withReact(d.destination, { messageTs: input.ts, emoji: input.emoji }), "", seq);
+      const ref = messageRef(d.destination, input.ts);
+      if (!ref.ok) return ref;
+      return enqueue(withReact(d.destination, { messageTs: ref.ref, emoji: input.emoji }), "", seq);
     },
     edit: async (input: SurfaceEditInput) => {
       const seq = postKeys.take();
@@ -298,7 +310,9 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(input.participants !== undefined ? { participants: input.participants } : {}),
       });
       if (!d.ok) return { ok: false, message: d.message };
-      return enqueue(withEdit(d.destination, input.ref), input.text, seq);
+      const ref = messageRef(d.destination, input.ref);
+      if (!ref.ok) return ref;
+      return enqueue(withEdit(d.destination, ref.ref), input.text, seq);
     },
     delete: async (input: SurfaceDeleteInput) => {
       const seq = postKeys.take();
@@ -307,7 +321,9 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(input.participants !== undefined ? { participants: input.participants } : {}),
       });
       if (!d.ok) return { ok: false, message: d.message };
-      return enqueue(withDelete(d.destination, { messageTs: input.ref }), "", seq);
+      const ref = messageRef(d.destination, input.ref);
+      if (!ref.ok) return ref;
+      return enqueue(withDelete(d.destination, { messageTs: ref.ref }), "", seq);
     },
     readThread: async (opts?: { limit?: number }) => {
       if (!deps.surfaceContext) return { ok: false, message: "the surface can't be read from this turn" };

@@ -38,3 +38,15 @@ export function createReturnCapture(isReturn: (params: URLSearchParams) => boole
     },
   };
 }
+
+export function watchVisible(refresh: () => void): () => void {
+  const onVisible = (): void => {
+    if (!document.hidden) refresh();
+  };
+  window.addEventListener("focus", onVisible);
+  document.addEventListener("visibilitychange", onVisible);
+  return () => {
+    window.removeEventListener("focus", onVisible);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
+}

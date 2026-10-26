@@ -13,7 +13,6 @@ test("a stored installation is the only config source", async () => {
       botTag: "b",
       applicationId: "1",
       oauthClientSecret: null,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
       version: "v7",

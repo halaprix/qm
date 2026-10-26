@@ -18,7 +18,6 @@ export function parseDiscordThreadRef(threadRef: string): { container: string } 
 
 export interface DiscordPluginConfig {
   botToken: string;
-  allowUserIds: ReadonlySet<string>;
   guildIds: ReadonlySet<string>;
   internalRoleIds: ReadonlySet<string>;
 }

@@ -14,16 +14,13 @@ export type CoreStatusOf = (userId: string) => Promise<{ notInternal: boolean }>
 
 export async function classifyMember(
   m: DiscordMemberFacts,
-  cfg: Pick<DiscordPluginConfig, "allowUserIds" | "internalRoleIds">,
+  cfg: Pick<DiscordPluginConfig, "internalRoleIds">,
   linkedInternal: LinkedInternal,
   coreStatusOf: CoreStatusOf,
 ): Promise<ActorAssertion> {
   const { notInternal } = await coreStatusOf(m.userId);
   const internal =
-    !notInternal &&
-    (cfg.allowUserIds.has(m.userId) ||
-      m.roleIds.some((r) => cfg.internalRoleIds.has(r)) ||
-      (await linkedInternal(m.userId)));
+    !notInternal && (m.roleIds.some((r) => cfg.internalRoleIds.has(r)) || (await linkedInternal(m.userId)));
   return {
     externalId: discordExternalId(m.userId),
     displayName: m.displayName,

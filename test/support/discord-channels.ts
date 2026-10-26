@@ -12,7 +12,6 @@ const TEST_BOT = {
 
 export const installDiscord = (built: { discordInstallation: DiscordInstallationStore }) =>
   built.discordInstallation.set({
-    allowUserIds: [],
     guildIds: [],
     internalRoleIds: [],
     bot: TEST_BOT,

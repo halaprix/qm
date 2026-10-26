@@ -155,7 +155,7 @@ import { adminSessionUrl } from "./util/admin-links.ts";
 import { withWebTranscriptDeliveries } from "./delivery/web-transcript-delivery.ts";
 import { DISCORD_SURFACE } from "./discord/config.ts";
 import type { SurfacePull } from "./reach/reach.ts";
-import { createDiscordPrincipalRoute, withPrincipalRouting } from "./delivery/principal-routing.ts";
+import { createDiscordPrincipalRoute, slackAccountOf, withPrincipalRouting } from "./delivery/principal-routing.ts";
 import { createDirectoryStore, type DirectoryStore } from "./directory/directory-store.ts";
 import { createPostgresDirectoryStore } from "./directory/postgres-directory-store.ts";
 import {
@@ -1817,6 +1817,7 @@ export function buildApp(
     createDiscordPrincipalRoute({
       installation: discordInstallation,
       linkedDiscordUserIds,
+      hasSlackAccount: slackAccountOf(directory),
     }),
   );
   const deployService = createDeployService({

@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createApprovalStore } from "../src/core/approval-store.ts";
+import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createDeliveryStore, isPersonAddressed } from "../src/delivery/delivery-store.ts";
-import { createDiscordPrincipalRoute, withPrincipalRouting } from "../src/delivery/principal-routing.ts";
+import {
+  createDiscordPrincipalRoute,
+  slackAccountOf,
+  withPrincipalRouting,
+} from "../src/delivery/principal-routing.ts";
 import { linkedDiscordUserIds } from "../src/api/discord-core-client.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { principalDestination, relaySenderAttribution } from "../src/reach/reach.ts";
 import { createPrincipalLinkService, type PrincipalLinkService } from "../src/identity/principal-links.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { DISCORD_DM_DELIVERY_TYPE, discordExternalId } from "../src/discord/config.ts";
 import { createDiscordDispatcher, DISCORD_DELIVERY_CLAIM_MS, type DeliveryGuard } from "../src/discord/deliveries.ts";
-import { createCardRenderer } from "../src/discord/approval-cards.ts";
 import type { DiscordSender } from "../src/discord/sender.ts";
-import type { Delivery, PendingApprovalRecord } from "../src/types.ts";
+import type { Delivery } from "../src/types.ts";
 import { buildApp } from "../src/wiring.ts";
 import { testConfig } from "./support/test-config.ts";
 import { installDiscord } from "./support/discord-channels.ts";
@@ -23,7 +25,7 @@ afterEach(() => {
   installPrincipalLinks(null);
 });
 
-test("person-addressed notices keep the original principal row and enqueue a discord-dm copy", async () => {
+test("a person routed to Discord gets exactly one discord-dm delivery and no principal row", async () => {
   const store = withPrincipalRouting(createDeliveryStore(), toDiscord);
   const result = await store.enqueue({
     destination: { ...principalDestination("ana@acme.com", "bob@acme.com"), keychainAskId: "k1" },
@@ -31,7 +33,9 @@ test("person-addressed notices keep the original principal row and enqueue a dis
     idempotencyKey: "k1",
   });
   assert.equal(result.idempotencyKey, "k1");
-  assert.equal(result.destination.type, "principal");
+  assert.equal(result.destination.type, DISCORD_DM_DELIVERY_TYPE);
+  assert.equal(result.destination.target, "ana@acme.com");
+  assert.equal(result.destination.keychainAskId, "k1");
 
   await store.enqueue({
     destination: principalDestination("bob@acme.com", "ana@acme.com"),
@@ -40,62 +44,21 @@ test("person-addressed notices keep the original principal row and enqueue a dis
   });
   await store.enqueue({ destination: { type: "slack", target: "C1" }, text: "hi", idempotencyKey: "k3" });
 
-  const principalPending = await store.pending("principal");
   assert.deepEqual(
-    principalPending.map((d) => d.idempotencyKey),
-    ["k1", "k2"],
+    (await store.pending("principal")).map((d) => d.idempotencyKey),
+    ["k2"],
   );
-
-  const discordPending = await store.pending(DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(discordPending.length, 1);
-  const copy = discordPending[0]!;
-  assert.equal(copy.idempotencyKey, "k1:discord-dm");
-  assert.equal(copy.destination.type, DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(copy.destination.target, "ana@acme.com");
-  assert.equal(copy.destination.keychainAskId, "k1");
-  assert.equal(copy.destination.copyOf, result.id);
-
+  assert.deepEqual(
+    (await store.pending(DISCORD_DM_DELIVERY_TYPE)).map((d) => d.idempotencyKey),
+    ["k1"],
+  );
   assert.deepEqual(
     (await store.pending("slack")).map((d) => d.idempotencyKey),
     ["k3"],
   );
 });
 
-test("principal destinations with react, delete, or editRef do not produce a discord-dm copy", async () => {
-  const store = withPrincipalRouting(createDeliveryStore(), toDiscord);
-  await store.enqueue({
-    destination: {
-      ...principalDestination("ana@acme.com", "bob@acme.com"),
-      react: { messageTs: "123.456", emoji: "thumbsup" },
-    },
-    text: "",
-    idempotencyKey: "k-react",
-  });
-  await store.enqueue({
-    destination: { ...principalDestination("ana@acme.com", "bob@acme.com"), delete: { messageTs: "123.456" } },
-    text: "",
-    idempotencyKey: "k-delete",
-  });
-  await store.enqueue({
-    destination: { ...principalDestination("ana@acme.com", "bob@acme.com"), editRef: "123.456" },
-    text: "updated text",
-    idempotencyKey: "k-edit",
-  });
-  await store.enqueue({
-    destination: principalDestination("ana@acme.com", "bob@acme.com"),
-    text: "plain message",
-    idempotencyKey: "k-plain",
-  });
-
-  const principalPending = await store.pending("principal");
-  assert.equal(principalPending.length, 4);
-
-  const discordPending = await store.pending(DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(discordPending.length, 1);
-  assert.equal(discordPending[0]!.idempotencyKey, "k-plain:discord-dm");
-});
-
-test("non-principal destinations never produce a discord-dm copy even when the route returns discord-dm", async () => {
+test("non-principal destinations are never rerouted even when the route returns discord-dm", async () => {
   const alwaysDiscord = async () => DISCORD_DM_DELIVERY_TYPE;
   const store = withPrincipalRouting(createDeliveryStore(), alwaysDiscord);
   await store.enqueue({
@@ -120,41 +83,6 @@ test("non-principal destinations never produce a discord-dm copy even when the r
   assert.equal((await store.pending("group")).length, 1);
 });
 
-test("a Slack request's approval card stays on Slack with personal notices on", async () => {
-  const deliveries = withPrincipalRouting(createDeliveryStore(), async () => DISCORD_DM_DELIVERY_TYPE);
-  const approvals = createApprovalStore(createMemoryMap<PendingApprovalRecord>(), deliveries);
-  await approvals.put("A9", {
-    sessionId: "s",
-    command: "ls",
-    createdAt: 1,
-    request: {
-      surface: "slack",
-      actor: { externalId: "ana@acme.com" },
-      conversation: { kind: "dm", threadRef: "dm:D1" },
-      text: "t",
-    },
-  } as PendingApprovalRecord);
-  assert.equal((await deliveries.pending("principal")).length, 1);
-  assert.deepEqual(await deliveries.pending(DISCORD_DM_DELIVERY_TYPE), []);
-});
-
-test("command-approval cards are never copied even when directly enqueued", async () => {
-  const store = withPrincipalRouting(createDeliveryStore(), async () => DISCORD_DM_DELIVERY_TYPE);
-  await store.enqueue({
-    destination: {
-      type: "principal",
-      target: "ana@acme.com",
-      commandApprovalId: "apr-42",
-    },
-    text: "approve me",
-    idempotencyKey: "direct-approval",
-  });
-  const pendingPrincipal = await store.pending("principal");
-  assert.equal(pendingPrincipal.length, 1);
-  assert.equal(pendingPrincipal[0]!.idempotencyKey, "direct-approval");
-  assert.deepEqual(await store.pending(DISCORD_DM_DELIVERY_TYPE), []);
-});
-
 test("a route error falls back to enqueueing the original principal row without dropping it", async () => {
   const failingRoute = async () => {
     throw new Error("store failure");
@@ -169,55 +97,6 @@ test("a route error falls back to enqueueing the original principal row without 
   assert.equal(pending.length, 1);
   assert.equal(pending[0]!.idempotencyKey, "resilient-key");
   assert.deepEqual(await store.pending(DISCORD_DM_DELIVERY_TYPE), []);
-});
-
-test("deploy-access copy renders without components while keychain copy keeps buttons", async () => {
-  const renderer = createCardRenderer({
-    getApproval: async () => null,
-    keychainApprovals: {
-      get: async (askId: string) => ({
-        service: "aws",
-        accountLabel: "prod",
-        conversation: "dm",
-        ask: { id: askId, status: "pending" },
-      }),
-    } as never,
-  });
-
-  const deployCopy: Delivery = {
-    id: "00000000-0000-0000-0000-000000000001",
-    destination: {
-      type: DISCORD_DM_DELIVERY_TYPE,
-      target: "ana@acme.com",
-      deploymentAccess: { deploymentId: "dep-1", requesterId: "bob@acme.com" },
-      copyOf: "00000000-0000-0000-0000-000000000000",
-    },
-    text: "Deploy access requested for dep-1",
-    idempotencyKey: "dep-copy",
-    createdAt: 1000,
-    deliveredAt: null,
-  };
-  const deployResult = await renderer(deployCopy);
-  assert.ok(deployResult);
-  assert.equal(deployResult.components, undefined);
-  assert.equal(deployResult.content, "Deploy access requested for dep-1");
-
-  const keychainCopy: Delivery = {
-    id: "00000000-0000-0000-0000-000000000002",
-    destination: {
-      type: DISCORD_DM_DELIVERY_TYPE,
-      target: "ana@acme.com",
-      keychainAskId: "ask-1",
-      copyOf: "00000000-0000-0000-0000-000000000000",
-    },
-    text: "Keychain ask",
-    idempotencyKey: "key-copy",
-    createdAt: 1000,
-    deliveredAt: null,
-  };
-  const keychainResult = await renderer(keychainCopy);
-  assert.ok(keychainResult);
-  assert.equal(keychainResult.components?.length, 1);
 });
 
 test("isPersonAddressed covers principal and discord-dm across delivery-store thread recording", async () => {
@@ -310,7 +189,6 @@ function installationStatus(opts: { configured: boolean }) {
   return {
     status: async () => ({
       configured: opts.configured,
-      allowUserIds: [],
       guildIds: [],
       internalRoleIds: [],
       oauthConfigured: false,
@@ -326,14 +204,84 @@ test("createDiscordPrincipalRoute uses status alone without calling decrypting g
   const on = createDiscordPrincipalRoute({
     installation: installationStatus({ configured: true }),
     linkedDiscordUserIds: linked,
+    hasSlackAccount: async () => false,
   });
   const none = createDiscordPrincipalRoute({
     installation: installationStatus({ configured: false }),
     linkedDiscordUserIds: linked,
+    hasSlackAccount: async () => false,
   });
   assert.equal(await on("ana@acme.com"), DISCORD_DM_DELIVERY_TYPE);
   assert.equal(await on("bob@acme.com"), null);
   assert.equal(await none("ana@acme.com"), null);
+});
+
+test("a person with a linked Slack account keeps the principal route", async () => {
+  const route = createDiscordPrincipalRoute({
+    installation: installationStatus({ configured: true }),
+    linkedDiscordUserIds: (p) => (p === "discord:111" || p === "ana@acme.com" ? ["111"] : []),
+    hasSlackAccount: async () => true,
+  });
+  assert.equal(await route("ana@acme.com"), null);
+  assert.equal(await route("discord:111"), DISCORD_DM_DELIVERY_TYPE);
+});
+
+test("a Slack-only-id principal with a linked Discord account stays on the principal route", async () => {
+  const directory = createDirectoryStore();
+  await directory.replace([
+    { principalId: "U0SLACKAMY", displayName: "Amy", type: "internal" },
+    { principalId: "cora@acme.com", displayName: "Cora", type: "internal", slackId: "UCORA" },
+    { principalId: "dan@acme.com", displayName: "Dan", type: "internal" },
+  ]);
+  const route = createDiscordPrincipalRoute({
+    installation: installationStatus({ configured: true }),
+    linkedDiscordUserIds: () => ["111"],
+    hasSlackAccount: slackAccountOf(directory),
+  });
+  assert.equal(await route("U0SLACKAMY"), null);
+  assert.equal(await route("cora@acme.com"), null);
+  assert.equal(await route("nobody@acme.com"), DISCORD_DM_DELIVERY_TYPE);
+  assert.equal(await route("dan@acme.com"), DISCORD_DM_DELIVERY_TYPE);
+  assert.equal(await route("U0NOROWYET"), null);
+});
+
+test("a Slack user id linked to an email row without slackId still counts as Slack", async () => {
+  const directory = createDirectoryStore();
+  await directory.replace([{ principalId: "erin@acme.com", displayName: "Erin", type: "internal" }]);
+  installPrincipalLinks({
+    canonical: (key) => (key === "U0SLACKERIN" || key === "erin@acme.com" ? "erin@acme.com" : undefined),
+    aliases: (key) => (key === "erin@acme.com" ? ["U0SLACKERIN"] : []),
+  });
+  const route = createDiscordPrincipalRoute({
+    installation: installationStatus({ configured: true }),
+    linkedDiscordUserIds: () => ["111"],
+    hasSlackAccount: slackAccountOf(directory),
+  });
+  assert.equal(await route("U0SLACKERIN"), null);
+});
+
+test("a Slack request's approval card stays on Slack even when the person has Discord", async () => {
+  const store = withPrincipalRouting(createDeliveryStore(), toDiscord);
+  await store.enqueue({
+    destination: { ...principalDestination("ana@acme.com", "bob@acme.com"), commandApprovalId: "ap1" },
+    text: "approve?",
+    idempotencyKey: "ap1",
+  });
+  assert.deepEqual(
+    (await store.pending("principal")).map((d) => d.idempotencyKey),
+    ["ap1"],
+  );
+  assert.deepEqual(await store.pending(DISCORD_DM_DELIVERY_TYPE), []);
+});
+
+test("command-approval cards are never rerouted to discord-dm", async () => {
+  const store = withPrincipalRouting(createDeliveryStore(), async () => DISCORD_DM_DELIVERY_TYPE);
+  const result = await store.enqueue({
+    destination: { ...principalDestination("ana@acme.com", "bob@acme.com"), commandApprovalId: "ap2" },
+    text: "approve?",
+    idempotencyKey: "ap2",
+  });
+  assert.equal(result.destination.type, "principal");
 });
 
 test("linkedDiscordUserIds extracts linked discord user ids from principal links", async () => {
@@ -355,7 +303,7 @@ test("linkedDiscordUserIds extracts linked discord user ids from principal links
   assert.deepEqual(linkedDiscordUserIds("unlinked@acme.com"), []);
 });
 
-test("withPrincipalRouting feeds discord-dm copies to the discord dispatcher", async () => {
+test("withPrincipalRouting feeds routed notices to the discord dispatcher", async () => {
   const log: string[] = [];
   const sender: DiscordSender = {
     send: async (c, m) => {
@@ -417,38 +365,46 @@ test("withPrincipalRouting feeds discord-dm copies to the discord dispatcher", a
   assert.equal(log[2], "send:dm-chan-42:personal notice text");
   assert.match(log[3]!, /^ack:/);
 
-  const pendingPrincipal = await store.pending("principal");
-  assert.equal(pendingPrincipal.length, 1);
-  assert.equal(pendingPrincipal[0]!.idempotencyKey, "pnotice-1");
-
-  const pendingDiscord = await store.pending(DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(pendingDiscord.length, 0);
+  assert.deepEqual(await store.pending("principal"), []);
+  assert.deepEqual(await store.pending(DISCORD_DM_DELIVERY_TYPE), []);
 });
 
-test("buildApp person-addressed enqueue with linked alias and notices on yields both principal row and discord-dm copy", async () => {
+test("buildApp routes a Discord-linked person without Slack to discord-dm and one with Slack to principal", async () => {
   const built = buildApp(testConfig());
   await installDiscord(built);
-  await built.principalLinks.link({
-    principalId: discordExternalId("discord-user-888"),
-    canonicalId: "ana@acme.com",
-    evidence: "oauth",
-    linkedBy: "ana@acme.com",
-  });
+  for (const [discordId, email] of [
+    ["discord-user-888", "ana@acme.com"],
+    ["discord-user-999", "cora@acme.com"],
+  ] as const)
+    await built.principalLinks.link({
+      principalId: discordExternalId(discordId),
+      canonicalId: email,
+      evidence: "oauth",
+      linkedBy: email,
+    });
+  await built.directory.replace([
+    { principalId: "cora@acme.com", displayName: "Cora", type: "internal", slackId: "UCORA" },
+  ]);
 
-  await built.deliveries.enqueue({
-    destination: principalDestination("ana@acme.com", "system"),
-    text: "buildApp notice",
-    idempotencyKey: "ba-1",
-  });
+  for (const [email, key] of [
+    ["ana@acme.com", "ba-ana"],
+    ["cora@acme.com", "ba-cora"],
+  ] as const)
+    await built.deliveries.enqueue({
+      destination: principalDestination(email, "system"),
+      text: "buildApp notice",
+      idempotencyKey: key,
+    });
 
-  const principalRows = await built.deliveries.pending("principal");
-  assert.equal(principalRows.length, 1);
-  assert.equal(principalRows[0]!.idempotencyKey, "ba-1");
-
+  assert.deepEqual(
+    (await built.deliveries.pending("principal")).map((d) => d.idempotencyKey),
+    ["ba-cora"],
+  );
   const discordRows = await built.deliveries.pending(DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(discordRows.length, 1);
-  assert.equal(discordRows[0]!.idempotencyKey, "ba-1:discord-dm");
-  assert.equal(discordRows[0]!.destination.type, DISCORD_DM_DELIVERY_TYPE);
+  assert.deepEqual(
+    discordRows.map((d) => d.idempotencyKey),
+    ["ba-ana"],
+  );
   assert.equal(discordRows[0]!.destination.target, "ana@acme.com");
 });
 
@@ -466,25 +422,6 @@ test("recordPrincipalDelivery records recipient thread for discord-dm deliveries
   assert.equal((await built.sessions.getByThread("discord:dm:channel-99"))?.surface, "discord");
 });
 
-test("a keychain resolution row gets no discord copy while the initial card still does", async () => {
-  const store = withPrincipalRouting(createDeliveryStore(), toDiscord);
-  const card = { ...principalDestination("ana@acme.com", "bob@acme.com"), keychainAskId: "k1" };
-  await store.enqueue({ destination: card, text: "ask", idempotencyKey: "ask:k1:notice" });
-  await store.enqueue({
-    destination: { ...card, keychainResolution: true },
-    text: "Credential request resolved.",
-    idempotencyKey: "ask:k1:resolved",
-  });
-  assert.deepEqual(
-    (await store.pending(DISCORD_DM_DELIVERY_TYPE)).map((d) => d.idempotencyKey),
-    ["ask:k1:notice:discord-dm"],
-  );
-  assert.deepEqual(
-    (await store.pending("principal")).map((d) => d.idempotencyKey),
-    ["ask:k1:notice", "ask:k1:resolved"],
-  );
-});
-
 test("a Discord-only principal gets one discord-dm delivery and no stranded principal row", async () => {
   const store = withPrincipalRouting(createDeliveryStore(), async () => DISCORD_DM_DELIVERY_TYPE);
   const result = await store.enqueue({
@@ -493,7 +430,6 @@ test("a Discord-only principal gets one discord-dm delivery and no stranded prin
     idempotencyKey: "h1",
   });
   assert.equal(result.destination.type, DISCORD_DM_DELIVERY_TYPE);
-  assert.equal(result.destination.copyOf, undefined);
   assert.equal(result.idempotencyKey, "h1");
   assert.deepEqual(await store.pending("principal"), []);
   assert.deepEqual(

@@ -240,7 +240,6 @@ export function createPostgresDeliveryStore(connectionString: string, opts?: { m
       const rows = await q(
         `SELECT * FROM deliveries
           WHERE (provenance->>'sourceSessionId' = $1 OR provenance->>'sourceThreadRef' = $2)
-            AND destination->>'copyOf' IS NULL
           ORDER BY created_at DESC
           LIMIT $3`,
         [sourceSessionId, sourceThreadRef, limit],

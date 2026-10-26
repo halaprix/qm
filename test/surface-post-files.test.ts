@@ -446,13 +446,13 @@ test("delete, edit and react never resolve a Discord channel outside the current
   assert.deepEqual(enqueued, []);
 });
 
-test("a Discord react queues the message id exactly as given; the Discord sender decodes tokens", async () => {
+test("a Discord react queues the raw snowflake whether given a ~token or the raw id", async () => {
   const { tools, enqueued } = discordReachTools({ type: "discord", target: "1300000000000000010" });
   for (const ts of ["~9vkbjfeanyf5", "1300000000000000001"]) {
     assert.equal((await tools.react({ ts, emoji: "eyes" })).ok, true, ts);
   }
   assert.deepEqual(
     enqueued.map((e) => (e.destination as { react: { messageTs: string } }).react.messageTs),
-    ["~9vkbjfeanyf5", "1300000000000000001"],
+    ["1300000000000000001", "1300000000000000001"],
   );
 });

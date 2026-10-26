@@ -442,7 +442,7 @@ test("recent fetches and sorts messages oldest first", async () => {
       text: "third",
       reactions: [
         { name: "+1", count: 3 },
-        { name: "partyblob:123456789012345678", count: 1 },
+        { name: "<:partyblob:123456789012345678>", count: 1 },
       ],
     },
   ]);

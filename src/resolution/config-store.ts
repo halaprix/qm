@@ -123,7 +123,7 @@ export class ConfigInheritedError extends Error {
 export class ConfigConflictError extends Error {
   constructor(id: ScopeId) {
     super(
-      `${id} is a private thread with configuration of its own, so it cannot inherit its parent's; an admin must clear this thread's configuration before the bot answers here`,
+      `${id} is a private thread with configuration of its own, so it cannot inherit its parent's; an admin must clear this thread's configuration before it can be linked`,
     );
     this.name = "ConfigConflictError";
   }
@@ -250,7 +250,7 @@ export interface ConfigStoreMaps {
   browseModels?: DurableMap<ScopedRow<"modelId", string>>;
   autoFlaggerConfigs?: DurableMap<PersistedAutoFlaggerConfig>;
   deploymentIdentity?: DurableMap<PersistedDeploymentIdentity>;
-  configParents?: DurableMap<ScopedRow<"parent", ScopeId> & { conflict?: true }>;
+  configParents?: DurableMap<ScopedRow<"parent", ScopeId>>;
 }
 
 const CONFIG_STORE_TABLES: Record<keyof ConfigStoreMaps, string> = {
@@ -371,11 +371,7 @@ export function createMemoryConfigStore(
     branding: field("branding", "branding"),
     browseMaxSteps: field("browseMaxSteps", "steps"),
     browseModels: field("browseModels", "modelId"),
-    configParents: setting(
-      "configParents",
-      ({ parent, conflict }) => ({ parent, conflict: conflict === true }),
-      (id, { parent, conflict }) => ({ scopeId: id, parent, ...(conflict ? { conflict: true as const } : {}) }),
-    ),
+    configParents: field("configParents", "parent"),
     autoFlaggerConfigs: setting(
       "autoFlaggerConfigs",
       ({ harnessId, modelId, rubric }): AutoFlaggerConfig => ({ harnessId, modelId, rubric }),
@@ -384,10 +380,7 @@ export function createMemoryConfigStore(
     ),
   } satisfies Partial<Record<SettingKey, unknown>>;
   const allSettings = Object.values(settings);
-  const configScope = (id: ScopeId): ScopeId => {
-    const link = settings.configParents.get(id);
-    return link && !link.conflict ? link.parent : id;
-  };
+  const configScope = (id: ScopeId): ScopeId => settings.configParents.get(id) ?? id;
   const linkReads = new Map<ScopeId, Promise<void>>();
   const refreshLink = (id: ScopeId): Promise<void> => {
     const { kind, ref } = parseScopeId(id);
@@ -567,16 +560,13 @@ export function createMemoryConfigStore(
   return {
     async refreshSecurity(ids) {
       const scopes = new Set(await Promise.all(ids.map(freshConfigScope)));
-      const conflicted = ids.find((id) => settings.configParents.get(id)?.conflict);
-      if (conflicted) throw new ConfigConflictError(conflicted);
       await Promise.all([...scopes].flatMap(reloadLayers));
     },
     async linkConfigParent(id, parent) {
-      const link = settings.configParents.get(id);
-      if (link?.parent === parent && !link.conflict) return;
-      const conflict = (await Promise.all(Object.values(inheritedStores).map((store) => store.get(id)))).some(Boolean);
-      if (link?.parent !== parent || link.conflict !== conflict)
-        await settings.configParents.set(id, { parent, conflict });
+      if (settings.configParents.get(id) === parent) return;
+      if ((await Promise.all(Object.values(inheritedStores).map((store) => store.get(id)))).some(Boolean))
+        throw new ConfigConflictError(id);
+      await settings.configParents.set(id, parent);
     },
     hydrate() {
       if (!hydrated) {

@@ -138,7 +138,8 @@ export function createDiscordPlugin(
 
   async function linkActivePrivateThreads(c: Client, channels: DiscordChannels, guildId: string): Promise<void> {
     const { threads } = await (await c.guilds.fetch(guildId)).channels.fetchActiveThreads();
-    for (const thread of threads.values()) await channels.linked(thread);
+    for (const thread of threads.values())
+      await channels.linked(thread).catch(swallowAs("discord: private thread link", undefined));
   }
 
   async function stakedIn(run: ConnectionScope, inbound: DiscordInbound, botUserId: string): Promise<boolean> {

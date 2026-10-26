@@ -14,9 +14,9 @@ test("text that merely starts with an emoji is not an emoji", () => {
   assert.equal(resolveDiscordEmoji("👍👍"), null);
 });
 
-test("custom emoji in both spellings resolve to the REST form", () => {
+test("custom emoji resolve to the REST form only in the <:name:id> spelling", () => {
   assert.equal(resolveDiscordEmoji(`<:party:${ID}>`), `party:${ID}`);
   assert.equal(resolveDiscordEmoji(`<a:party:${ID}>`), `a:party:${ID}`);
-  assert.equal(resolveDiscordEmoji(`party:${ID}`), `party:${ID}`);
-  assert.equal(resolveDiscordEmoji("party:123"), null);
+  assert.equal(resolveDiscordEmoji(`party:${ID}`), null);
+  assert.equal(resolveDiscordEmoji("<:party:123>"), null);
 });

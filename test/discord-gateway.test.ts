@@ -30,7 +30,6 @@ const guild = (id: string, members: Array<ReturnType<typeof member>>) => ({
 
 const cfg = {
   botToken: "t",
-  allowUserIds: new Set(["1"]),
   guildIds: new Set(["900", "901"]),
   internalRoleIds: new Set(["staff"]),
 };
@@ -61,9 +60,8 @@ test("a staff role in any configured guild makes a DM user internal, regardless 
   assert.deepEqual(await a("2", "two"), await b("2", "two"));
 });
 
-test("allowlisted and linked users are decided before hydration; others wait", async () => {
+test("linked users are decided before hydration; others wait", async () => {
   const c = classifier(false, [guild("900", [])]);
-  assert.equal((await c("1", "one"))!.isExternalGuest, undefined);
   assert.equal((await c("3", "three"))!.isExternalGuest, undefined);
   assert.equal(await c("4", "four"), null);
 });

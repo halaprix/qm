@@ -228,7 +228,6 @@ export interface Destination {
     | { kind: "reply" }
     | { kind: "slack_reply"; sessionId: string; ts: string; name: string }
     | { kind: "turn_failure"; notBefore: number; runId?: string };
-  copyOf?: string;
 }
 
 export interface CandidateDestination extends Destination {

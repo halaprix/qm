@@ -1,9 +1,18 @@
+import { openDesktopBrowser } from "../../chassis/src/desktop-browser.ts";
 import { LitElement, html, nothing } from "lit";
 import { ArrowUpRight, Check, Link2, UserRound } from "lucide";
 import { discordMark } from "./discord-mark.ts";
 import { icon } from "./icons.ts";
 import { withBase } from "./core-bridge.ts";
-import { clearAttempt, createReturnCapture, loadAttempt, saveAttempt, type OAuthAttempt } from "./oauth-attempt.ts";
+import "./slack-account.css";
+import {
+  clearAttempt,
+  createReturnCapture,
+  loadAttempt,
+  saveAttempt,
+  watchVisible,
+  type OAuthAttempt,
+} from "./oauth-attempt.ts";
 
 interface LinkStatus {
   available: boolean;
@@ -35,9 +44,20 @@ export class DiscordAccount extends LitElement {
   private status: LinkStatus | null = null;
   private note = "";
   private busy = false;
+  private unwatch = (): void => {};
 
   protected createRenderRoot(): HTMLElement {
     return this;
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.unwatch = watchVisible(() => void this.load());
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unwatch();
   }
 
   protected firstUpdated(): void {
@@ -80,6 +100,7 @@ export class DiscordAccount extends LitElement {
     this.busy = true;
     this.note = "";
     try {
+      if (await openDesktopBrowser(withBase("/settings"))) return;
       const nonceBytes = crypto.getRandomValues(new Uint8Array(32));
       const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
       const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce));

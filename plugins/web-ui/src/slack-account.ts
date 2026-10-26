@@ -5,7 +5,14 @@ import { slackMark } from "./slack-mark";
 import { icon } from "./icons";
 import "./slack-account.css";
 import { withBase } from "./core-bridge";
-import { clearAttempt, createReturnCapture, loadAttempt, saveAttempt, type OAuthAttempt } from "./oauth-attempt";
+import {
+  clearAttempt,
+  createReturnCapture,
+  loadAttempt,
+  saveAttempt,
+  watchVisible,
+  type OAuthAttempt,
+} from "./oauth-attempt";
 
 interface SlackAttempt extends OAuthAttempt {
   ticket: string;
@@ -33,6 +40,7 @@ export class SlackAccount extends LitElement {
   private label = "";
   private nativeOAuth = false;
   private attempt: SlackAttempt | null = null;
+  private unwatch = (): void => {};
 
   protected createRenderRoot(): HTMLElement {
     return this;
@@ -40,19 +48,13 @@ export class SlackAccount extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    window.addEventListener("focus", this.refreshStatus);
-    document.addEventListener("visibilitychange", this.refreshStatus);
+    this.unwatch = watchVisible(() => void this.status());
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
-    window.removeEventListener("focus", this.refreshStatus);
-    document.removeEventListener("visibilitychange", this.refreshStatus);
+    this.unwatch();
   }
-
-  private refreshStatus = (): void => {
-    if (!document.hidden) void this.status();
-  };
 
   protected firstUpdated(): void {
     const url = slackReturn.take();

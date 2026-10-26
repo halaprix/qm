@@ -16,6 +16,12 @@ export interface DirectoryMember {
   avatarUrl?: string;
 }
 
+const SLACK_ID_RE = /^[UW][A-Z0-9]{8,}$/;
+
+export function slackIdOf(member: Pick<DirectoryMember, "principalId" | "slackId">): string | undefined {
+  return member.slackId ?? (SLACK_ID_RE.test(member.principalId) ? member.principalId : undefined);
+}
+
 export interface DirectoryChannel {
   channelId: string;
   name: string;

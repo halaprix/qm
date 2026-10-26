@@ -56,7 +56,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     approvalCardType: DISCORD_DM_DELIVERY_TYPE,
     keychainCardInConversation: false,
     mentionHint:
-      " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with an emoji character, a :shortcode:, or a custom server emoji as <:name:id>.",
+      " On Discord, `<@123…>` shows a person's name but never pings anyone, and @everyone/@here never ping. React with an emoji character, a :shortcode:, or a custom server emoji as <:name:id> (animated: <a:name:id>), the same spelling reactions show you.",
     revisions: {
       threadRefsFor: (e) => discordRevisionThreadRefs(e.container, e.ts),
       scansFor: (threadRef, channelRef) => {

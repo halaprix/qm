@@ -82,7 +82,6 @@ test("no admin response contains the token or the OAuth client secret", async (t
   const put = await call("PUT", {
     botToken: TOKEN,
     oauthClientSecret: CLIENT_SECRET,
-    allowUserIds: ["123456789012345678"],
     guildIds: [],
     internalRoleIds: [],
   });
@@ -104,7 +103,7 @@ test("no admin response contains the token or the OAuth client secret", async (t
 test("non-admin caller is refused on every route", async (t) => {
   const { call } = await fixture(t);
   const get = await call("GET", undefined, "non-admin");
-  const put = await call("PUT", { allowUserIds: [] }, "non-admin");
+  const put = await call("PUT", { guildIds: [] }, "non-admin");
   const del = await call("DELETE", undefined, "non-admin");
   assert.equal(get.status, 403);
   assert.equal(put.status, 403);
@@ -114,7 +113,7 @@ test("non-admin caller is refused on every route", async (t) => {
 test("returns 404 on every route if store is not configured in deps", async (t) => {
   const { call } = await fixture(t, { omitStore: true });
   const get = await call("GET");
-  const put = await call("PUT", { allowUserIds: [] });
+  const put = await call("PUT", { guildIds: [] });
   const del = await call("DELETE");
   assert.equal(get.status, 404);
   assert.equal(put.status, 404);
@@ -128,7 +127,6 @@ test("audit entries are recorded for GET, PUT, and DELETE", async (t) => {
   const { call, auditEntries } = await fixture(t);
   await call("PUT", {
     botToken: TOKEN,
-    allowUserIds: ["123456789012345678"],
     guildIds: [],
     internalRoleIds: [],
   });
@@ -147,8 +145,7 @@ test("invalid input produces 400 and does not echo secrets", async (t) => {
   const { call } = await fixture(t);
   const res = await call("PUT", {
     botToken: TOKEN,
-    allowUserIds: ["invalid-id"],
-    guildIds: [],
+    guildIds: ["invalid-id"],
     internalRoleIds: [],
   });
   assert.equal(res.status, 400);

@@ -31,6 +31,7 @@ test("reactionTallies names unicode and custom emoji and drops empty counts", ()
   const rows = [
     { emoji: { name: "👍", id: null }, count: 2 },
     { emoji: { name: "party", id: "5" }, count: 1 },
+    { emoji: { name: "spin", id: "6", animated: true }, count: 3 },
     { emoji: { name: "🎉", id: null }, count: 0 },
   ];
   const out = reactionTallies(rows as never);
@@ -38,8 +39,9 @@ test("reactionTallies names unicode and custom emoji and drops empty counts", ()
     out.map((t) => [t.name, t.count]),
     [
       ["+1", 2],
-      ["party:5", 1],
+      ["<:party:5>", 1],
+      ["<a:spin:6>", 3],
     ],
   );
-  assert.equal(emojiDisplayName({ name: "party", id: "5" } as never), "party:5");
+  assert.equal(emojiDisplayName({ name: "party", id: "5" } as never), "<:party:5>");
 });

@@ -13,11 +13,12 @@ export interface MessageTarget {
 interface EmojiFacts {
   name: string | null;
   id: string | null;
+  animated?: boolean | null;
 }
 
 export function emojiDisplayName(emoji: EmojiFacts): string {
   const name = emoji.name ?? "";
-  return emoji.id ? `${name}:${emoji.id}` : (emojiNameOf(name) ?? name);
+  return emoji.id ? `<${emoji.animated ? "a" : ""}:${name}:${emoji.id}>` : (emojiNameOf(name) ?? name);
 }
 
 export function reactionTallies(reactions: Iterable<{ emoji: EmojiFacts; count: number | null }>): ReactionTally[] {

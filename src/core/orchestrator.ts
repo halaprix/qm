@@ -128,7 +128,6 @@ import { createToolContext, NeedsApproval, CommandDenied, type CommandCredential
 import type { FileArtifact } from "../files/file-artifact-store.ts";
 import { artifactImageLoader } from "../harness/replay-images.ts";
 import { principalEntitledToScope } from "../resolution/context-filter.ts";
-import { ConfigConflictError } from "../resolution/config-store.ts";
 import { openSessionEntry, searchSessionEntries } from "../sessions/history-search.ts";
 import { createTranscriptSource } from "../sessions/transcript-source.ts";
 import { defaultPublishAudience } from "../resolution/publish-audience.ts";
@@ -709,11 +708,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
       }
 
-      const resolution = await deps.resolution.resolve(conversation, actor, external).catch((e: unknown) => {
-        if (e instanceof ConfigConflictError) return e;
-        throw e;
-      });
-      if (resolution instanceof ConfigConflictError) return { status: "refused", reason: resolution.message };
+      const resolution = await deps.resolution.resolve(conversation, actor, external);
       const scopeId = deps.resolution.scopeFor(conversation, actor);
       const isCurrentSharedScopeMember = withLiveTurnMembership(deps.isCurrentSharedScopeMember, {
         actorId: actor.id,

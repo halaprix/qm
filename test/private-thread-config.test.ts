@@ -301,47 +301,20 @@ test("an admin write to a private thread scope is refused with a clear 409", asy
   assert.equal((await s.built.config.scopeConfigPresence(THREAD)).securityPosture, false);
 });
 
-test("a thread with config of its own is not linked: its turns are refused until that config is cleared", async () => {
+test("a thread with config of its own is refused a link until that config is cleared", async () => {
   const maps = configStoreMaps(() => createMemoryMap());
   const config = createMemoryConfigStore("default-org", maps);
   await config.setEgress(THREAD, { allowedHosts: [], deniedHosts: ["thread-bad.test"] });
-  await config.linkConfigParent(THREAD, PARENT);
-  const resolve = () =>
-    createResolutionService("default-org", config, createAclStore()).resolve(threadConversation(), actor);
-  await assert.rejects(resolve(), (e: unknown) => {
+  await assert.rejects(config.linkConfigParent(THREAD, PARENT), (e: unknown) => {
     assert.ok(e instanceof ConfigConflictError);
     assert.match(e.message, /an admin must clear this thread's configuration/);
     return true;
   });
-  await config.clearSharingPosture(THREAD);
+  assert.equal(await maps.configParents.get(THREAD), null);
   await maps.egressPolicies.delete(THREAD);
+  await config.clearSharingPosture(THREAD);
   await config.linkConfigParent(THREAD, PARENT);
   await assertParentConfig(await strictParent(config), threadConversation());
-});
-
-test("a Discord turn in a thread with conflicting config is refused with the admin instruction", async () => {
-  const built = buildApp(testConfig());
-  try {
-    await built.config.setSecurityPosture(THREAD, "strict");
-    await built.config.linkConfigParent(THREAD, PARENT);
-    const discordActor = { externalId: "discord:111", displayName: "Ada" };
-    const result = await built.app.turn({
-      surface: "discord",
-      actor: discordActor,
-      conversation: {
-        kind: "channel",
-        threadRef: `discord:th:${THREAD_ID}`,
-        channelRef: THREAD_ID,
-        audience: [discordActor],
-      },
-      text: "hello",
-      origin: { kind: "human", messageTs: "1300000000000000101" },
-    });
-    assert.equal(result.status, "refused");
-    assert.match(result.reason ?? "", /an admin must clear this thread's configuration/);
-  } finally {
-    await built.runtime.stop();
-  }
 });
 
 test("SOUL reads follow the link to the parent's durable SOUL even when this instance's cache is stale", async () => {

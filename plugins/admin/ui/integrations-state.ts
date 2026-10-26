@@ -332,7 +332,6 @@ export const emoji = {
 class DiscordInstallationState extends InstallationState {
   botToken = "";
   oauthClientSecret = "";
-  allowUserIds = "";
   guildIds = "";
   internalRoleIds = "";
   async load() {
@@ -341,7 +340,6 @@ class DiscordInstallationState extends InstallationState {
     this.data = result.data;
     this.botToken = "";
     this.oauthClientSecret = "";
-    this.allowUserIds = (this.data.allowUserIds ?? []).join(", ");
     this.guildIds = (this.data.guildIds ?? []).join(", ");
     this.internalRoleIds = (this.data.internalRoleIds ?? []).join(", ");
     this.render();
@@ -356,7 +354,6 @@ class DiscordInstallationState extends InstallationState {
       const result = await context.api("PUT", "/api/discord-installation", {
         ...(token ? { botToken: token } : {}),
         ...(clientSecret ? { oauthClientSecret: clientSecret } : {}),
-        allowUserIds: splitIds(this.allowUserIds),
         guildIds: splitIds(this.guildIds),
         internalRoleIds: splitIds(this.internalRoleIds),
       });

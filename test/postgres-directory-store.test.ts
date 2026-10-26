@@ -564,3 +564,29 @@ test("pg directory: a Discord nickname never wins a name that a Slack member als
   await store.replaceDiscord([]);
   assert.equal((await store.resolve("alice")).kind, "one");
 });
+
+test("pg directory: a Slack+Discord person linked by email keeps the Slack route", { skip }, async () => {
+  const { installPrincipalLinks } = await import("../src/directory/person.ts");
+  const { createDiscordPrincipalRoute, slackAccountOf } = await import("../src/delivery/principal-routing.ts");
+  const { DISCORD_DM_DELIVERY_TYPE } = await import("../src/discord/config.ts");
+  const store = createPostgresDirectoryStore(URL!);
+  await store.replace([
+    { principalId: "amy.work@example.com", displayName: "Amy Slack", type: "internal", slackId: "U0SLACKAMY" },
+  ]);
+  const route = createDiscordPrincipalRoute({
+    installation: { status: async () => ({ configured: true }) } as never,
+    linkedDiscordUserIds: () => ["111"],
+    hasSlackAccount: slackAccountOf(store),
+  });
+  assert.equal(await store.get("amy@example.com"), null);
+  assert.equal(await route("amy@example.com"), DISCORD_DM_DELIVERY_TYPE);
+  installPrincipalLinks({
+    canonical: (key) => (key === "amy@example.com" ? "amy.work@example.com" : undefined),
+    aliases: (key) => (key === "amy.work@example.com" ? ["amy@example.com"] : []),
+  });
+  try {
+    assert.equal(await route("amy@example.com"), null);
+  } finally {
+    installPrincipalLinks(null);
+  }
+});

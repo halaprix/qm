@@ -197,19 +197,6 @@ test("a trailing slash on the portal URL never doubles in the redirect URI", asy
   assert.equal(url.searchParams.get("redirect_uri"), "https://agent.example/settings");
 });
 
-test("Discord being unreachable is a 502 and links nothing", async (t) => {
-  const f = await fixture(t, { discordDown: true });
-  const state = await f.stateFor("ana@acme.com");
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 502);
-  assert.deepEqual(await f.links.list(), []);
-});
-
 test("Discord returning an unparsable response is a 502 and links nothing", async (t) => {
   const f = await fixture(t, { unparsableUser: true });
   const state = await f.stateFor("ana@acme.com");
@@ -221,20 +208,6 @@ test("Discord returning an unparsable response is a 502 and links nothing", asyn
   );
   assert.equal(done.status, 502);
   assert.equal(done.body?.error, "discord_unavailable");
-  assert.deepEqual(await f.links.list(), []);
-});
-
-test("Discord clean refusal in user fetch is a 400 oauth_failed and links nothing", async (t) => {
-  const f = await fixture(t, { userRefusal: true });
-  const state = await f.stateFor("ana@acme.com");
-  const done = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(done.status, 400);
-  assert.equal(done.body?.error, "oauth_failed");
   assert.deepEqual(await f.links.list(), []);
 });
 
@@ -684,55 +657,48 @@ test("two concurrent completes with different Discord ids result in exactly one 
   assert.equal((await f.links.list()).length, 1);
 });
 
-for (const hop of ["tokenStatus", "meStatus"] as const) {
-  for (const status of [500, 429]) {
-    test(`Discord ${status} on ${hop === "tokenStatus" ? "token" : "/users/@me"} is 502 discord_unavailable`, async (t) => {
-      const f = await fixture(t, { [hop]: status });
-      const state = await f.stateFor("ana@acme.com");
-      const res = await f.call(
-        "POST",
-        "/v1/discord/link/complete",
-        { p: "ana@acme.com" },
-        { code: "good", state, nonce: TEST_NONCE },
-      );
-      assert.equal(res.status, 502);
-      assert.equal(res.body?.error, "discord_unavailable");
-    });
+const TOKEN_BODY = { access_token: "user-token", token_type: "Bearer" };
+const ME_BODY = { id: PROVEN, username: "ana_d", discriminator: "0" };
+const DISCORD_FAILURES: Array<{
+  label: string;
+  opts: Parameters<typeof fixture>[1];
+  status: number;
+  error: string;
+}> = [
+  { label: "being unreachable", opts: { discordDown: true }, status: 502, error: "discord_unavailable" },
+  ...[500, 429].flatMap((code) => [
+    { label: `${code} on token`, opts: { tokenStatus: code }, status: 502, error: "discord_unavailable" },
+    { label: `${code} on /users/@me`, opts: { meStatus: code }, status: 502, error: "discord_unavailable" },
+  ]),
+  {
+    label: "4xx on token with a valid-shaped body",
+    opts: { tokenStatus: 403, tokenBody: TOKEN_BODY },
+    status: 400,
+    error: "oauth_failed",
+  },
+  {
+    label: "4xx on /users/@me with a valid body",
+    opts: { meStatus: 403, meBody: ME_BODY },
+    status: 400,
+    error: "oauth_failed",
+  },
+  { label: "a clean refusal in the user fetch", opts: { userRefusal: true }, status: 400, error: "oauth_failed" },
+];
+
+test("each Discord failure maps to its status and links nothing", async (t) => {
+  for (const { label, opts, status, error } of DISCORD_FAILURES) {
+    const f = await fixture(t, opts);
+    const state = await f.stateFor("ana@acme.com");
+    const res = await f.call(
+      "POST",
+      "/v1/discord/link/complete",
+      { p: "ana@acme.com" },
+      { code: "good", state, nonce: TEST_NONCE },
+    );
+    assert.equal(res.status, status, label);
+    assert.equal(res.body?.error, error, label);
+    assert.deepEqual(await f.links.list(), [], label);
   }
-}
-
-test("Discord 4xx other than 429 on token is 400 oauth_failed and links nothing, even with a valid-shaped body", async (t) => {
-  const f = await fixture(t, {
-    tokenStatus: 403,
-    tokenBody: { access_token: "user-token", token_type: "Bearer" },
-  });
-  const state = await f.stateFor("ana@acme.com");
-  const res = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(res.status, 400);
-  assert.equal(res.body?.error, "oauth_failed");
-  assert.deepEqual(await f.links.list(), []);
-});
-
-test("Discord 4xx other than 429 on /users/@me is 400 oauth_failed and links nothing, even with a valid body", async (t) => {
-  const f = await fixture(t, {
-    meStatus: 403,
-    meBody: { id: PROVEN, username: "ana_d", discriminator: "0" },
-  });
-  const state = await f.stateFor("ana@acme.com");
-  const res = await f.call(
-    "POST",
-    "/v1/discord/link/complete",
-    { p: "ana@acme.com" },
-    { code: "good", state, nonce: TEST_NONCE },
-  );
-  assert.equal(res.status, 400);
-  assert.equal(res.body?.error, "oauth_failed");
-  assert.deepEqual(await f.links.list(), []);
 });
 
 test("SNOWFLAKE guard: /users/@me returns short id returns 400 and links nothing", async (t) => {

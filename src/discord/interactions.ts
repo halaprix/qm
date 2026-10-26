@@ -122,7 +122,6 @@ export function createInteractionHandler(deps: InteractionDeps): (click: ButtonC
     const d = await deps.core.getDelivery(parsed.deliveryId);
     if (!d || kindOf(d) !== parsed.kind) return click.refuse(STALE_BUTTON_TEXT);
     if (d.destination.type !== DISCORD_DM_DELIVERY_TYPE) return click.refuse(STALE_BUTTON_TEXT);
-    if (parsed.kind === "dep" && d.destination.copyOf) return click.refuse(STALE_BUTTON_TEXT);
     const recipientUserId = recipientDiscordId(d.destination.target, deps.core.discordUserIdsFor);
     if (recipientUserId !== click.userId) return click.refuse(STALE_BUTTON_TEXT);
     const subject = `${parsed.kind}:${subjectOf(d)}`;
