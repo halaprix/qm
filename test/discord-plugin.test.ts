@@ -24,7 +24,11 @@ function fakeClient({ emitReady = false, ...over }: { emitReady?: boolean } & Re
   return Object.assign(client, {
     user: { id: "999", tag: "bot#1", username: "qm" },
     login: async () => {
-      if (emitReady) queueMicrotask(() => client.emit("clientReady", client));
+      if (emitReady)
+        queueMicrotask(() => {
+          client.emit("shardReady", 0);
+          client.emit("clientReady", client);
+        });
       return "ok";
     },
     destroy: async () => {},
@@ -564,6 +568,7 @@ function guildHarness(opts: {
   const links: Array<{ threadId: string; parentId: string; submittedBefore: number }> = [];
   const ingested: unknown[][] = [];
   let historyFetchCount = 0;
+  let memberFetches = 0;
   const fetchCalls: Array<{ channel: string; limit?: number; before?: string; after?: string }> = [];
   const reactions: string[] = [];
   const messageStub = {
@@ -591,6 +596,7 @@ function guildHarness(opts: {
     members: {
       cache,
       fetch: async () => {
+        memberFetches += 1;
         if (opts.hydrationFails) throw new Error("gateway timeout");
         return cache;
       },
@@ -787,6 +793,7 @@ function guildHarness(opts: {
     enqueue: () => enqueued(),
     ingested,
     historyFetchCount: () => historyFetchCount,
+    memberFetches: () => memberFetches,
     fetchCalls,
     reactions,
     gapNotes,
@@ -3149,4 +3156,12 @@ test("a prompted message dropped for unknown readers is told so only once across
   await h.settle();
   await h.plugin.stop();
   assert.equal(h.channelPosts.length, 1);
+});
+
+test("one connection start fetches the guild members once even though ShardReady and ClientReady both fire", async () => {
+  const h = guildHarness({ authorRoles: ["staff"], viewers: [{ id: "111", roles: ["staff"] }] });
+  await h.plugin.start();
+  await h.settle();
+  await h.plugin.stop();
+  assert.equal(h.memberFetches(), 1);
 });

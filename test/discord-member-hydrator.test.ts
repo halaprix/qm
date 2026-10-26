@@ -90,3 +90,23 @@ test("onAllReady fires once every guild has hydrated, again after a re-hydrate, 
   assert.equal(ready, 2);
   h.stop();
 });
+
+test("a rate-limited fetch retries no sooner than the retry_after Discord reported", async () => {
+  let fetches = 0;
+  const h = createMemberHydrator({
+    guildIds: new Set(["900"]),
+    fetchAll: async () => {
+      fetches += 1;
+      if (fetches === 1) throw Object.assign(new Error("rate limited"), { data: { opcode: 8, retry_after: 30 } });
+    },
+  });
+  h.hydrate();
+  await tick();
+  mock.timers.tick(29_999);
+  await tick();
+  assert.equal(fetches, 1);
+  mock.timers.tick(1);
+  await tick();
+  assert.equal(fetches, 2);
+  assert.equal(h.allReady(), true);
+});

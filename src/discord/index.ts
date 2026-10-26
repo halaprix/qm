@@ -614,7 +614,6 @@ export function createDiscordPlugin(
     c.once(Events.ClientReady, (ready) => {
       if (!accepting) return;
       console.log(`[qm] discord connected as @${ready.user.tag}`);
-      hydrator.hydrate();
       for (const guildId of cfg.guildIds)
         track(linkActivePrivateThreads(c, channels, guildId), "discord: private thread links");
       directorySweeper.start();

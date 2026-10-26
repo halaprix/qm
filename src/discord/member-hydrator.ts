@@ -9,6 +9,11 @@ export interface MemberHydrator {
   stop(): void;
 }
 
+function rateLimitRetryAfterMs(err: unknown): number {
+  const seconds = (err as { data?: { retry_after?: unknown } } | null)?.data?.retry_after;
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds * 1000) : 0;
+}
+
 export function createMemberHydrator(opts: {
   guildIds: ReadonlySet<string>;
   fetchAll(guildId: string): Promise<void>;
@@ -36,7 +41,13 @@ export function createMemberHydrator(opts: {
             retries.delete(retry);
             fetchGuild(guildId, attempt + 1, gen);
           },
-          jitteredBackoffMs(attempt, { baseDelayMs: DISCORD_RETRY_BASE_MS, maxDelayMs: DISCORD_RETRY_MAX_MS }),
+          Math.min(
+            DISCORD_RETRY_MAX_MS,
+            Math.max(
+              jitteredBackoffMs(attempt, { baseDelayMs: DISCORD_RETRY_BASE_MS, maxDelayMs: DISCORD_RETRY_MAX_MS }),
+              rateLimitRetryAfterMs(err),
+            ),
+          ),
         );
         retries.add(retry);
       },
