@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SurfaceCoreClient } from "../src/api/surface-core-client.ts";
+import { DISCORD_RUN_RECOVERY_GRACE_MS } from "../src/discord/deliveries.ts";
 import { runDiscordTurn, type ReplyChannel, type StatusMessage } from "../src/discord/turn-flow.ts";
 import type { TurnResult } from "../src/types.ts";
 
@@ -333,9 +334,36 @@ test("spine mode posts nothing itself when the agent spoke through deliveries", 
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, []);
+});
+
+test("spine mode keeps an ok run owned until the recovery grace passes, whatever the outcome", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const log: Log = { sent: [], edits: [], deleted: 0, files: [] };
+  const results: TurnResult[] = [
+    { status: "ok", reply: "done" },
+    { status: "ok" },
+    { status: "pending_approval" },
+    { status: "silent" },
+  ];
+  for (const result of results) {
+    const ownedRuns = new Set<string>();
+    const c = core({ wait: async () => result });
+    await runDiscordTurn({
+      core: c,
+      channel: channel(log),
+      body: baseBody,
+      mode: "spine",
+      ownedRuns,
+      mayPost: allowAll,
+    });
+    assert.deepEqual([...ownedRuns], ["r1"]);
+    t.mock.timers.tick(DISCORD_RUN_RECOVERY_GRACE_MS);
+    assert.equal(ownedRuns.size, 0);
+  }
 });
 
 test("spine mode posts a refusal, because core has nothing to deliver", async () => {
@@ -353,6 +381,7 @@ test("spine mode posts a refusal, because core has nothing to deliver", async ()
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, [
@@ -376,6 +405,7 @@ test("a guest appears before the spine refusal post → no reason or adminUrl te
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -401,6 +431,7 @@ test("a guest appears before the spine approval post → the approval text and a
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -420,6 +451,7 @@ test("a guest appears before the spine failure post → the neutral text is post
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: async () => false,
   });
   assert.deepEqual(log.sent, ["I can't post this reply here right now."]);
@@ -468,6 +500,7 @@ test("spine mode posts the same approval pointer in the thread", async () => {
     channel: channel(log),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.deepEqual(log.sent, [
@@ -1024,6 +1057,7 @@ test("spine mode reacts only when posting is allowed", async () => {
       channel: channel(fresh()),
       body: baseBody,
       mode: "spine",
+      ownedRuns: new Set(),
       mayPost,
       onReact: async (names) => {
         reacted.push(names);
@@ -1075,6 +1109,7 @@ test("an unprompted spine turn posts nothing on refusal, approval or failure", a
       channel: channel(log),
       body: { ...baseBody, unprompted: true },
       mode: "spine",
+      ownedRuns: new Set(),
       mayPost: allowAll,
     });
     assert.deepEqual(log.sent, []);
@@ -1106,6 +1141,7 @@ test("spine typing for an unprompted turn starts only once the reply begins", as
     channel: typingChannel(typed),
     body: { ...baseBody, unprompted: true },
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.equal(beforeReplying, 0);
@@ -1119,6 +1155,7 @@ test("spine typing for an unprompted turn the agent declines never shows", async
     channel: typingChannel(typed),
     body: { ...baseBody, unprompted: true },
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.equal(typed.n, 0);
@@ -1131,6 +1168,7 @@ test("spine typing for a prompted turn starts immediately", async () => {
     channel: typingChannel(typed),
     body: baseBody,
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
   });
   assert.equal(typed.n, 1);
@@ -1150,6 +1188,7 @@ test("a spine turn calls onNoReply for every outcome except ok, including failed
       channel: channel(fresh()),
       body: { ...baseBody, unprompted: true },
       mode: "spine",
+      ownedRuns: new Set(),
       mayPost: allowAll,
       onNoReply: async () => void (calls += 1),
     });
@@ -1168,6 +1207,7 @@ test("a spine turn whose wait throws keeps the thread, because the run is still 
     channel: channel(fresh()),
     body: { ...baseBody, unprompted: true },
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
     onNoReply: async () => void (calls += 1),
   });
@@ -1185,6 +1225,7 @@ test("a spine turn whose submit throws calls onNoReply, because no run exists", 
     channel: channel(fresh()),
     body: { ...baseBody, unprompted: true },
     mode: "spine",
+    ownedRuns: new Set(),
     mayPost: allowAll,
     onNoReply: async () => void (calls += 1),
   });

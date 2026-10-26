@@ -72,6 +72,7 @@ export function createDiscordDispatcher(deps: {
   sender: DiscordSender;
   guard: DeliveryGuard;
   inFlightRuns: ReadonlySet<string>;
+  ownedRuns: Set<string>;
   renderCard?: (d: Delivery) => Promise<OutboundMessage | null>;
   recipientFor: (target: string) => string | null;
   now?: () => number;
@@ -81,7 +82,9 @@ export function createDiscordDispatcher(deps: {
   function waitingOnRun(d: Delivery): boolean {
     const runId = runIdOfDeliveryKey(d.idempotencyKey);
     if (runId === undefined) return false;
-    return deps.inFlightRuns.has(runId) || now() - d.createdAt < DISCORD_RUN_RECOVERY_GRACE_MS;
+    if (deps.inFlightRuns.has(runId)) return true;
+    if (deps.ownedRuns.delete(runId)) return false;
+    return now() - d.createdAt < DISCORD_RUN_RECOVERY_GRACE_MS;
   }
 
   const messageIdOf = (ref: string): string => DISCORD_MESSAGE_IDS.decode(ref) ?? ref;

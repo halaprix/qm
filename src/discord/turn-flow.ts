@@ -4,6 +4,7 @@ import { INTERNAL_ONLY_REFUSAL_REASON } from "../core/failure-copy.ts";
 import type { TurnResult } from "../types.ts";
 import { swallowAs } from "../util/errors.ts";
 import { toDiscordFiles, type DiscordFile } from "./attachments.ts";
+import { DISCORD_RUN_RECOVERY_GRACE_MS } from "./deliveries.ts";
 import { chunkMessage } from "./format.ts";
 
 export interface StatusMessage {
@@ -36,6 +37,7 @@ export type TurnInput =
       channel: ReplyChannel;
       body: CoreTurnBody;
       mode: "spine";
+      ownedRuns: Set<string>;
       mayPost: () => Promise<boolean>;
       onReact?: ReactHandler;
       onNoReply?: () => Promise<void>;
@@ -225,7 +227,7 @@ async function runStream(input: Extract<TurnInput, { mode: "stream" }>): Promise
 }
 
 async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<void> {
-  const { core, channel, body, mayPost } = input;
+  const { core, channel, body, mayPost, ownedRuns } = input;
   const say = (text: string): Promise<void> => notice(body.unprompted === true, { edit: (t) => channel.send(t) }, text);
   const keepTyping = () => void channel.typing().catch(swallowAs("discord: typing", undefined));
   let timer: NodeJS.Timeout | undefined;
@@ -236,11 +238,14 @@ async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<v
   };
   if (body.unprompted !== true) startTyping();
   let keep = false;
+  let ownedRunId: string | undefined;
   try {
     const queued = await core.submitTurn({ async: true, ...body });
     if (queued.steered) return;
     const runId = queued.status === "queued" ? queued.runId : undefined;
     keep = runId !== undefined;
+    if (runId) ownedRuns.add(runId);
+    ownedRunId = runId;
     const result = runId ? await core.waitRun(runId, { onReplying: startTyping }) : queued;
     keep = result?.status === "ok" || result?.status === "pending_approval";
     if (result?.status === "react") {
@@ -260,6 +265,7 @@ async function runSpine(input: Extract<TurnInput, { mode: "spine" }>): Promise<v
     );
   } finally {
     clearInterval(timer);
+    if (ownedRunId) setTimeout(ownedRuns.delete.bind(ownedRuns), DISCORD_RUN_RECOVERY_GRACE_MS, ownedRunId).unref();
     if (!keep) await input.onNoReply?.();
   }
 }

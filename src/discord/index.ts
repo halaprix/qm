@@ -113,6 +113,7 @@ export function createDiscordPlugin(
   const clientFactory = opts.clientFactory ?? (() => new Client(DISCORD_CLIENT_OPTIONS));
   const drainTimeoutMs = opts.drainTimeoutMs;
   const inFlightRuns = new Set<string>();
+  const ownedRuns = new Set<string>();
 
   let client: Client | null = null;
   let detachClient: (() => { client: Client; inFlight: Set<Promise<void>> }) | null = null;
@@ -326,6 +327,7 @@ export function createDiscordPlugin(
       core,
       channel: replyChannel(p.thread),
       mode: "spine",
+      ownedRuns,
       mayPost: turnPostGate(run.readersOf, p.scopeChannelId),
       onReact: reactHandler(run, p.reactTarget),
       ...(p.onNoReply ? { onNoReply: p.onNoReply } : {}),
@@ -523,6 +525,7 @@ export function createDiscordPlugin(
       sender,
       guard,
       inFlightRuns,
+      ownedRuns,
       renderCard: createCardRenderer(core, opts.webUiPublicUrl),
       recipientFor: (t) => recipientDiscordId(t, core.discordUserIdsFor),
     });

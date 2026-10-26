@@ -30,6 +30,7 @@ function harness(
   rows: Delivery[],
   guard: DeliveryGuard = { mayPost: async () => ({ ok: true }) },
   inFlight = new Set<string>(),
+  owned = new Set<string>(),
 ) {
   const log: string[] = [];
   const sender: DiscordSender = {
@@ -68,6 +69,7 @@ function harness(
     sender,
     guard,
     inFlightRuns: inFlight,
+    ownedRuns: owned,
     recipientFor: () => null,
     now: () => 100_000,
   });
@@ -112,6 +114,15 @@ test("run rows are skipped while in flight or inside the grace window", async ()
   const h = harness([young, flying, old], undefined, new Set(["r3"]));
   await h.dispatcher.drain();
   assert.deepEqual(h.log, ["edit:c1:s4:hello", "ack:d4"]);
+});
+
+test("a young run row owned by this process is sent at once, once", async () => {
+  const young = row({ id: "d2", idempotencyKey: "run:r2", createdAt: 100_000 });
+  const owned = new Set(["r2"]);
+  const h = harness([young], undefined, undefined, owned);
+  await h.dispatcher.drain();
+  assert.deepEqual(h.log, ["send:c1:hello:", "ack:d2"]);
+  assert.equal(owned.has("r2"), false);
 });
 
 test("a long editRef delivery edits the placeholder and sends the rest", async () => {
@@ -182,6 +193,7 @@ test("a send failure is reported and left unacked for retry", async () => {
     } as never,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
+    ownedRuns: new Set(),
     recipientFor: () => null,
   });
   await failing.drain();
@@ -262,6 +274,7 @@ test("lease loss mid-drain stops dispatching subsequent deliveries", async () =>
     sender,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
+    ownedRuns: new Set(),
     recipientFor: () => null,
   });
   assert.equal(await dispatcher.drain(), true);
@@ -308,6 +321,7 @@ function dmHarness(opts: { recipient: string | null; openDmFails?: boolean; dest
     } as never,
     guard: { mayPost: async () => ({ ok: true }) },
     inFlightRuns: new Set(),
+    ownedRuns: new Set(),
     renderCard: async () => ({ content: "card", components: [{}] as never }),
     recipientFor: () => opts.recipient,
   });

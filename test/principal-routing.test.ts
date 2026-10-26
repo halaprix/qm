@@ -174,6 +174,7 @@ test("relaySenderAttribution formats attribution string and discord dispatcher r
     sender,
     guard,
     inFlightRuns: new Set<string>(),
+    ownedRuns: new Set<string>(),
     recipientFor: () => "discord-user-111",
     now: () => 100_000,
   });
@@ -355,6 +356,7 @@ test("withPrincipalRouting feeds routed notices to the discord dispatcher", asyn
     sender,
     guard,
     inFlightRuns: new Set<string>(),
+    ownedRuns: new Set<string>(),
     recipientFor: (t) => (t === "ana@acme.com" ? "discord-user-111" : null),
     now: () => 100_000,
   });
