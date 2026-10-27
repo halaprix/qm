@@ -43,6 +43,8 @@ import { errMessage, swallowAs } from "../../util/errors.ts";
 import { adminSessionUrl } from "../../util/admin-links.ts";
 import { headLooksLikeText, replaceThreadSegment, type TurnPostKeys } from "./turn-helpers.ts";
 import type { OrchestratorDeps, OrchestratorInput } from "./types.ts";
+import { isDiscordChannelId, isSlackChannelId } from "../../directory/directory-store.ts";
+import type { SurfaceContextQuery } from "../../types.ts";
 import { surfaceCapabilities, surfaceForDeliveryType } from "../../surfaces/surface-capabilities.ts";
 
 const SURFACE_READ_MAX = 200;
@@ -111,13 +113,19 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       ? { rateLimitRecipient: { target: currentDestination.target, user: actor.id } }
       : {};
   let editRefConsumed = false;
+  const isCurrentChannel = (channel: string): boolean =>
+    Boolean(conversation.channelRef) &&
+    (channel === conversation.channelRef ||
+      (!isDiscordChannelId(channel.replace(/^#/, "")) &&
+        !isSlackChannelId(channel.replace(/^#/, "")) &&
+        channel.replace(/^#/, "").toLowerCase() === conversation.channelName?.toLowerCase()));
   const resolveDestination = async (
     target?: {
       channel?: string;
       recipient?: string;
       participants?: readonly string[];
     },
-    opts?: { mayOpenGroup?: boolean; mayReachDiscord?: boolean },
+    opts?: { mayOpenGroup?: boolean; mayReachDiscord?: boolean; forRead?: boolean },
   ): Promise<{ ok: true; destination: Destination } | { ok: false; message: string }> => {
     if (
       !target ||
@@ -125,12 +133,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     ) {
       return { ok: true, destination: currentDestination };
     }
-    if (
-      target.channel !== undefined &&
-      conversation.channelRef &&
-      (target.channel === conversation.channelRef ||
-        target.channel.replace(/^#/, "").toLowerCase() === conversation.channelName?.toLowerCase())
-    ) {
+    if (target.channel !== undefined && conversation.channelRef && isCurrentChannel(target.channel)) {
       return { ok: true, destination: { ...currentDestination, target: conversation.channelRef } };
     }
     if (!deps.directory)
@@ -158,10 +161,54 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(target.participants !== undefined ? { participants: target.participants } : {}),
       },
       actor.id,
-      { mayOpenGroup: opts?.mayOpenGroup === true },
+      { mayOpenGroup: opts?.mayOpenGroup === true, forRead: opts?.forRead === true },
     );
     if (!r.ok) return { ok: false, message: r.message };
     return { ok: true, destination: r.destination };
+  };
+  const resolveReadTarget = async (
+    channel?: string,
+    ts?: string,
+  ): Promise<
+    | {
+        ok: true;
+        destination: Destination;
+        surface: string;
+        query: Pick<SurfaceContextQuery, "conversationTarget" | "channelId" | "threadTs">;
+      }
+    | { ok: false; message: string }
+  > => {
+    let destination = currentDestination;
+    if (channel !== undefined) {
+      const d = await resolveDestination({ channel }, { mayReachDiscord: true, forRead: true });
+      if (!d.ok) return d;
+      destination = d.destination;
+    }
+    const surface =
+      (channel !== undefined ? surfaceForDeliveryType(destination.type) : undefined) ?? input.surface ?? "unknown";
+    if (ts !== undefined && surface === DISCORD_SURFACE)
+      return { ok: false, message: "Discord threads are channels of their own — pass the thread's id as `channel`." };
+    if (channel !== undefined) {
+      if (!destination.target) return { ok: false, message: "that channel has no readable target" };
+      return {
+        ok: true,
+        destination,
+        surface,
+        query: { channelId: destination.target, ...(ts !== undefined ? { threadTs: ts } : {}) },
+      };
+    }
+    if (ts !== undefined) {
+      if (!destination.target) return { ok: false, message: "this conversation has no thread to read" };
+      destination = { ...destination, target: replaceThreadSegment(destination.target, ts) };
+    }
+    return {
+      ok: true,
+      destination,
+      surface,
+      query: destination.target
+        ? { conversationTarget: destination.target, ...(ts !== undefined ? { threadTs: ts } : {}) }
+        : {},
+    };
   };
   const messageRef = (
     destination: Destination,
@@ -325,11 +372,13 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!ref.ok) return ref;
       return enqueue(withDelete(d.destination, { messageTs: ref.ref }), "", seq);
     },
-    readThread: async (opts?: { limit?: number }) => {
+    readThread: async (opts?: { limit?: number; channel?: string; ts?: string }) => {
       if (!deps.surfaceContext) return { ok: false, message: "the surface can't be read from this turn" };
-      if (!currentDestination.target) return { ok: false, message: "this conversation has no thread to read" };
-      const result = await deps.surfaceContext.pull(input.surface ?? "unknown", {
-        conversationTarget: currentDestination.target,
+      const read = await resolveReadTarget(opts?.channel, opts?.ts);
+      if (!read.ok) return read;
+      if (!read.destination.target) return { ok: false, message: "this conversation has no thread to read" };
+      const result = await deps.surfaceContext.pull(read.surface, {
+        ...read.query,
         viewer: actor.id,
         ...rateLimitRecipient,
         ...(opts?.limit !== undefined ? { count: Math.max(1, Math.min(SURFACE_READ_MAX, opts.limit)) } : {}),
@@ -384,15 +433,22 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(coverage ? { coverageSince: coverage } : {}),
       };
     },
-    search: async (query: string, opts?: { limit?: number; source?: "mirror" | "slack" }) => {
+    search: async (query: string, opts?: { limit?: number; source?: "mirror" | "slack"; channel?: string }) => {
       const q = query.trim();
-      const coverage = await coverageForTurn();
+      if (opts?.source === "slack" && opts.channel !== undefined)
+        return {
+          ok: false,
+          message: "live Slack search covers everything the asker can see; it can't be scoped to a channel.",
+        };
+      const read = await resolveReadTarget(opts?.channel);
+      if (!read.ok) return read;
+      const { destination: dest, surface } = read;
+      const coverage = read.query.channelId !== undefined ? undefined : await coverageForTurn();
       const withCoverage = (r: SurfaceSearchResult): SurfaceSearchResult =>
         coverage ? { ...r, coverageSince: coverage } : r;
       if (!q)
         return withCoverage({ ok: true, hits: [], source: deps.slackContextSource === "mirror" ? "cache" : "live" });
       const limit = Math.max(1, Math.min(SURFACE_SEARCH_MAX, opts?.limit ?? SURFACE_SEARCH_DEFAULT));
-      const dest = currentDestination;
       const shapeHits = (messages: unknown[], prefiltered = false) =>
         (messages as Array<{ ts?: string; time?: string; author?: string; text?: string }>)
           .filter((m) => typeof m?.text === "string" && (prefiltered || m.text.toLowerCase().includes(q.toLowerCase())))
@@ -407,7 +463,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         if (!deps.surfaceContext?.searchLive)
           return { ok: false, message: "live search isn't available from this turn" };
         if (!dest.target) return { ok: false, message: "this conversation has nothing to search" };
-        const result = await deps.surfaceContext.searchLive(input.surface ?? "unknown", {
+        const result = await deps.surfaceContext.searchLive(surface, {
           conversationTarget: dest.target,
           viewer: actor.id,
           ...rateLimitRecipient,
@@ -439,7 +495,13 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         });
       }
       const container = dest.target ?? conversation.channelRef ?? conversation.threadRef;
+      const storedOnlyCurrent = {
+        ok: false as const,
+        message: "stored search covers only this conversation's own channel; read the other channel with read_thread.",
+      };
+      const otherChannel = read.query.channelId !== undefined && read.query.channelId !== conversation.channelRef;
       if (deps.slackContextSource === "mirror" && deps.surfaceCache && dest.type === "slack" && container) {
+        if (otherChannel) return storedOnlyCurrent;
         const channel = container.split(":")[0]!;
         const hits = await deps.surfaceCache.search(q, { container: channel, limit });
         return withCoverage({
@@ -464,8 +526,9 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         return { ok: false, message: "Stored Slack message search is unavailable; no live search was performed." };
       }
       if (deps.surfaceSearch && (dest.type !== "slack" || deps.slackContextSource === "mirror")) {
+        if (otherChannel) return storedOnlyCurrent;
         const hits = await deps.surfaceSearch.search({
-          surface: input.surface ?? "unknown",
+          surface: surface,
           container,
           query: q,
           limit,
@@ -474,8 +537,8 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       }
       if (!deps.surfaceContext) return { ok: false, message: "search isn't available from this turn" };
       if (!dest.target) return { ok: false, message: "this conversation has nothing to search" };
-      const result = await deps.surfaceContext.pull(input.surface ?? "unknown", {
-        conversationTarget: dest.target,
+      const result = await deps.surfaceContext.pull(surface, {
+        ...read.query,
         viewer: actor.id,
         ...rateLimitRecipient,
         count: SURFACE_READ_MAX,
@@ -490,7 +553,17 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(result.note ? { message: result.note } : {}),
       });
     },
-    readMembers: async () => {
+    readMembers: async (opts?: { channel?: string }) => {
+      const read = await resolveReadTarget(opts?.channel);
+      if (!read.ok) return read;
+      if (read.query.channelId !== undefined && read.query.channelId !== conversation.channelRef) {
+        const members = await deps.directory?.conversationMembers("channel", read.query.channelId);
+        if (!members) return { ok: false, message: "I don't have the member list for that channel." };
+        return {
+          ok: true,
+          members: members.filter((m) => m.type === "internal").map((m) => ({ displayName: m.displayName })),
+        };
+      }
       const roster = (conversation.publishMembers ?? conversation.audience).filter((p) => p.type === "internal");
       if (!roster.length) return { ok: true, members: [] };
       return { ok: true, members: roster.map((p) => ({ displayName: p.displayName ?? p.id })) };

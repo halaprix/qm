@@ -83,6 +83,14 @@ test("an unknown channel with no Discord match stays channel_not_found", async (
   }
 });
 
+test("an unconfirmed Discord lookup is a retry error for reads and stays channel_not_found for posts", async () => {
+  const dir = directory(async () => ({ messages: [], retry: true }));
+  const read = await resolveReachTarget(dir, { channel: "ops" }, "ana@acme.com", { forRead: true });
+  assert.equal(read.ok === false && read.error, "discord_channel_unavailable");
+  const post = await resolveReachTarget(dir, { channel: "ops" }, "ana@acme.com");
+  assert.equal(post.ok === false && post.error, "channel_not_found");
+});
+
 function lookupHarness(opts: {
   channels: Array<{ id: string; name: string }>;
   views: Set<string>;

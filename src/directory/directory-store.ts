@@ -5,6 +5,7 @@ import { rosterIds, samePerson } from "./person.ts";
 
 export const isDiscordMember = (m: { principalId: string }): boolean => discordUserIdOf(m.principalId) !== null;
 export const isDiscordChannelId = (channelId: string): boolean => SNOWFLAKE.test(channelId);
+export const isSlackChannelId = (channelId: string): boolean => /^[CG][A-Z0-9]{6,}$/.test(channelId);
 export type ChannelSurface = "slack" | "discord";
 export const isSurfaceChannel = (surface: ChannelSurface, channelId: string): boolean =>
   isDiscordChannelId(channelId) === (surface === "discord");

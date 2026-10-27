@@ -275,7 +275,7 @@ export function createDiscordHistoryReader(deps: {
     },
     async recent(channelId: string, opts: { count: number; before?: string }): Promise<HistoryMessage[]> {
       const ch = await deps.channels.fetch(channelId);
-      if (!ch || !ch.isTextBased()) return [];
+      if (!ch || !ch.isTextBased()) throw new Error(`Discord channel ${channelId} isn't readable by the bot`);
       const fetched = await ch.messages.fetch({
         limit: opts.count,
         ...(opts.before ? { before: opts.before } : {}),

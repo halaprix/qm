@@ -17,6 +17,7 @@ import {
 import { isVisible } from "../directory/visibility.ts";
 import { swallow } from "../util/errors.ts";
 import { DISCORD_SURFACE } from "../discord/config.ts";
+import { READERS_UNKNOWN } from "../discord/context.ts";
 
 export type SurfacePull = (query: SurfaceContextQuery) => Promise<SurfaceContextResult | null>;
 
@@ -103,6 +104,7 @@ export type ReachResolution =
 
 export interface ReachOpts {
   mayOpenGroup?: boolean;
+  forRead?: boolean;
 }
 
 export async function resolveReachTarget(
@@ -156,7 +158,7 @@ export async function resolveReachTarget(
     if ((r.kind === "none" || storedDiscordId) && dir.discordLookup) {
       const found = await dir.discordLookup({
         lookupChannel: storedDiscordId ?? target.channel!,
-        postable: true,
+        postable: opts.forRead !== true,
         viewer: authorityId,
       });
       if (found?.channel) {
@@ -168,6 +170,8 @@ export async function resolveReachTarget(
         };
       }
       if (found?.note) return { ok: false, status: 403, error: "discord_channel_unavailable", message: found.note };
+      if (found?.retry && opts.forRead)
+        return { ok: false, status: 502, error: "discord_channel_unavailable", message: READERS_UNKNOWN };
       if (storedDiscordId) return membershipDenial(dir, authorityId, "channel");
     }
     if (r.kind === "none") {

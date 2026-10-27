@@ -34,7 +34,7 @@ export interface DiscordHistoryReader {
 const DISCORD_READ_MAX = 100;
 const discordTime = (id: string): string => utcMinute(snowflakeMs(id));
 const NOT_VISIBLE = "You can't read that Discord channel.";
-const READERS_UNKNOWN = "I can't confirm who can read that Discord channel right now. Try again in a minute.";
+export const READERS_UNKNOWN = "I can't confirm who can read that Discord channel right now. Try again in a minute.";
 
 export function createContextFulfiller(deps: {
   core: Pick<DiscordCoreClient, "fulfillContextRequest" | "discordUserIdsFor">;

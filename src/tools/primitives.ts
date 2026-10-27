@@ -338,6 +338,7 @@ export interface ToolContext extends SurfaceToolDeps {
 interface SurfaceSearchToolOpts {
   limit?: number;
   source?: "mirror" | "slack";
+  channel?: string;
 }
 
 interface SurfacePostOpts {
@@ -450,10 +451,10 @@ export interface SurfaceToolDeps {
   react(input: SurfaceReactInput): Promise<SurfacePostResult>;
   edit(input: SurfaceEditInput): Promise<SurfacePostResult>;
   delete(input: SurfaceDeleteInput): Promise<SurfacePostResult>;
-  readThread(opts?: { limit?: number }): Promise<SurfaceReadResult>;
+  readThread(opts?: { limit?: number; channel?: string; ts?: string }): Promise<SurfaceReadResult>;
   whatsNew(opts?: { since?: string }): Promise<SurfaceWhatsNewResult>;
   search(query: string, opts?: SurfaceSearchToolOpts): Promise<SurfaceSearchResult>;
-  readMembers(): Promise<SurfaceMembersResult>;
+  readMembers(opts?: { channel?: string }): Promise<SurfaceMembersResult>;
   readFile(ref: string): Promise<SurfaceFileResult>;
   getStandingOrder(): Promise<SurfaceStandingOrderResult>;
   setStandingOrder(
@@ -1465,7 +1466,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
     readThread: (opts) => surfaceOp((s) => s.readThread(opts)),
     whatsNew: (opts) => surfaceOp((s) => s.whatsNew(opts)),
     search: (query, opts) => surfaceOp((s) => s.search(query, opts)),
-    readMembers: () => surfaceOp((s) => s.readMembers()),
+    readMembers: (opts) => surfaceOp((s) => s.readMembers(opts)),
     readFile: (ref) => surfaceOp((s) => s.readFile(ref)),
     getStandingOrder: () => surfaceOp((s) => s.getStandingOrder()),
     setStandingOrder: (orders, bots, ambientEnabled, expectedOrders) =>

@@ -233,6 +233,7 @@ export function createSurfaceContextFulfiller(deps: {
         ({ channel, threadTs } = parseDeliveryTarget(q.conversationTarget));
       } else if (typeof q.channelId === "string" && q.channelId) {
         channel = q.channelId;
+        if (typeof q.threadTs === "string" && q.threadTs) threadTs = q.threadTs;
         const info = await directory.getChannelInfo(client, channel);
         if (!info) return post({ error: "I can't see that channel" });
         if (isExternallyShared(info)) return post({ error: "that channel is externally shared, so I won't read it" });
@@ -258,6 +259,9 @@ export function createSurfaceContextFulfiller(deps: {
           ? fetchContextHistory(client, channel, threadTs, before, q.live === true)
           : Promise.resolve<{ raw: SlackHistoryMessage[]; hasMore: boolean }>({ raw: [], hasMore: false }),
       ]);
+      const threadOutcome = outcomes[1];
+      if (typeof q.threadTs === "string" && q.threadTs && threadOutcome.status === "rejected")
+        throw threadOutcome.reason;
       const byTs = new Map<string, SlackHistoryMessage>();
       const notes = new Set<string>();
       let hasMore = false;
