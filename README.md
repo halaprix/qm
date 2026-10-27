@@ -16,6 +16,14 @@ Run it in your own cloud, with your own models and keys.
 
 </div>
 
+> [!NOTE]
+> **This is a community fork of [yc-software/qm](https://github.com/yc-software/qm).**
+> It adds Discord as a second chat surface next to Slack: the bot, account linking,
+> approvals, channel rosters and cross-channel reads. The same work is proposed upstream
+> in [yc-software/qm#2630](https://github.com/yc-software/qm/pull/2630).
+> This fork is not an official QM release. Upstream changes are merged in from time to time.
+> To set up Discord, read [src/discord/README.md](./src/discord/README.md).
+
 ## Overview
 
 Most agents are designed like personal assistants. You can make one work for a whole
@@ -31,7 +39,7 @@ providers, so a deployment isn't tied to any single vendor.
 
 ## Setup
 
-Tell your coding agent of choice `Let's deploy https://github.com/yc-software/qm`. From here, it should follow the deployment guide in this repo.
+Tell your coding agent of choice `Let's deploy https://github.com/halaprix/qm`. From here, it should follow the deployment guide in this repo.
 
 You can also try out a 3rd-party hosted version of QM [here](https://www.agent37.com/qm).
 
