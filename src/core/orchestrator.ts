@@ -3767,8 +3767,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ...(inbound.metas.length ? { attachments: inbound.metas } : {}),
           ...(inbound.images.length ? { images: inbound.images } : {}),
         });
+        const liveAmbient = input.origin.kind === "ambient" && input.origin.live === true;
         if (
-          input.addressed &&
+          (input.addressed || liveAmbient) &&
           !strictReadOnly &&
           input.surfaceTools &&
           surfaceToolDeps &&
@@ -3781,7 +3782,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           // directly instead of nudging it to re-post (a nudge here re-sends near-identical
           // text, which surfaces that render assistant entries show twice).
           const primaryReply = stripAckPrefix(result.reply ?? "", spineAckText).trim();
-          if (primaryReply && defaultDestination && deps.deliveries) {
+          if (input.addressed && primaryReply && defaultDestination && deps.deliveries) {
             try {
               const directKey = postKeys.key(defaultDestination, postKeys.take());
               await reachEnqueue({
@@ -3797,14 +3798,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               reportFailure("orchestrator: direct reply delivery", e, `session=${session.id}`);
             }
           }
-          if (spine.surfaceOutboundCount === 0 && (!isPollFire || primaryReply)) {
+          if (spine.surfaceOutboundCount === 0 && (input.addressed ? !isPollFire || primaryReply : primaryReply)) {
             const nudgeHistory = filterHistory(forModelContext((await historyWindow()).entries));
             result = await runHarnessTurn(
-              `[system] You were addressed directly. Reply with the \`${surfaceName}\` tool's \`post\` action, or decline explicitly with finish_silently — ending the turn without either is not allowed here.`,
+              input.addressed
+                ? `[system] You were addressed directly. Reply with the \`${surfaceName}\` tool's \`post\` action, or decline explicitly with finish_silently — ending the turn without either is not allowed here.`
+                : `[system] Nothing you write reaches anyone unless you post. If this answers someone here, post it with the \`${surfaceName}\` tool's \`post\` action; otherwise finish_silently.`,
               inbound.images.length ? { images: inbound.images } : {},
               { history: nudgeHistory },
             );
-            if (spine.surfaceOutboundCount === 0 && !result.silent && !result.stopped) {
+            if (input.addressed && spine.surfaceOutboundCount === 0 && !result.silent && !result.stopped) {
               const fallback = stripAckPrefix(result.reply ?? "", spineAckText).trim();
               if (fallback && defaultDestination && deps.deliveries) {
                 try {
