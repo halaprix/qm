@@ -1,6 +1,5 @@
 import {
   MAX_RECENT_MESSAGES,
-  MEMBERS_SHOW_MAX,
   recentWindow,
   renderConversationView,
   type ConversationView,
@@ -64,27 +63,6 @@ function shape(m: HistoryMessage, botUserId: string, triggerId: string): RecentM
   };
 }
 
-function memberList(
-  audience: readonly ActorAssertion[],
-  botUserId: string,
-  botName: string,
-): ConversationView["members"] {
-  if (audience.length === 0 || audience.length > MEMBERS_SHOW_MAX) return [];
-  const others = audience
-    .filter((a) => a.displayName && discordUserIdOf(a.externalId) !== botUserId)
-    .sort((a, b) => Number(a.externalId > b.externalId) - Number(a.externalId < b.externalId))
-    .map((a) => {
-      const mentionId = discordUserIdOf(a.externalId);
-      return {
-        id: a.externalId,
-        name: a.displayName as string,
-        ...(mentionId ? { mentionId } : {}),
-        ...(a.isBot ? { isBot: true } : {}),
-      };
-    });
-  return [{ id: botUserId, name: botName, mentionId: botUserId, isYou: true }, ...others];
-}
-
 export async function buildGuildTurnContext(
   deps: { reader: Pick<DiscordHistoryReader, "recent" | "thread">; botUserId: string; botName: string },
   input: {
@@ -126,8 +104,6 @@ export async function buildGuildTurnContext(
     if (id && a.displayName) nameById.set(id, a.displayName);
   }
 
-  const members = memberList(input.audience, botUserId, botName);
-
   const opening = input.threadId === null;
   const youOpenedIt = opening || info?.ownerId === botUserId;
   const starterMessage = info?.starter;
@@ -141,14 +117,12 @@ export async function buildGuildTurnContext(
   const view: ConversationView = {
     messageIds: DISCORD_MESSAGE_IDS,
     channel: { ...(input.channelName ? { name: input.channelName } : {}), kind: "channel" },
-    members,
     messages: recentWindow(
       all.map((m) => shape(m, botUserId, input.triggerId)),
       DISCORD_MESSAGE_IDS,
       MAX_RECENT_MESSAGES,
     ),
     here,
-    files: [],
     omittedFiles: [],
     nameById,
     ...(note ? { contextNote: note } : {}),

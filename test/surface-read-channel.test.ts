@@ -257,27 +257,25 @@ function slackTools(member: boolean, stored?: "cache" | "search") {
         groupMember: async () => false,
         get: async () => ({ displayName: "Ana" }),
       },
-      ...(stored
+      ...(stored === "cache"
         ? {
-            slackContextSource: "mirror",
-            ...(stored === "cache"
-              ? {
-                  surfaceCache: {
-                    containerState: async () => null,
-                    search: async (_q: string, o: unknown) => {
-                      cacheSearches.push(o);
-                      return [];
-                    },
-                  },
-                }
-              : {
-                  surfaceSearch: {
-                    search: async (o: unknown) => {
-                      cacheSearches.push(o);
-                      return [];
-                    },
-                  },
-                }),
+            surfaceCache: {
+              containerState: async () => null,
+              search: async (_q: string, o: unknown) => {
+                cacheSearches.push(o);
+                return [];
+              },
+            },
+          }
+        : {}),
+      ...(stored && stored !== "cache"
+        ? {
+            surfaceSearch: {
+              search: async (o: unknown) => {
+                cacheSearches.push(o);
+                return [];
+              },
+            },
           }
         : {}),
       surfaceContext: {

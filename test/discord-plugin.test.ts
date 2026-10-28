@@ -2107,10 +2107,7 @@ test("a thread turn carries prior turns, overheard lines, detect context, header
     { ts: "1300000000000000003", role: "user", name: "bo", text: "also the @u111 db" },
   ]);
   assert.equal(body.detectContext, "ana: can you check the deploy?\nbo: also the @u111 db");
-  assert.equal(
-    body.conversationHeader,
-    "You are in a channel. People here: you, @u111 (<@111>), @u112 (<@112>). You are replying in a thread you started.",
-  );
+  assert.equal(body.conversationHeader, "You are in a channel. You are replying in a thread you started.");
   assert.deepEqual(body.gatewayContext, {
     location: "channel c1",
     details: { channel: "c1", thread_id: "t1" },

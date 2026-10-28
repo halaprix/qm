@@ -38,7 +38,7 @@ const SURFACES: Readonly<Record<string, SurfaceCapabilities>> = {
     approvalCardType: "principal",
     keychainCardInConversation: true,
     mentionHint:
-      " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in People here / read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping.",
+      " To @-mention on Slack, use `<@U…>` for a person or `<!subteam^S…>` for a user group (ids appear in the conversation roster and in read / search results). A typed `@name` is plain text and pings no one; @here/@channel/@everyone never ping.",
     revisions: {
       threadRefsFor: (e) => slackThreadRefCandidates(e.container, e.ts, e.sub ?? undefined),
       scansFor: (threadRef) => {

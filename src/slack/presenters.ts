@@ -1,3 +1,5 @@
+import { escapeSlackText } from "./mrkdwn.ts";
+
 export const CURATED_ACK_EMOJI = [
   "bug",
   "hammer_and_wrench",
@@ -70,7 +72,7 @@ export function renderGoalNotice(goal: GoalNoticeView): string {
     .replace(/\s+/g, " ")
     .trim();
   const bounded = oneLine.length > 140 ? `${oneLine.slice(0, 139)}…` : oneLine;
-  const objective = bounded.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const objective = escapeSlackText(bounded);
   if (goal.status === "complete") return `✓ Goal complete: ${objective}`;
   if (goal.status === "cancelled") return `✕ Goal cancelled: ${objective}`;
   if (goal.status === "paused") return `⏸ Goal paused: ${objective}`;

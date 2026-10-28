@@ -1,6 +1,7 @@
 import type { App } from "../api/app-types.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
 import { principalDestination } from "../reach/reach.ts";
+import { uuidSchema } from "../util/ids.ts";
 import { parseScopeId, scopeId, type ActorAssertion, type Destination } from "../types.ts";
 
 type Request = NonNullable<Destination["deploymentAccess"]>;
@@ -12,7 +13,7 @@ export function parseDeployAccess(value: string): Request {
     !r ||
     Object.keys(r).length !== 2 ||
     typeof r.deploymentId !== "string" ||
-    !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(r.deploymentId) ||
+    !uuidSchema.safeParse(r.deploymentId).success ||
     typeof r.requesterId !== "string" ||
     !/^[^\s\p{Cc}<>|:]{1,320}$/u.test(r.requesterId)
   )
