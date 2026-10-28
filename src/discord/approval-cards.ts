@@ -4,7 +4,7 @@ import type { KeychainApprovalView } from "../credentials/keychain-approval.ts";
 import { APPROVAL_SUMMARY_MAX, INLINE_COMMAND_MAX } from "../surfaces/approval-limits.ts";
 import { conversationWebUrl } from "../util/conversation-links.ts";
 import type { Delivery } from "../types.ts";
-import { UUID } from "../util/uuid.ts";
+import { uuidSchema } from "../util/ids.ts";
 import { DISCORD_MESSAGE_LIMIT } from "./format.ts";
 import type { OutboundMessage } from "./sender.ts";
 
@@ -36,7 +36,7 @@ export function cardCustomId(kind: CardKind, action: string, deliveryId: string)
 
 export function parseCardCustomId(customId: string): { kind: CardKind; action: string; deliveryId: string } | null {
   const [prefix, kind, action, deliveryId] = customId.split(":");
-  if (prefix !== "qm" || !kind || !action || !deliveryId || !UUID.test(deliveryId)) return null;
+  if (prefix !== "qm" || !kind || !action || !deliveryId || !uuidSchema.safeParse(deliveryId).success) return null;
   if (!(kind in CARD_ACTIONS)) return null;
   const actions: readonly string[] = CARD_ACTIONS[kind as CardKind];
   return actions.includes(action) ? { kind: kind as CardKind, action, deliveryId } : null;

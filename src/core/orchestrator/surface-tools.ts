@@ -250,7 +250,6 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
   let coverageChecked = false;
   let coverageSince: string | undefined;
   const coverageForTurn = async (): Promise<string | undefined> => {
-    if (deps.slackContextSource !== "mirror") return undefined;
     if (coverageChecked) return coverageSince;
     coverageChecked = true;
     const container = currentDestination.target ?? conversation.channelRef ?? conversation.threadRef;
@@ -446,8 +445,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const coverage = read.query.channelId !== undefined ? undefined : await coverageForTurn();
       const withCoverage = (r: SurfaceSearchResult): SurfaceSearchResult =>
         coverage ? { ...r, coverageSince: coverage } : r;
-      if (!q)
-        return withCoverage({ ok: true, hits: [], source: deps.slackContextSource === "mirror" ? "cache" : "live" });
+      if (!q) return withCoverage({ ok: true, hits: [], source: "cache" });
       const limit = Math.max(1, Math.min(SURFACE_SEARCH_MAX, opts?.limit ?? SURFACE_SEARCH_DEFAULT));
       const shapeHits = (messages: unknown[], prefiltered = false) =>
         (messages as Array<{ ts?: string; time?: string; author?: string; text?: string }>)
@@ -500,7 +498,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         message: "stored search covers only this conversation's own channel; read the other channel with read_thread.",
       };
       const otherChannel = read.query.channelId !== undefined && read.query.channelId !== conversation.channelRef;
-      if (deps.slackContextSource === "mirror" && deps.surfaceCache && dest.type === "slack" && container) {
+      if (deps.surfaceCache && dest.type === "slack" && container) {
         if (otherChannel) return storedOnlyCurrent;
         const channel = container.split(":")[0]!;
         const hits = await deps.surfaceCache.search(q, { container: channel, limit });
@@ -516,16 +514,10 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
           message: "Search covers stored Slack events only; older or missed messages may be absent.",
         });
       }
-      if (opts?.source === "mirror" && deps.slackContextSource !== "mirror") {
-        return {
-          ok: false,
-          message: "Mirror reads are disabled until verification is complete. Use the default live source.",
-        };
-      }
       if (opts?.source === "mirror" && !deps.surfaceSearch) {
         return { ok: false, message: "Stored Slack message search is unavailable; no live search was performed." };
       }
-      if (deps.surfaceSearch && (dest.type !== "slack" || deps.slackContextSource === "mirror")) {
+      if (deps.surfaceSearch) {
         if (otherChannel) return storedOnlyCurrent;
         const hits = await deps.surfaceSearch.search({
           surface: surface,

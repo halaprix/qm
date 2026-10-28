@@ -38,7 +38,6 @@ import type { ConnectorTokenStore, Keychain, ServiceCredentialStore } from "../.
 import type { FeatureFlagStore } from "../../feature-flags.ts";
 import type { TeamStore } from "../../teams/teams.ts";
 import type { CredentialUsageSink } from "../../admin/credential-usage-sink.ts";
-import type { ConnectorStatusCache } from "../../credentials/connector-status.ts";
 import type { ModelGateway } from "../../model/model-gateway.ts";
 import type { AuditLog } from "../../audit/audit-log.ts";
 import type { SecurityScreener } from "../../security/security-screener.ts";
@@ -48,7 +47,6 @@ import type { ControlService } from "../../api/control-service.ts";
 import type { Harness } from "../../harness/harness.ts";
 import type { AdminService } from "../../admin/admin-service.ts";
 import type { ErrorLog } from "../../admin/error-log.ts";
-import type { ToolLedger } from "../../runs/tool-ledger.ts";
 import type { RunSignalStore } from "../../runs/run-signal-store.ts";
 import type { TurnStream } from "../../runs/turn-stream.ts";
 import type { RunActivityStore } from "../../runs/run-activity-store.ts";
@@ -155,6 +153,7 @@ export interface OrchestratorDeps {
   capabilitySecret?: string;
   capabilityTokenCompression?: boolean;
   apiBaseUrl?: string;
+  sandboxModels?: boolean;
   publicWebUrl?: string;
   /** The public base for an inbound webhook URL (PUBLIC_WEB_URL ?? api url) — what the webhook
    *  tool hands the user to point the sender at; matches the HTTP webhook route's base exactly. */
@@ -173,7 +172,6 @@ export interface OrchestratorDeps {
   approvals: DurableMap<PendingApprovalRecord>;
   approvalGrants: DurableMap<CommandApprovalGrant>;
   errors?: ErrorLog;
-  ledger?: ToolLedger;
   signals?: RunSignalStore;
   turnStream?: TurnStream;
   runActivity?: RunActivityStore;
@@ -191,9 +189,7 @@ export interface OrchestratorDeps {
     purpose?: import("../../resolution/config-store.ts").RuntimePurpose,
   ) => Promise<string | null>;
   connectorTokens?: ConnectorTokenStore;
-  connectorStatusCache?: ConnectorStatusCache;
   resolveConnectorClient?: OAuthClientResolver;
-  scratchExec?: boolean;
   featureFlags?: FeatureFlagStore;
   installSharedCanvas?: (
     actorId: string,
@@ -211,7 +207,6 @@ export interface OrchestratorDeps {
   currentScopeMembers?: import("../../resolution/scope-membership.ts").CurrentScopeMembers;
   managedGroups?: Pick<ManagedGroupDirectory, "recognizes" | "members" | "version" | "withVersion" | "slackChannel">;
   reachExec?: boolean;
-  eagerProvision?: boolean;
   environments?: EnvironmentStore;
   layerBrokerFor?: (tool: BrokeredLayerTool) => AwsRoleBroker | undefined;
   brokeredTools?: readonly BrokeredLayerTool[];
@@ -220,7 +215,6 @@ export interface OrchestratorDeps {
   discordLookup?: SurfacePull;
   surfaceSearch?: SurfaceSearchStore;
   surfaceCache?: SurfaceCache;
-  slackContextSource?: "live" | "shadow" | "mirror";
   channelPolicy?: ChannelPolicyStore;
   surfaceDebugFooter?: boolean;
 }

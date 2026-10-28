@@ -1,5 +1,5 @@
 import { orgId as configOrgId } from "../config.ts";
-import { createPgPool } from "../persistence/pg-pool.ts";
+import { createPgPool, withPgTransaction } from "../persistence/pg-pool.ts";
 import { SLACK_CONTAINER } from "../surfaces/message-ids.ts";
 import { SNOWFLAKE } from "../util/snowflake.ts";
 import type {
@@ -169,10 +169,8 @@ export function createPostgresSurfaceCache(
     async ingest(events) {
       if (!events.length) return { upserted: 0 };
       const now = Date.now();
-      const client = await (await pool()).connect();
       let upserted = 0;
-      try {
-        await client.query("BEGIN");
+      await withPgTransaction(await pool(), async (client) => {
         for (const event of events) {
           const e = normalizeEvent(event);
           if (!e.container || !e.ts) continue;
@@ -264,13 +262,7 @@ export function createPostgresSurfaceCache(
             [orgId, e.container, e.ts, e.containerName ?? null, e.kind ?? null, JSON.stringify(e.members ?? []), now],
           );
         }
-        await client.query("COMMIT");
-      } catch (err) {
-        await client.query("ROLLBACK");
-        throw err;
-      } finally {
-        client.release();
-      }
+      });
       return { upserted };
     },
 

@@ -186,8 +186,9 @@ for its next message. To keep a worker working, any member can attach a goal to
 The goal is installed as the worker session's goal when that turn starts, and the
 turn runs under the normal goal loop: the worker is prompted to continue until the
 goal's governor approves completion or pauses it, or an optional `token_cap` is
-spent. A turn that carries a goal runs without the swarm `turnMs` deadline; other
-turns keep it. `floor` and `token_cap` take the same keys as the goal tool, and
+spent. While a worker's goal is open, every turn it runs is a goal turn, whatever
+woke it: swarm messages reach it mid-turn, it can wait on them, and it runs without
+the swarm `turnMs` deadline; when `turnMs` is set, other turns keep it. `floor` and `token_cap` take the same keys as the goal tool, and
 neither is required. Goals go to workers, not the root session (a goal sent to
 `all` skips the root and the sender), and a goal needs `notify`. The worker treats the agent that sent the goal as the user for it and
 messages that agent when it needs a decision. When a goal is complete, the worker
@@ -275,7 +276,12 @@ query settles, even when a sweep reports a selection timeout.
 `active`, or `stopped`. Humans in the swarm may control any worker; an agent may
 control only itself or its descendants. The root session cannot be controlled.
 Controls apply to descendants too. Pausing holds new notifications as pending
-until the worker is resumed; runs already queued continue. Stopping is terminal:
+until the worker is resumed and returns queued runs that never started to pending;
+retries and runs already started still run, and their goal turn is held. A goal
+turn the swarm dispatched ends at the worker's next tool result or reply instead
+of drawing keep-going prompts, and a goal wait returns; the goal stays open.
+Resuming delivers the held notifications; a worker with none waits for its next
+message. A person's own turn in the worker's thread is never held. Stopping is terminal:
 pending notifications fail, unstarted queued runs are withdrawn, running turns are
 aborted, and later turns in that worker session are refused. `inspect` reports each
 peer's `control`. The web UI shows a Swarm strip on swarm sessions: a collapsed summary of
@@ -287,25 +293,26 @@ refreshes every few seconds only while workers are active and the tab is visible
 
 ## Defaults
 
-| Setting                                          | Default              |
-| ------------------------------------------------ | -------------------- |
-| `agents` (root and failed reservations included) | 32                   |
-| `depth` below root                               | 4                    |
-| `contextBytes` / `textBytes`                     | 8,192 each           |
-| `spawnRequests`                                  | unset (no limit)     |
-| `messages` including initial work                | unset (no limit)     |
-| `notifications` including initial work           | unset (no limit)     |
-| `lifetimeMs` from first spawn                    | unset (no limit)     |
-| `turnMs` per notification                        | 600,000 (10 minutes) |
-| `waitMs` per read                                | 10,000               |
+| Setting                                          | Default          |
+| ------------------------------------------------ | ---------------- |
+| `agents` (root and failed reservations included) | 32               |
+| `depth` below root                               | 4                |
+| `contextBytes` / `textBytes`                     | 8,192 each       |
+| `spawnRequests`                                  | unset (no limit) |
+| `messages` including initial work                | unset (no limit) |
+| `notifications` including initial work           | unset (no limit) |
+| `lifetimeMs` from first spawn                    | unset (no limit) |
+| `turnMs` per notification                        | unset (no limit) |
+| `waitMs` per read                                | 10,000           |
 
 The root and at least one worker require `agents >= 2`. All other settings accept
 any positive integer; `turnMs` is limited only by the 2,147,483,647 ms timer ceiling. Read requests can still use `waitMs:0`.
-`spawnRequests`, `messages`, `notifications`, and `lifetimeMs` are off unless a
+`spawnRequests`, `messages`, `notifications`, `lifetimeMs`, and `turnMs` are off unless a
 spawn or `SWARM_DEFAULTS` sets them. When set, they are enforced as budgets that are
-reserved atomically with the members and messages that consume them. Both the
-orchestrator and independent worker cancellation honor the stored turn deadline;
-existing organization-wide limits can shorten it. Internal reconciliation limits,
+reserved atomically with the members and messages that consume them. A set `turnMs`
+is enforced as the turn's wall clock, except for workers with an open goal; existing
+organization-wide limits can shorten it. Without `turnMs` or the message budgets,
+only those organization-wide limits bound how long a turn runs or what it spends. Internal reconciliation limits,
 the 32-message read page, and bounded run retry counts are not swarm
 configuration.
 

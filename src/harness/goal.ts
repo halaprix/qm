@@ -81,6 +81,14 @@ export const GOAL_INBOX_POLL_MS = 5_000;
 export interface GoalInbox {
   receive(goal: GoalRecord): Promise<Array<{ id: string; text: string }>>;
   acknowledge(ids: readonly string[], goal: GoalRecord): Promise<void>;
+  held?(): Promise<boolean>;
+}
+
+export const GOAL_SWARM_HELD_NOTE =
+  "The swarm paused or stopped you. End your reply now and start nothing new; your goal stays open.";
+
+export async function goalInboxHeld(inbox: GoalInbox | undefined): Promise<boolean> {
+  return (await inbox?.held?.().catch(swallowAs("goal: read the swarm control state", false))) ?? false;
 }
 const GOAL_MAX_OBJECTIVE_CHARS = 4000;
 
@@ -133,26 +141,20 @@ export function createGoalRecord(input: {
 
 export const GoalCreateParams = Type.Object({
   objective: Type.String({
-    description:
-      "The concrete end state to pursue, in the user's terms. Verifiable phrasing ('all tests in X pass') beats vague ('improve X').",
+    description: "Concrete, verifiable end state in the user's terms.",
   }),
   floor: Type.Optional(
     Type.Object(
       {
-        minTurns: Type.Optional(Type.Number({ description: "Keep working for at least this many model turns." })),
-        minMs: Type.Optional(Type.Number({ description: "Keep working at least this many milliseconds." })),
-        minTokens: Type.Optional(Type.Number({ description: "Keep working through at least this many tokens." })),
-        minUsd: Type.Optional(Type.Number({ description: "Keep working through at least this much spend (USD)." })),
+        minTurns: Type.Optional(Type.Number({ description: "At least this many model turns." })),
+        minMs: Type.Optional(Type.Number({ description: "At least this many milliseconds." })),
+        minTokens: Type.Optional(Type.Number({ description: "At least this many tokens." })),
+        minUsd: Type.Optional(Type.Number({ description: "At least this much spend (USD)." })),
       },
-      {
-        description:
-          "Work floor — set when the user names a duration/amount ('for 30 minutes'). Completing early is allowed, but the harness keeps prompting for more work until the floor is met.",
-      },
+      { description: "Work floor when the user names a duration/amount; enforced until met." },
     ),
   ),
-  token_cap: Type.Optional(
-    Type.Number({ description: "Wind-down token budget. Set only when the user explicitly caps spend/size." }),
-  ),
+  token_cap: Type.Optional(Type.Number({ description: "Wind-down token budget, only when the user caps spend." })),
 });
 
 export type GoalCreateInput = Static<typeof GoalCreateParams>;
@@ -238,7 +240,8 @@ export async function waitForGoalMessages(
   try {
     while (goal.status === "paused" && !arrived && !interrupted() && Date.now() < until) {
       await pause(Math.min(GOAL_INBOX_POLL_MS, until - Date.now()));
-      if (!interrupted()) arrived = await takeGoalMessages(inbox, goal, meter);
+      if (interrupted() || (await goalInboxHeld(inbox))) break;
+      arrived = await takeGoalMessages(inbox, goal, meter);
     }
   } finally {
     if (goal.status === "paused") resumeGoal(goal);
@@ -603,6 +606,7 @@ export async function enforceGoal<T>(opts: {
   const floorUnmet = (): boolean => goalFloorUnmet(opts.goal, opts.meter);
   let enforcedAssignment = opts.goal.createdAt;
   while (outcome === opts.ok && !opts.blocked()) {
+    if (await goalInboxHeld(opts.inbox)) break;
     const arrived = opts.inbox
       ? await takeGoalMessages(opts.inbox, opts.goal, opts.meter, () => !opts.blocked()).catch(
           swallowAs("goal: read the inbox", undefined),

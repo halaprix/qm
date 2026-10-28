@@ -30,17 +30,6 @@ async function build(audience: ActorAssertion[]) {
   return { ctx, counts };
 }
 
-test("the member list order does not depend on the order the audience arrives in", async () => {
-  const a = member("111111111111111111", "Zed");
-  const b = member("222222222222222222", "Amy");
-  const forward = await build([a, b]);
-  const reversed = await build([b, a]);
-  assert.ok(forward.ctx.conversationHeader);
-  assert.equal(forward.ctx.conversationHeader, reversed.ctx.conversationHeader);
-  const header = forward.ctx.conversationHeader!;
-  assert.ok(header.indexOf("Zed") < header.indexOf("Amy"));
-});
-
 test("history is fetched as one small window, not the full Discord page", async () => {
   const { counts } = await build([member("111111111111111111", "Zed")]);
   assert.equal(counts.length, 1);

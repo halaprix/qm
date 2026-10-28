@@ -9,8 +9,20 @@ import { createPostgresDecisionStore, type DecisionStore } from "./decisions/sto
 import type { SlackSessionStatusState } from "./slack/session-status.ts";
 import { availableRuntimeError } from "./api/runtime-config.ts";
 import { createApprovalStore } from "./core/approval-store.ts";
+import { createRenderDeployProvider, type StoredRenderDeploy } from "./deploy/render-deploy-provider.ts";
+import { createRenderDeployArtifacts, type StoredRenderDeployCredential } from "./deploy/render-deploy-artifacts.ts";
+import { createRenderAppStorage, type StoredRenderAppStorage } from "./deploy/render-app-storage.ts";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createRenderWorkspaceStore } from "./workspace/render-workspace-store.ts";
+import {
+  createRenderSandbox,
+  type StoredRenderCleanup,
+  type StoredRenderSandbox,
+  type StoredRenderScratch,
+} from "./sandbox/render-sandbox.ts";
+import { createSdkRenderClient } from "./sandbox/render-client.ts";
 import { createKeychainApprovals, type KeychainApprovals } from "./credentials/keychain-approval.ts";
-import { flushErrorReporting } from "../plugins/chassis/src/error-reporting.ts";
+import { flushErrorReporting, tracePhase } from "../plugins/chassis/src/error-reporting.ts";
 import { createProductAnalytics } from "./util/product-analytics.ts";
 import { createAdmittedWork } from "./util/admitted-work.ts";
 import { runSessionSmoke } from "./deployment/postdeploy-smoke.ts";
@@ -119,6 +131,8 @@ import type {
   ScopeId,
   Session,
   SurfaceContextRequest,
+  TurnRequest,
+  TurnResult,
   Webhook,
 } from "./types.ts";
 import { personalScope, scopeId } from "./types.ts";
@@ -127,7 +141,7 @@ import { createPostgresAuditLog } from "./admin/postgres-audit-log.ts";
 import { createPostgresAppPageViewLog, type AppPageViewLog } from "./deploy/page-views.ts";
 import { createRateLimiter, type RateLimiter } from "./ratelimit/rate-limiter.ts";
 import { createPostgresRateLimiter } from "./ratelimit/postgres-rate-limiter.ts";
-import { createBudgetTracker, estimateCostUsd } from "./ratelimit/budget.ts";
+import { createBudgetTracker, estimateCostUsd, type BudgetTracker } from "./ratelimit/budget.ts";
 import type { SecurityScreenProbe } from "./security/security-screener.ts";
 import { createPostgresBudgetTracker } from "./ratelimit/postgres-budget.ts";
 import { createCronStore, DROP_RUN_AS_MIGRATION, type CronStore } from "./cron/cron-store.ts";
@@ -151,6 +165,7 @@ import { createDeliveryStore, type DeliveryStore } from "./delivery/delivery-sto
 import { createPostgresDeliveryStore } from "./delivery/postgres-delivery-store.ts";
 import { wireRunResultDeliveries } from "./delivery/run-result-delivery.ts";
 import { adminSessionUrl } from "./util/admin-links.ts";
+import { uuidSchema } from "./util/ids.ts";
 import { withWebTranscriptDeliveries } from "./delivery/web-transcript-delivery.ts";
 import { DISCORD_SURFACE } from "./discord/config.ts";
 import type { SurfacePull } from "./reach/reach.ts";
@@ -232,6 +247,7 @@ import {
   type StoredManagedAgentsSandbox,
 } from "./sandbox/managed-agents-sandbox.ts";
 import { createSdkManagedAgentsClient } from "./sandbox/managed-agents-client.ts";
+import { s3Client } from "./persistence/s3.ts";
 import { createS3SnapshotStore } from "./sandbox/home-snapshot.ts";
 import { createModalSandbox, type StoredModalSandbox } from "./sandbox/modal-sandbox.ts";
 import { createSdkModalClient } from "./sandbox/modal-client.ts";
@@ -267,7 +283,6 @@ import {
   type DropResolution,
 } from "./triggers/keychain-ask.ts";
 import { createSecretDropStore, type SecretDropStore, type SecretDropRecord } from "./credentials/secret-drop.ts";
-import { createConnectorStatusCache, type ConnectorStatusRecord } from "./credentials/connector-status.ts";
 import {
   createFeatureFlagStore,
   externalAppSharingAllowed,
@@ -349,6 +364,7 @@ import {
   type ProcessRegistry,
 } from "./processes/process-registry.ts";
 import { createProcessReaper, createReaperKillHook, type ProcessReaper } from "./processes/process-reaper.ts";
+import { createJobComputerSweep } from "./processes/job-computers.ts";
 import { createMonitorStore, type MonitorStore } from "./monitors/monitor-store.ts";
 import { createMonitorPoller, type MonitorPoller } from "./monitors/monitor-poller.ts";
 import { createSkillSyncEngine, type SkillSyncEngine } from "./skills/skill-sync-engine.ts";
@@ -423,7 +439,6 @@ import {
 import { createPostgresErrorLog } from "./admin/postgres-error-log.ts";
 import { errMessage, reportFailureAs, swallowAs } from "./util/errors.ts";
 import { sleep, withTimeout } from "./util/async.ts";
-import { UUID } from "./util/uuid.ts";
 import { createSlackInstallationStore, type SlackInstallationStore } from "./surfaces/slack-installation.ts";
 import { createDiscordInstallationStore, type DiscordInstallationStore } from "./surfaces/discord-installation.ts";
 
@@ -496,7 +511,7 @@ export interface BuiltApp {
   consentLinks: ConsentLinkStore;
   oauthFlows: OAuthFlowStore;
   secretDrops: SecretDropStore;
-  browserModelGateway?: ModelGatewayTransportConfig;
+  modelGatewayTransport?: ModelGatewayTransportConfig;
   resolveBrowserCompanyKeys: (includeSubscription?: boolean) => Promise<ProviderKeys>;
   modelGateway: ModelGateway;
   modelCredentials: ModelCredentialStore;
@@ -519,6 +534,7 @@ export interface BuiltApp {
   loopIngress: LoopIngressService;
   admin: AdminService;
   rateLimiter: RateLimiter;
+  budget: BudgetTracker;
   errors: ErrorLog;
   crons: CronStore;
   credentialUsage: CredentialUsageSink;
@@ -698,7 +714,6 @@ export function buildApp(
     ? createPostgresTeamStore(config.databaseUrl, featureFlags, scopeId("org", config.orgId))
     : undefined;
   const decisions = config.databaseUrl ? createPostgresDecisionStore(config.databaseUrl) : undefined;
-  const connectorStatusCache = createConnectorStatusCache(artifactMap<ConnectorStatusRecord>("connector_status"));
   const slackInstallation = createSlackInstallationStore(
     config.orgId,
     artifactMap("slack_installation"),
@@ -793,10 +808,20 @@ export function buildApp(
     config.securityScreen === "off" && overrides.securityScreener ? "enforce" : config.securityScreen,
   );
 
-  const workspace = createLocalWorkspaceStore(config.dataDir);
+  const requireDbUrl = (kind: string): string => {
+    if (!config.databaseUrl) throw new Error(`${kind}=postgres requires DATABASE_URL`);
+    return config.databaseUrl;
+  };
+  const s3 = config.s3Endpoint ? s3Client(config.s3Region, { endpoint: config.s3Endpoint }) : undefined;
+  const s3Override = s3 ? { _client: s3 } : {};
+  const workspace =
+    config.workspaceStore === "postgres"
+      ? createRenderWorkspaceStore(config.dataDir, requireDbUrl("WORKSPACE_STORE"))
+      : createLocalWorkspaceStore(config.dataDir);
   const blobTransfer: BlobTransferStore =
     config.transferStore === "s3" && config.s3Bucket
       ? createS3BlobTransferStore({
+          ...s3Override,
           bucket: config.s3Bucket,
           ...(config.s3Region ? { region: config.s3Region } : {}),
           ...(config.s3Prefix ? { prefix: config.s3Prefix } : {}),
@@ -805,6 +830,7 @@ export function buildApp(
   const fileBytes: DurableByteStore =
     config.snapshotStore === "s3" && config.s3Bucket
       ? createS3DurableByteStore({
+          ...s3Override,
           bucket: config.s3Bucket,
           ...(config.s3Region ? { region: config.s3Region } : {}),
           ...(config.s3Prefix ? { prefix: config.s3Prefix } : {}),
@@ -816,6 +842,7 @@ export function buildApp(
   const fileUploads =
     config.databaseUrl && config.snapshotStore === "s3" && config.s3Bucket
       ? createDirectFileUploads({
+          ...(s3 ? { client: s3, presign: (command, expiresIn) => getSignedUrl(s3, command, { expiresIn }) } : {}),
           bucket: config.s3Bucket,
           ...(config.s3Region ? { region: config.s3Region } : {}),
           ...(config.s3Prefix ? { prefix: config.s3Prefix } : {}),
@@ -911,6 +938,9 @@ export function buildApp(
   const e2bBodies = artifactMap<StoredE2bSandbox>("e2b_sandbox_bodies");
   const modalBodies = artifactMap<StoredModalSandbox>("modal_sandbox_bodies");
   const awsBodies = artifactMap<StoredMicrovm>("aws_sandbox_bodies");
+  const renderBodies = artifactMap<StoredRenderSandbox>("render_sandbox_bodies");
+  const renderScratch = artifactMap<StoredRenderScratch>("render_scratch_bodies");
+  const renderCleanup = artifactMap<StoredRenderCleanup>("render_sandbox_cleanup");
   const e2bClient = (use: "computers" | "apps"): E2bClient => {
     const e2b = config.e2bSandbox;
     if (!e2b.apiKey)
@@ -1009,8 +1039,6 @@ export function buildApp(
       }),
       ...(modal.namePrefix ? { namePrefix: modal.namePrefix } : {}),
       ...(modal.defaultTimeoutSec ? { defaultTimeoutSec: modal.defaultTimeoutSec } : {}),
-      ...(modal.snapshotIntervalSec !== undefined ? { snapshotIntervalMs: modal.snapshotIntervalSec * 1000 } : {}),
-      nativeSnapshotsEnabled: modal.nativeSnapshotsEnabled ?? false,
       ...(modal.nativeSnapshotIntervalSec !== undefined
         ? { nativeSnapshotIntervalMs: modal.nativeSnapshotIntervalSec * 1000 }
         : {}),
@@ -1124,6 +1152,31 @@ export function buildApp(
       ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
       onError: sandboxOnError,
     });
+  const buildRender = (): Sandbox => {
+    const render = config.renderSandbox;
+    if (!render.apiKey || !render.workspaceId) {
+      throw new Error("SANDBOX_BACKEND=render requires RENDER_API_KEY and RENDER_WORKSPACE_ID");
+    }
+    return createRenderSandbox(workspace, {
+      client: createSdkRenderClient({
+        apiKey: render.apiKey,
+        workspaceId: render.workspaceId,
+      }),
+      ...(render.defaultTimeoutSec !== undefined ? { defaultTimeoutSec: render.defaultTimeoutSec } : {}),
+      store: renderBodies,
+      scratchStore: renderScratch,
+      cleanupStore: renderCleanup,
+      advisoryLock,
+      extraTools: deploymentLayer.advertisedTools,
+      credentialPaths: deploymentLayer.credentialPaths,
+      layerToolFiles: () => deploymentLayer.installFiles,
+      blobTransfer,
+      ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+      ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
+      ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+      onError: sandboxOnError,
+    });
+  };
   const buildBackend: Record<Config["sandboxBackend"], () => Sandbox> = {
     local: buildLocal,
     sprites: buildSprites,
@@ -1133,6 +1186,7 @@ export function buildApp(
     aws: buildAws,
     porter: buildPorter,
     agent37: buildAgent37,
+    render: buildRender,
     superserve: buildSuperserve,
     "do-managed-agents": buildManagedAgents,
   };
@@ -1323,10 +1377,6 @@ export function buildApp(
   const secretDrops: SecretDropStore = createSecretDropStore(artifactMap<SecretDropRecord>("secret_drops"));
   const modelGateway = createModelGateway();
 
-  const requireDbUrl = (kind: string): string => {
-    if (!config.databaseUrl) throw new Error(`${kind}=postgres requires DATABASE_URL`);
-    return config.databaseUrl;
-  };
   const sessions: SessionStore =
     config.sessionStore === "postgres"
       ? createPostgresSessionStore(requireDbUrl("SESSION_STORE"))
@@ -1339,6 +1389,7 @@ export function buildApp(
           bytesFor: (prefix) =>
             config.snapshotStore === "s3" && config.s3Bucket
               ? createS3DurableByteStore({
+                  ...s3Override,
                   bucket: config.s3Bucket,
                   ...(config.s3Region ? { region: config.s3Region } : {}),
                   prefix: `${config.s3Prefix ?? ""}${prefix}`,
@@ -1530,13 +1581,15 @@ export function buildApp(
         hydrateModelCatalog,
         input.runtimePurpose,
       );
-    const decision = await decide("turn_start", turnStartState(input), {
-      ...(input.runtimeActorId ? { actorId: input.runtimeActorId } : {}),
-      scopeLabel: input.scopeLabel,
-      sessionId: input.session.id,
-      ...(input.runId ? { runId: input.runId } : {}),
-      ...(input.cancel ? { cancel: input.cancel } : {}),
-    });
+    const decision = await tracePhase("turn.decision", () =>
+      decide("turn_start", turnStartState(input), {
+        ...(input.runtimeActorId ? { actorId: input.runtimeActorId } : {}),
+        scopeLabel: input.scopeLabel,
+        sessionId: input.session.id,
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(input.cancel ? { cancel: input.cancel } : {}),
+      }),
+    );
     const routed = await routeTurnRuntime(decision, resolve, async () => {
       if (input.runtimePinned && input.runtime?.harnessId && input.runtime.modelId) {
         if (!modelSupportedByHarness(input.runtime.modelId, input.runtime.harnessId))
@@ -1647,7 +1700,6 @@ export function buildApp(
       : undefined;
   const productAnalytics = createProductAnalytics(config.orgId, config.productAnalytics);
   runs.onTerminal((run) => void productAnalytics.responseFinished(run));
-  const ledger = runStore.ledger;
 
   let processes: ProcessRegistry | undefined;
   if (supportsProcessSessions(sandbox)) {
@@ -1710,6 +1762,7 @@ export function buildApp(
       ...(config.snapshotStore === "s3" && config.s3Bucket
         ? {
             archiveBytes: createS3DurableByteStore({
+              ...s3Override,
               bucket: config.s3Bucket,
               ...(config.s3Region ? { region: config.s3Region } : {}),
               prefix: `${config.s3Prefix ?? ""}deploy-git/`,
@@ -1718,6 +1771,53 @@ export function buildApp(
         : {}),
     },
   });
+  const renderDeployBodies = artifactMap<StoredRenderDeploy>("render_deploy_bodies");
+  const renderArtifacts =
+    config.deployProvider === "render"
+      ? createRenderDeployArtifacts({
+          baseUrl: config.apiBaseUrl ?? "",
+          signingSecret: config.signingSecret ?? "",
+          store: artifactMap<StoredRenderDeployCredential>("render_deploy_credentials"),
+          deployStore,
+        })
+      : undefined;
+  const buildRenderDeploy = (): DeployProvider => {
+    const render = config.renderDeploy;
+    if (
+      !config.databaseUrl ||
+      !pgArtifactMap ||
+      !config.s3Bucket ||
+      !config.s3Endpoint ||
+      !render.source ||
+      !render.environmentId ||
+      !renderArtifacts ||
+      !config.connectorSecretKey
+    )
+      throw new Error(
+        "Render app deployment requires the QM database, storage, Git source, environment, and credential keys",
+      );
+    const storage = createRenderAppStorage({
+      apiKey: render.apiKey,
+      workspaceId: render.workspaceId,
+      environmentId: render.environmentId,
+      minioServiceId: render.minioServiceId,
+      endpoint: config.s3Endpoint,
+      bucket: config.s3Bucket,
+      prefix: config.s3Prefix,
+      region: config.s3Region,
+      store: artifactMap<StoredRenderAppStorage>("render_app_storage"),
+      keyMaterial: config.connectorSecretKey,
+    });
+    return createRenderDeployProvider({
+      ...render,
+      source: render.source,
+      environmentId: render.environmentId,
+      store: renderDeployBodies,
+      artifacts: renderArtifacts,
+      advisoryLock,
+      resources: storage,
+    });
+  };
   const buildAwsDeploy = (): DeployProvider =>
     createAwsDeployProvider({
       ...config.awsDeploy,
@@ -1740,6 +1840,7 @@ export function buildApp(
       : undefined;
   const buildDeployProvider: Record<Config["deployProvider"], () => DeployProvider> = {
     aws: buildAwsDeploy,
+    render: buildRenderDeploy,
     docker: () => createDockerDeployProvider({ onError: sandboxOnError }),
     fly: () =>
       createFlyDeployProvider({
@@ -1945,6 +2046,13 @@ export function buildApp(
     ],
   });
   pgArtifactMap?.pool.registerMigration({
+    id: "durable-map/connector_status/0002-drop",
+    statements: [
+      "DROP TABLE IF EXISTS connector_status",
+      "DELETE FROM durable_map_versions WHERE tbl = 'connector_status'",
+    ],
+  });
+  pgArtifactMap?.pool.registerMigration({
     id: "durable-map/pinned_skills/0002-drop",
     statements: ["DROP TABLE IF EXISTS pinned_skills", "DELETE FROM durable_map_versions WHERE tbl = 'pinned_skills'"],
   });
@@ -2126,6 +2234,7 @@ export function buildApp(
     ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
     capabilityTokenCompression: config.capabilityTokenCompression,
     ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+    ...(gatewayTransport ? { sandboxModels: true } : {}),
     ...(config.publicWebUrl ? { publicWebUrl: config.publicWebUrl } : {}),
     ...(config.deployAppsDomain ? { deployAppsDomain: config.deployAppsDomain } : {}),
     ...(config.resendApiKey && config.emailFrom
@@ -2139,7 +2248,6 @@ export function buildApp(
     skillsReady,
     advisoryLock,
     errors,
-    ledger,
     signals: runSignals,
     turnStream,
     runActivity,
@@ -2148,7 +2256,6 @@ export function buildApp(
     featureFlags,
     teams,
     credentialUsage,
-    connectorStatusCache,
     resolveConnectorClient: resolveClient,
     ...(keychain ? { keychain } : {}),
     serviceCreds,
@@ -2160,7 +2267,6 @@ export function buildApp(
     crons,
     webhooks,
     resolveBaseModelId: () => orgBaseModelId() ?? fallback.modelId,
-    ...(config.scratchExecEnabled ? { scratchExec: true } : {}),
     directory,
     isCurrentSharedScopeMember,
     currentScopeMembers: createCurrentScopeMembers({ managedGroups: projects, directory, identity }, true),
@@ -2168,7 +2274,6 @@ export function buildApp(
     projects,
     ...(config.reachExecEnabled ? { reachExec: true } : {}),
     ...(config.surfaceDebugFooter ? { surfaceDebugFooter: true } : {}),
-    ...(config.eagerProvisionEnabled ? { eagerProvision: true } : {}),
     environments,
     brokeredTools,
     deploymentLayer,
@@ -2179,7 +2284,7 @@ export function buildApp(
   const recoveryAdminBase = config.publicWebUrl?.replace(/\/$/, "");
   const recoveryAdminUrlFor = recoveryAdminBase
     ? (sessionId: string): string | undefined =>
-        UUID.test(sessionId) ? adminSessionUrl(recoveryAdminBase, sessionId) : undefined
+        uuidSchema.safeParse(sessionId).success ? adminSessionUrl(recoveryAdminBase, sessionId) : undefined
     : undefined;
   const runResultRecovery = wireRunResultDeliveries(runs, deliveries, recoveryAdminUrlFor, sessions);
   const idempotency = createIdempotencyStore(artifactMap<IdempotencyRecord>("idempotency"));
@@ -2334,6 +2439,7 @@ export function buildApp(
     environments,
     deploy: deployService,
     deployAppsDomain: config.awsDeploy.appsDomain,
+    ...(renderArtifacts ? { deploymentGitPrincipals: renderArtifacts } : {}),
     deploymentLayer,
     ...(processes ? { processes } : {}),
     monitors,
@@ -2565,8 +2671,14 @@ export function buildApp(
   );
   orchestratorDeps.channelPolicy = channelPolicy;
   orchestratorDeps.surfaceCache = surfaceCache;
-  orchestratorDeps.slackContextSource = config.slackContextSource ?? "live";
   const resolveRecipient = (query: string) => app.resolveRecipient(query);
+  const runTriggered = async (req: TurnRequest): Promise<TurnResult> => {
+    const slackSource =
+      !req.slackSource && (await sessions.getByThread(req.conversation.threadRef))?.surface === "slack"
+        ? (await runs.latestForThread(req.conversation.threadRef))?.request.slackSource
+        : undefined;
+    return app.turn(slackSource ? { ...req, slackSource } : req);
+  };
   const askResolution = keychain
     ? (ask: KeychainAsk, grant?: KeychainGrant) =>
         fireAskResolution(
@@ -2574,7 +2686,7 @@ export function buildApp(
             deliveries,
             idempotency,
             identity,
-            run: (req) => app.turn(req),
+            run: runTriggered,
             directory: triggerDirectory,
             currentScopeMembers,
             sessions,
@@ -2590,14 +2702,7 @@ export function buildApp(
   const dropResolution = keychain
     ? (drop: DropResolution) =>
         fireDropResolution(
-          {
-            deliveries,
-            idempotency,
-            identity,
-            run: (req) => app.turn(req),
-            directory: triggerDirectory,
-            resolveRecipient,
-          },
+          { deliveries, idempotency, identity, run: runTriggered, directory: triggerDirectory, resolveRecipient },
           drop,
         )
     : undefined;
@@ -2615,7 +2720,7 @@ export function buildApp(
       deliveries,
       idempotency,
       identity,
-      run: (req) => app.turn(req),
+      run: runTriggered,
       directory: triggerDirectory,
       currentScopeMembers,
       sessions,
@@ -2666,7 +2771,7 @@ export function buildApp(
     deliveries,
     idempotency,
     identity,
-    run: (req) => app.turn(req),
+    run: runTriggered,
     leaderLease,
     directory: triggerDirectory,
     currentScopeMembers,
@@ -2740,7 +2845,7 @@ export function buildApp(
           deliveries,
           idempotency,
           identity,
-          run: (req) => app.turn(req),
+          run: runTriggered,
           directory: triggerDirectory,
           currentScopeMembers,
           sessions,
@@ -2761,7 +2866,7 @@ export function buildApp(
     deliveries,
     idempotency,
     identity,
-    run: (req) => app.turn(req),
+    run: runTriggered,
     directory: triggerDirectory,
     currentScopeMembers,
     resolveRecipient,
@@ -2802,7 +2907,25 @@ export function buildApp(
     ? createProcessReaper(processes, {
         intervalMs: config.processReaperIntervalMs,
         ...(supportsProcessSessions(sandbox)
-          ? { kill: createReaperKillHook(sandbox, { onExit: finishCredentials }) }
+          ? {
+              kill: createReaperKillHook(sandbox, { onExit: finishCredentials }),
+              afterSweep: createJobComputerSweep({
+                resources: sandboxResources,
+                sandbox,
+                processes: processes!,
+                finish: finishCredentials,
+                onError: (error, scopeId) =>
+                  errors.record(
+                    {
+                      category: "process_session",
+                      code: "job_computer_retire_failed",
+                      message: errMessage(error),
+                      scopeLabel: scopeId,
+                    },
+                    error,
+                  ),
+              }),
+            }
           : {}),
         leaderLease,
       })
@@ -2864,8 +2987,7 @@ export function buildApp(
   const deepIdleMachineMs = config.deepIdleMachineMs;
   const devIdleMachineMs = config.devIdleMachineMs;
   const SANDBOX_MAINTENANCE_INTERVAL_MS = 5 * 60_000;
-  const deepIdleReapEnabled = Boolean(sandbox.reapDeepIdle && (deepIdleMachineMs > 0 || devIdleMachineMs > 0));
-  const deepIdleSweeper = deepIdleReapEnabled
+  const deepIdleSweeper = sandbox.reapDeepIdle
     ? createSweeper(
         () =>
           leaderLease.hold("sandbox:deep-idle-reaper", () =>
@@ -3052,7 +3174,8 @@ export function buildApp(
     consentLinks,
     oauthFlows,
     secretDrops,
-    browserModelGateway: gatewayTransport,
+    modelGatewayTransport: gatewayTransport,
+    budget,
     resolveBrowserCompanyKeys,
     modelGateway,
     modelCredentials,
@@ -3122,6 +3245,7 @@ export function buildApp(
     sessionShareBytes:
       config.snapshotStore === "s3" && config.s3Bucket
         ? createS3DurableByteStore({
+            ...s3Override,
             bucket: config.s3Bucket,
             ...(config.s3Region ? { region: config.s3Region } : {}),
             prefix: `${config.s3Prefix ?? ""}session-shares/`,
@@ -3143,7 +3267,7 @@ export function serverDeps(
   const carriedModelAuth = harnessCarriedModelAuth(config);
   return {
     externalSlackPolicies: config.externalSlackPolicies,
-    browserModelGateway: built.browserModelGateway,
+    modelGatewayTransport: built.modelGatewayTransport,
     resolveBrowserCompanyKeys: built.resolveBrowserCompanyKeys,
     production: config.production,
     checkReadiness: built.checkReadiness,
@@ -3202,6 +3326,7 @@ export function serverDeps(
       ? { inviteMailer: resendMailer(config.resendApiKey, config.emailFrom) }
       : {}),
     rateLimiter: built.rateLimiter,
+    budget: built.budget,
     acl: built.acl,
     credentialUsage: built.credentialUsage,
     featureFlags: built.featureFlags,
@@ -3239,7 +3364,6 @@ export function serverDeps(
     workspace: built.workspace,
     files: built.files,
     ...(built.fileUploads ? { fileUploads: built.fileUploads } : {}),
-    filesDirectUploadsEnabled: config.filesDirectUploadsEnabled,
     memory: built.memory,
     blobTransfer: built.blobTransfer,
     sandboxBackend: built.sandbox.profile.backend,
