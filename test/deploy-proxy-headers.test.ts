@@ -6,7 +6,9 @@ import type { AddressInfo } from "node:net";
 import { createInsecureTestServer, createServer } from "../src/api/server.ts";
 import type { App } from "../src/api/app.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
-import { memoryAdmin } from "./support/principal-links.ts";
+import { testAdmin } from "./support/principal-links.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
+import { createPostgresReplayDedupe } from "../src/auth/replay-dedupe.ts";
 
 function appWith(endpoint: Record<string, unknown>): App {
   return { reachDeployment: async () => ({ status: "ok", endpoint }) } as unknown as App;
@@ -412,7 +414,8 @@ test("admin deployment proxy bypasses deployment ACL after admin auth and audits
   } as unknown as App;
   const SECRET = "admin-deploy-proxy-secret".repeat(3);
   const server = createServer(app, {
-    admin: memoryAdmin(),
+    replayDedupe: createPostgresReplayDedupe(testDatabaseUrl()),
+    admin: testAdmin(),
     signingSecret: SECRET,
     auditLog: {
       record: (e) => auditEvents.push(e),

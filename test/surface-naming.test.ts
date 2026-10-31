@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { surfaceLabel, surfaceToolName } from "../src/surfaces/surface-capabilities.ts";
-import { createAgentTools } from "../src/harness/agent-tools.ts";
-import { createSurfaceToolDeps, type SurfaceToolsContext } from "../src/core/orchestrator/surface-tools.ts";
-import { createMemoryChannelPolicyStore } from "../src/surface-cache/channel-policy-store.ts";
+import { createAgentTools } from "../src/agent/agent-tools.ts";
+import { createSurfaceToolDeps, type SurfaceToolsContext } from "../src/surfaces/surface-tools.ts";
+import { createPostgresChannelPolicyStore } from "../src/surface-cache/channel-policy-store.ts";
 import { turnPostKeys } from "../src/core/orchestrator/turn-helpers.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
 
 test("a cron firing into a discord destination exposes the discord tool", () => {
   assert.equal(surfaceToolName("cron", "discord"), "discord");
@@ -27,7 +28,7 @@ test("the discord surface tool describes Discord and never the Slack mention syn
 });
 
 test("setting ambientEnabled on a surface without coreAmbient is refused", async () => {
-  const channelPolicy = createMemoryChannelPolicyStore();
+  const channelPolicy = createPostgresChannelPolicyStore(testDatabaseUrl());
   const tools = createSurfaceToolDeps({
     deps: { deliveries: {}, channelPolicy, auditLog: { record() {} } },
     input: { surfaceTools: true, surface: "discord" },
@@ -53,7 +54,7 @@ test("setting ambientEnabled on a surface without coreAmbient is refused", async
 });
 
 test("setting ambientEnabled on an unset surface is accepted", async () => {
-  const channelPolicy = createMemoryChannelPolicyStore();
+  const channelPolicy = createPostgresChannelPolicyStore(testDatabaseUrl());
   const tools = createSurfaceToolDeps({
     deps: { deliveries: {}, channelPolicy, auditLog: { record() {} } },
     input: { surfaceTools: true },

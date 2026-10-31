@@ -6,12 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { createDiscordCoreClient } from "../src/api/discord-core-client.ts";
-import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { createDirectorySync, type DirectorySyncDeps } from "../src/discord/directory.ts";
 import type { ActorAssertion } from "../src/types.ts";
 import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
+import { createPostgresDirectoryStore } from "../src/directory/postgres-directory-store.ts";
 
 afterEach(() => installPrincipalLinks(null));
 
@@ -77,7 +78,7 @@ test("directory sync is single-flight", async () => {
 });
 
 test("the Slack swap and the Discord swap each leave the other's rows alone", async () => {
-  const store = createDirectoryStore();
+  const store = createPostgresDirectoryStore(testDatabaseUrl());
   const slack = { principalId: "U1", displayName: "Slack Sam", type: "internal" as const };
   const discord = { principalId: "discord:9", displayName: "Disc Dee", type: "internal" as const };
   await store.replace([slack]);

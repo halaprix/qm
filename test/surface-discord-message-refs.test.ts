@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSurfaceToolDeps } from "../src/core/orchestrator/surface-tools.ts";
+import { createSurfaceToolDeps } from "../src/surfaces/surface-tools.ts";
 import { turnPostKeys } from "../src/core/orchestrator/turn-helpers.ts";
 
 const ID = "1000000000000000005";

@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Client } from "discord.js";
-import { createSurfaceToolDeps, type SurfaceToolsContext } from "../src/core/orchestrator/surface-tools.ts";
+import { createSurfaceToolDeps, type SurfaceToolsContext } from "../src/surfaces/surface-tools.ts";
 import { turnPostKeys } from "../src/core/orchestrator/turn-helpers.ts";
 import { createMemoryBlobTransferStore } from "../src/persistence/blob-transfer.ts";
 import { createChannelLookup, createContextFulfiller, type HistoryMessage } from "../src/discord/context.ts";
 import { createDiscordHistoryReader } from "../src/discord/gateway.ts";
 import { scopeId } from "../src/types.ts";
-import type { SurfaceContextQuery, SurfaceContextRequest, SurfaceContextResult } from "../src/types.ts";
+import type { SurfaceContextQuery, SurfaceContextRequest, SurfaceContextResult } from "../src/reach/reach.ts";
 import { noLinkChannels } from "./support/discord-channels.ts";
 
 const CUR = "1300000000000000100";
@@ -240,7 +240,7 @@ test("the Discord history reader throws for a channel the bot cannot fetch", asy
   await assert.rejects(reader.recent("c1", { count: 5 }));
 });
 
-function slackTools(member: boolean, stored?: "cache" | "search") {
+function slackTools(member: boolean, stored?: "cache") {
   const pulls: Array<Record<string, unknown>> = [];
   const cacheSearches: unknown[] = [];
   const tools = createSurfaceToolDeps({
@@ -262,16 +262,6 @@ function slackTools(member: boolean, stored?: "cache" | "search") {
             surfaceCache: {
               containerState: async () => null,
               search: async (_q: string, o: unknown) => {
-                cacheSearches.push(o);
-                return [];
-              },
-            },
-          }
-        : {}),
-      ...(stored && stored !== "cache"
-        ? {
-            surfaceSearch: {
-              search: async (o: unknown) => {
                 cacheSearches.push(o);
                 return [];
               },
@@ -373,12 +363,4 @@ test("mirror-mode search refuses another channel instead of reading the stored m
   assert.deepEqual(cacheSearches, []);
   assert.equal((await tools.search("needle")).ok, true);
   assert.deepEqual(cacheSearches, [{ container: "C1", limit: 10 }]);
-});
-
-test("stored-search-service search refuses another channel too", async () => {
-  const { tools, cacheSearches } = slackTools(true, "search");
-  assert.equal((await tools.search("needle", { channel: "random" })).ok, false);
-  assert.deepEqual(cacheSearches, []);
-  assert.equal((await tools.search("needle")).ok, true);
-  assert.equal(cacheSearches.length, 1);
 });

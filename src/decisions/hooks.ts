@@ -1,5 +1,12 @@
 import type { AuditLog } from "../audit/audit-log.ts";
-import { runHook, type DecisionBackend, type DecisionHook, type DecisionResult } from "./decisions.ts";
+import {
+  classifierKey,
+  runHook,
+  type DecisionBackend,
+  type DecisionHook,
+  type DecisionResult,
+  type DecisionRule,
+} from "./decisions.ts";
 import type { DecisionStore } from "./store.ts";
 import { swallowAs } from "../util/errors.ts";
 
@@ -9,14 +16,12 @@ export function turnStartState(turn: {
   input: string;
   surfaceName?: string;
   runtimePurpose?: string;
-  runtime?: { harnessId?: string; modelId?: string };
+  runtime?: { modelId?: string };
   runtimePinned?: boolean;
   continueTurn?: boolean;
   scopeLabel: string;
 }): string {
-  const requested = turn.runtime?.modelId
-    ? [turn.runtime.harnessId, turn.runtime.modelId].filter(Boolean).join("/")
-    : "none (org default applies)";
+  const requested = turn.runtime?.modelId ? turn.runtime.modelId : "none (org default applies)";
   return [
     "Turn context:",
     `- surface: ${turn.surfaceName ?? "unknown"}`,
@@ -40,9 +45,8 @@ export interface DecisionTurn {
 }
 
 export function createDecisionHooks(store: DecisionStore | undefined, backend: DecisionBackend, audit: AuditLog) {
-  return async (hook: DecisionHook, state: string, turn: DecisionTurn) => {
-    const rules = (await store?.rules(hook)) ?? [];
-    if (!store || !rules.length) return undefined;
+  const run = async (rules: readonly DecisionRule[], hook: DecisionHook, state: string, turn: DecisionTurn) => {
+    if (!rules.length) return undefined;
     const signal = AbortSignal.any([AbortSignal.timeout(HOOK_TIMEOUT_MS), ...(turn.cancel ? [turn.cancel] : [])]);
     const { decisive, results } = await runHook(rules, hook, state, backend, signal);
     for (const result of results)
@@ -62,9 +66,21 @@ export function createDecisionHooks(store: DecisionStore | undefined, backend: D
       });
     return decisive;
   };
+  return async (hook: DecisionHook, state: string, turn: DecisionTurn) => {
+    const rules = (await store?.rules(hook)) ?? [];
+    const enforced = new Set(rules.filter((rule) => rule.mode === "enforce").map(classifierKey));
+    const awaited = (rule: DecisionRule) => enforced.has(classifierKey(rule));
+    void run(
+      rules.filter((rule) => !awaited(rule)),
+      hook,
+      state,
+      { ...turn, cancel: undefined },
+    ).catch(swallowAs("decisions: observe-only rules", undefined));
+    return run(rules.filter(awaited), hook, state, turn);
+  };
 }
 
-export async function routeTurnRuntime<C extends { harnessId: string; modelId: string }>(
+export async function routeTurnRuntime<C extends { modelId: string }>(
   decision: DecisionResult | undefined,
   route: (runtime: NonNullable<DecisionResult["runtime"]>) => Promise<C>,
   requested: () => Promise<C>,
@@ -74,6 +90,6 @@ export async function routeTurnRuntime<C extends { harnessId: string; modelId: s
     route(decision.runtime),
     requested().catch(swallowAs("decisions: requested runtime", undefined)),
   ]);
-  const changed = !!otherwise && (otherwise.harnessId !== choice.harnessId || otherwise.modelId !== choice.modelId);
+  const changed = !!otherwise && otherwise.modelId !== choice.modelId;
   return changed ? { choice, routedBy: decision.ruleId } : { choice };
 }

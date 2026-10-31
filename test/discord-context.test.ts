@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ChannelType, PermissionFlagsBits, type Client } from "discord.js";
 import { createContextFulfiller, type DiscordHistoryReader } from "../src/discord/context.ts";
 import { createDiscordHistoryReader } from "../src/discord/gateway.ts";
-import type { SurfaceContextRequest } from "../src/types.ts";
+import type { SurfaceContextRequest } from "../src/reach/reach.ts";
 import { noLinkChannels } from "./support/discord-channels.ts";
 
 function harness(viewerIds: string[], visible: Set<string>) {

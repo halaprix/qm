@@ -25,7 +25,7 @@ The root object requires `contract: 1`, `orgId`, `publicUrl`, `target`, and `ser
 
 Common optional fields select the model, plugins, extra skill directories, per-service non-secret environment values, image overrides, sandbox settings, and an external security screen. `botName` (at most 31 characters, so the generated "`<botName>` SSO" app name fits Slack's 35-character cap) names the bot everywhere users see it — the generated Slack app manifests, the prompt identity, and sign-in pages — and `orgName` (at most 40) is how the bot refers to the organization; both default to neutral values and can be changed live from the Admin page's Branding card, which then takes precedence over the deployed values. `sandbox.backend` selects the aws-target sandbox substrate (see above); `sandbox.baseImage` records the digest-pinned build input for local layer builds; `sandbox.env` is non-secret runtime environment; `sandbox.secretEnv` lists org-wide secret names whose values are forwarded to every sandbox. `securityScreen` sets `mode` (`off`, `observe`, or `enforce`) and `classifier` (`model`, the default, or `proxy`). A proxy classifier adds a lowercase `provider` label and an HTTPS `endpoint`, and requires `secretEnv.core.SECURITY_SCREEN_PROXY_TOKEN`. Absence disables screening. See "Content screening" below.
 
-Fly requires `region` and `flyOrg`. AWS requires a 12-digit account, region, deployment label, ECS cluster, deploy-role ARN, Secrets Manager prefix, DNS-valid Cloud Map namespace, and an entry for every enabled first-party service and discovered plugin containing a unique valid ECR repository, a unique valid ECS service, and a valid Fargate CPU/memory combination. The cluster is constrained so every IAM, RDS, ALB, and related name derived by the reference module is valid. `imageLabel` identifies the complete deployment manifest used by rollback and live drift checks; the matching OCI/ECR tag is a convenience pointer. Workloads may also set `arm64`/`amd64` architecture, non-secret build arguments, or role ARNs. External prebuilt images must declare their architecture; built-in workloads default to amd64 to match published images, while source-built plugins default to arm64. Explicit architecture choices are honored for source builds. Cloud Map names are the private workload addresses. The reference AWS module exposes CloudFront over HTTPS and restricts its HTTP ALB origin to CloudFront's managed origin prefix. With portal enabled, it is the ALB's sole target; access to private core, web, and admin surfaces requires signed portal identity. Without portal, only core is an ALB target. A real harness requires an HTTPS `publicUrl`.
+Fly requires `region` and `flyOrg`. AWS requires a 12-digit account, region, deployment label, ECS cluster, deploy-role ARN, Secrets Manager prefix, DNS-valid Cloud Map namespace, and an entry for every enabled first-party service and discovered plugin containing a unique valid ECR repository, a unique valid ECS service, and a valid Fargate CPU/memory combination. The cluster is constrained so every IAM, RDS, ALB, and related name derived by the reference module is valid. `imageLabel` identifies the complete deployment manifest used by rollback and live drift checks; the matching OCI/ECR tag is a convenience pointer. Workloads may also set `arm64`/`amd64` architecture, non-secret build arguments, or role ARNs. External prebuilt images must declare their architecture; built-in workloads default to amd64 to match published images, while source-built plugins default to arm64. Explicit architecture choices are honored for source builds. Cloud Map names are the private workload addresses. The reference AWS module exposes CloudFront over HTTPS and restricts its HTTP ALB origin to CloudFront's managed origin prefix. With portal enabled, it is the ALB's sole target; access to private core, web, and admin surfaces requires signed portal identity. Without portal, only core is an ALB target. A real deployment requires an HTTPS `publicUrl`.
 
 `publicUrl` is the one public coordinate. The CLI derives the core, Slack, web, admin, and portal URL environment from it. Config `env` is for non-secret values only; secret-shaped keys are rejected.
 
@@ -179,6 +179,30 @@ record. If its injection configuration enables actor attestation, the broker set
 `x-qm-actor` from the stored publisher. Caller-supplied actor headers are rejected.
 The destination receives the configured credential, never the deployment token.
 
+### Lending a publisher's connected apps to their app
+
+A publisher can let their app call any of their connected apps (mail, calendar, chat,
+files, and so on) as them, the same way apps use org credentials through the broker.
+Nothing is lent by default. The publisher opts in per app and per connected-app host with
+`POST /v1/deployments/:id/connectors` and `{"connectors": ["<host>", ...]}`; `[]`
+withdraws. Only the publisher may call it, from a live turn or a signed-in session. Public
+apps cannot borrow connectors, and an app that borrows them cannot be made public. When
+anyone other than the publisher publishes, pushes or rolls back a version, the loan is
+withdrawn before that version runs. The token comes from the publisher's personal
+connection, else their default, else their company one.
+
+The app's server sends the broker `connector` (the host) instead of `credential`, with
+the same `url`, `method`, `headers` and `body`. The broker pins the URL to that exact host
+over standard HTTPS, injects the token and returns only the response; the app never sees
+the token. Every call acts as the publisher, whoever is using the app, so the app's own
+code decides who may do what, typically from the signed-in viewer in
+`x-portal-identity`. A bug in the app, or code a co-manager slipped in before the
+publisher lent again, can act as the publisher without a click, exactly as with an org
+credential.
+
+Each call and refusal is audited as `connector.broker.use`, `.denied` or `.error` with the
+app, method, path and outcome; each loan change as `deploy_connectors`.
+
 ### Public AWS plugin routes
 
 Plugins stay private by default. An AWS plugin workload can declare
@@ -229,6 +253,6 @@ When `securityScreen.mode` is not `off`, the classifier screens external content
 
 Every classification writes one `security_screen.classify` audit record with status `allow`, `block`, `would_block`, or `error`. Its detail carries the hook, source labels, surface, origin, session, run and thread identifiers, request ID, attempt count, and any score, threshold, or outcome — enough to find the transcript behind a would-block. It never includes the screened text.
 
-`SECURITY_SCREEN_BACKEND`, `SECURITY_SCREEN_ALL_POSTURES`, and `SECURITY_SCREEN_PROXY_ROLLOUT` (and the `backend`, `allPostures`, and `rollout` config keys) are retired. A configuration that only said `backend: "off"` (or `SECURITY_SCREEN_BACKEND=off`) still loads as `mode: "off"` with a deprecation warning; any other use of the old names refuses to start.
+`SECURITY_SCREEN_BACKEND`, `SECURITY_SCREEN_ALL_POSTURES`, and `SECURITY_SCREEN_PROXY_ROLLOUT` (and the `backend`, `allPostures`, and `rollout` config keys) are retired. The core ignores the old environment variables. In a deployment config, `securityScreen` that only says `backend: "off"` still loads as `mode: "off"` with a deprecation warning; any other use of the old keys is refused.
 
 New tool-output release approvals deliver the exact saved text without running the tool again. They are once-only and retain the source scope in durable history. A release is refused if the current audience is no longer entitled to that source scope. Legacy persisted screening grants remain effective and are audited; remove those grants explicitly if a deployment requires every result to be classified. New release approvals cannot create session or always grants.

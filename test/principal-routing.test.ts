@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createDirectoryStore } from "../src/directory/directory-store.ts";
 import { createDeliveryStore, isPersonAddressed } from "../src/delivery/delivery-store.ts";
 import {
   createDiscordPrincipalRoute,
@@ -15,10 +14,12 @@ import { DISCORD_DM_DELIVERY_TYPE, discordExternalId } from "../src/discord/conf
 import { createDiscordDispatcher, DISCORD_DELIVERY_CLAIM_MS, type DeliveryGuard } from "../src/discord/deliveries.ts";
 import type { DiscordSender } from "../src/discord/sender.ts";
 import type { Delivery } from "../src/types.ts";
-import { buildApp } from "../src/wiring.ts";
+import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
 import { installDiscord } from "./support/discord-channels.ts";
-import { memoryPrincipalLinks } from "./support/principal-links.ts";
+import { testPrincipalLinks } from "./support/principal-links.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
+import { createPostgresDirectoryStore } from "../src/directory/postgres-directory-store.ts";
 
 const toDiscord = async (p: string) => (p === "ana@acme.com" ? DISCORD_DM_DELIVERY_TYPE : null);
 
@@ -229,7 +230,7 @@ test("a person with a linked Slack account keeps the principal route", async () 
 });
 
 test("a Slack-only-id principal with a linked Discord account stays on the principal route", async () => {
-  const directory = createDirectoryStore();
+  const directory = createPostgresDirectoryStore(testDatabaseUrl());
   await directory.replace([
     { principalId: "U0SLACKAMY", displayName: "Amy", type: "internal" },
     { principalId: "cora@acme.com", displayName: "Cora", type: "internal", slackId: "UCORA" },
@@ -248,7 +249,7 @@ test("a Slack-only-id principal with a linked Discord account stays on the princ
 });
 
 test("a Slack user id linked to an email row without slackId still counts as Slack", async () => {
-  const directory = createDirectoryStore();
+  const directory = createPostgresDirectoryStore(testDatabaseUrl());
   await directory.replace([{ principalId: "erin@acme.com", displayName: "Erin", type: "internal" }]);
   installPrincipalLinks({
     canonical: (key) => (key === "U0SLACKERIN" || key === "erin@acme.com" ? "erin@acme.com" : undefined),
@@ -287,7 +288,7 @@ test("command-approval cards are never rerouted to discord-dm", async () => {
 });
 
 test("linkedDiscordUserIds extracts linked discord user ids from principal links", async () => {
-  const links: PrincipalLinkService = memoryPrincipalLinks();
+  const links: PrincipalLinkService = testPrincipalLinks();
   installPrincipalLinks(links);
   await links.link({
     principalId: discordExternalId("discord-456"),

@@ -4,7 +4,7 @@ Pi can route model calls through an authenticated gateway instead of holding pro
 
 QM discovers models using authenticated `GET /v1/models` and `GET /model_group/info`, the end-user metadata endpoint implemented by LiteLLM. A base URL ending in `/v1` is supported; both endpoints retain any preceding path prefix. Discovery uses the same key as inference, rejects redirects, and ignores upstream credential and endpoint fields.
 
-Only models listed by both endpoints, marked as chat models with tool support, and carrying valid context, output and pricing metadata are offered. Discovered IDs are namespaced as `gateway/<upstream-id>`. Groups whose metadata identifies only Anthropic providers use native Messages, preserving signed thinking blocks across tool calls. Groups whose providers are exclusively OpenAI or Azure use Responses, including native file inputs. Other groups use OpenAI-compatible streaming chat completions. Reasoning controls are enabled for native Anthropic and OpenAI/Azure groups; other provider combinations use standard chat without requesting reasoning effort. They are available in Pi, not process harnesses. The gateway owns provider translation and group capabilities. QM selects the protocol from provider metadata, never model names. Gateways must expose `/v1/messages` for Anthropic groups and `/v1/responses` for OpenAI/Azure groups. PDF inputs on chat-completion routes require vision capability and a provider set consisting only of Anthropic, OpenAI, Azure, Gemini or Vertex. Unknown or mixed unsupported provider groups use bounded text extraction.
+Only models listed by both endpoints, marked as chat models with tool support, and carrying valid context, output and pricing metadata are offered. Discovered IDs are namespaced as `gateway/<upstream-id>`. Groups whose metadata identifies only Anthropic providers use native Messages, preserving signed thinking blocks across tool calls. Groups whose providers are exclusively OpenAI or Azure use Responses, including native file inputs. Other groups use OpenAI-compatible streaming chat completions. Reasoning controls are enabled for native Anthropic and OpenAI/Azure groups; other provider combinations use standard chat without requesting reasoning effort. The gateway owns provider translation and group capabilities. QM selects the protocol from provider metadata, never model names. Gateways must expose `/v1/messages` for Anthropic groups and `/v1/responses` for OpenAI/Azure groups. PDF inputs on chat-completion routes require vision capability and a provider set consisting only of Anthropic, OpenAI, Azure, Gemini or Vertex. Unknown or mixed unsupported provider groups use bounded text extraction.
 
 Availability refreshes on demand every five minutes and before inference when expired. Successful refreshes replace the catalog, including an empty catalog. After discovery has succeeded, a failed refresh disables gateway routes until recovery without interrupting independent direct providers, with retries after thirty seconds. In-flight requests are not cancelled; the gateway still enforces its key permissions on every call. Retired selections remain in conversation history but cannot issue a new request through a different provider.
 
@@ -78,9 +78,13 @@ models, never a master or admin key, and keep client-side credentials and endpoi
 Pi offers `gpt-6-astra-ultrafast` and `gpt-6.1-sol-ultrafast`, each labeled
 **Ultrafast (6× cost)**. These are QM selection identifiers: requests use the
 corresponding base model (`gpt-6-astra` or `gpt-6.1-sol`) with
-`service_tier: "ultrafast"` through the Responses API. Standard models and their
-Fast switches retain their existing behavior. Ultrafast has its own pricing card,
-including cached input, cache writes, and long-context rates.
+`service_tier: "ultrafast"` through the Responses API. Ultrafast has its own pricing
+card, including cached input, cache writes, and long-context rates. OpenAI bills each
+call at the tier its response's `service_tier` reports, which can be lower than the
+one requested, and QM prices calls the same way with pi-ai's tier rates (flex ½×,
+priority and fast 2×). An Ultrafast request served at another tier is priced from the
+base model's card at that tier, and a Fast request whose response reports no tier is
+priced at the Fast rate.
 
 Use an OpenAI API key or explicitly map the Ultrafast model ID to your gateway's
 corresponding base-model group in `MODEL_GATEWAY_MODELS`. The gateway must support Responses and

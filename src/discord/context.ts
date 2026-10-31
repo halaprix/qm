@@ -1,5 +1,5 @@
 import type { DiscordCoreClient } from "../api/discord-core-client.ts";
-import type { SurfaceContextRequest } from "../types.ts";
+import type { SurfaceContextRequest } from "../reach/reach.ts";
 import { buildContextWindow, MAX_RECENT_MESSAGES, type RecentMessage } from "../surfaces/conversation.ts";
 import { DISCORD_MESSAGE_IDS } from "../surfaces/message-ids.ts";
 import type { ReactionTally } from "../surfaces/reaction-tally.ts";

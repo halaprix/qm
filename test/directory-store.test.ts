@@ -1,11 +1,13 @@
 import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { createDirectoryStore, type DirectoryStore } from "../src/directory/directory-store.ts";
+import { type DirectoryStore } from "../src/directory/directory-store.ts";
+import { createPostgresDirectoryStore } from "../src/directory/postgres-directory-store.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
 import { assertSurfaceScopedFullSyncs } from "./support/channel-surface-scope.ts";
 
 describe("directory resolution (agent → teammate addressing, §10)", () => {
   const dir = async (): Promise<DirectoryStore> => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replace([
       { principalId: "U-alice", displayName: "Alice Example", type: "internal" },
       { principalId: "U-carol", displayName: "Carol", type: "internal" },
@@ -66,7 +68,7 @@ describe("directory resolution (agent → teammate addressing, §10)", () => {
 
 describe("channel resolution (agent → channel addressing, §10)", () => {
   const dir = async (): Promise<DirectoryStore> => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceChannels([
       { channelId: "C-eng", name: "eng" },
       { channelId: "C-engng", name: "engineering" },
@@ -108,7 +110,7 @@ describe("channel resolution (agent → channel addressing, §10)", () => {
 
 describe("member slackId (the real <@…> mention id for an email principal)", () => {
   it("round-trips slackId through replace → get → list, and resolve", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replace([
       {
         principalId: "eve@acme.com",
@@ -133,7 +135,7 @@ describe("member slackId (the real <@…> mention id for an email principal)", (
 
 describe("group-DM (mpim) membership (addressed by participant set, §10)", () => {
   const dir = async (): Promise<DirectoryStore> => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replace([
       { principalId: "U-alice", displayName: "Alice", type: "internal" },
       { principalId: "U-carol", displayName: "Carol", type: "internal" },
@@ -179,7 +181,7 @@ describe("group-DM (mpim) membership (addressed by participant set, §10)", () =
   });
 
   it("distinguishes an unavailable group roster from a definitive nonmember", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     assert.equal(await d.groupMembership("G-1", "U-alice"), undefined);
     assert.equal(await d.conversationMembers("group", "G-1"), undefined);
     await d.replaceGroups([]);
@@ -195,7 +197,7 @@ describe("group-DM (mpim) membership (addressed by participant set, §10)", () =
   });
 
   it("a swap stamped older than the stored snapshot is refused, so a stale instance cannot clobber a fresh sync", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     assert.equal(await d.replaceGroups([{ groupId: "G-new", principalId: "U-alice" }], 2000), true);
     assert.equal(await d.replaceGroups([], 1000), false);
     assert.equal(await d.groupMember("G-new", "U-alice"), true);
@@ -204,14 +206,14 @@ describe("group-DM (mpim) membership (addressed by participant set, §10)", () =
   });
 
   it("an unstamped swap keeps today's last-write-wins behaviour", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceGroups([{ groupId: "G-new", principalId: "U-alice" }], 2000);
     assert.equal(await d.replaceGroups([], undefined), true);
     assert.equal(await d.groupMember("G-new", "U-alice"), false);
   });
 
   it("partially replaces only group rosters known by the source", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceGroups(
       [
         { groupId: "G-one", principalId: "U-old-one" },
@@ -234,7 +236,7 @@ describe("group-DM (mpim) membership (addressed by participant set, §10)", () =
   });
 
   it("members and channels swaps are stale-guarded the same way", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     assert.equal(await d.replace([{ principalId: "U-new", displayName: "New", type: "internal" }], 2000), true);
     assert.equal(await d.replace([], 1000), false);
     assert.equal((await d.list()).length, 1);
@@ -246,7 +248,7 @@ describe("group-DM (mpim) membership (addressed by participant set, §10)", () =
 
 describe("private-channel membership (authorizes private-channel sends, §10)", () => {
   it("channelMember reflects pushed membership; omitting it leaves it intact; providing it is a full swap", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replace([
       { principalId: "U-alice", displayName: "Alice", type: "internal" },
       { principalId: "U-carol", displayName: "Carol", type: "internal" },
@@ -277,7 +279,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("uses definitive nonmembership only for private channels with a pushed roster", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     assert.equal(await d.channelMembership("C-sec", "U-alice"), undefined);
     await d.replaceChannels(
       [
@@ -297,7 +299,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("partially replaces only the channel rosters known by the source", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     const channels = [
       { channelId: "C-one", name: "one", isPrivate: true },
       { channelId: "C-two", name: "two", isPrivate: true },
@@ -315,7 +317,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("applies removals without clearing a failed channel refresh", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceChannels(
       [{ channelId: "C-one", name: "one", isPrivate: true }],
       [
@@ -335,7 +337,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("uses one Slack Connect roster without making a private room an ordinary send target", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceChannels(
       [{ channelId: "C-connect", name: "connect", isPrivate: true, isExternal: true }],
       [{ channelId: "C-connect", principalId: "U-member" }],
@@ -346,7 +348,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("partially replaces only the channel rosters known by the source", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     const channels = [
       { channelId: "C-one", name: "one", isPrivate: true },
       { channelId: "C-two", name: "two", isPrivate: true },
@@ -364,7 +366,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("applies removals without clearing a failed channel refresh", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceChannels(
       [{ channelId: "C-one", name: "one", isPrivate: true }],
       [
@@ -384,7 +386,7 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
   });
 
   it("uses one Slack Connect roster without making a private room an ordinary send target", async () => {
-    const d = createDirectoryStore();
+    const d = createPostgresDirectoryStore(testDatabaseUrl());
     await d.replaceChannels(
       [{ channelId: "C-connect", name: "connect", isPrivate: true, isExternal: true }],
       [{ channelId: "C-connect", principalId: "U-member" }],
@@ -397,11 +399,11 @@ describe("private-channel membership (authorizes private-channel sends, §10)", 
 
 it("live channel observations survive older snapshots but yield to later removal", async () => {
   const { directoryObservationCases } = await import("./support/directory-observation-cases.ts");
-  await directoryObservationCases(createDirectoryStore());
+  await directoryObservationCases(createPostgresDirectoryStore(testDatabaseUrl()));
 });
 
 it("an exact Slack name beats a Discord name that only starts with it", async () => {
-  const d = createDirectoryStore();
+  const d = createPostgresDirectoryStore(testDatabaseUrl());
   await d.replace([{ principalId: "U-alice", displayName: "Alice", type: "internal" }]);
   await d.replaceDiscord([{ principalId: "discord:5", displayName: "Alice Cooper", type: "internal" }]);
   const r = await d.resolve("alice");
@@ -411,7 +413,7 @@ it("an exact Slack name beats a Discord name that only starts with it", async ()
 });
 
 it("a Discord nickname never wins a name that a Slack member also matches", async () => {
-  const d = createDirectoryStore();
+  const d = createPostgresDirectoryStore(testDatabaseUrl());
   await d.replace([{ principalId: "U-alice", displayName: "Alice Smith", type: "internal" }]);
   await d.replaceDiscord([{ principalId: "discord:5", displayName: "Alice", type: "internal" }]);
   const r = await d.resolve("alice");
@@ -424,5 +426,5 @@ it("a Discord nickname never wins a name that a Slack member also matches", asyn
 });
 
 test("a Discord full channel sync and a Slack full channel sync never delete each other's rows", async () => {
-  await assertSurfaceScopedFullSyncs(createDirectoryStore());
+  await assertSurfaceScopedFullSyncs(createPostgresDirectoryStore(testDatabaseUrl()));
 });

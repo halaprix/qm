@@ -191,12 +191,11 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
       if (opts.holdRuntimeConfig) await runtimeHeld;
       return Response.json({
         scopeId: new URL(path, "http://localhost").searchParams.get("scopeId") ?? "personal:tester",
-        approvedHarnesses: [],
-        modelsByHarness: {},
+        models: [],
         modelCatalog: {},
-        orgDefault: { harnessId: "pi", modelId: "m", revision: 1 },
+        orgDefault: { modelId: "m", revision: 1 },
         scopeOverride: null,
-        effective: { harnessId: "pi", modelId: "m" },
+        effective: { modelId: "m" },
         upgradeAvailable: false,
       });
     }
@@ -211,6 +210,11 @@ export async function harness(opts: HarnessOptions): Promise<Harness> {
       if (opts.holdApprovals) await approvalsHeld;
       const sessionId = decodeURIComponent(path.split("/")[3] ?? "");
       return Response.json({ approvals: opts.approvals?.(sessionId) ?? [] });
+    }
+    if (path.startsWith("/api/sessions/") && path.endsWith("/side-chats")) {
+      const sourceId = decodeURIComponent(path.split("/")[3] ?? "");
+      const all = (opts.listSessions ?? []) as CoreSession[];
+      return Response.json({ sessions: all.filter((row) => row.sideChat && row.forkedFrom?.sessionId === sourceId) });
     }
     if (path.startsWith("/api/sessions/") && path.endsWith("/children")) {
       const all = (opts.listSessions ?? []) as CoreSession[];

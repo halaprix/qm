@@ -10,7 +10,9 @@ import { createInsecureTestServer, createServer } from "../src/api/server.ts";
 import { signRequest } from "../src/auth/source-auth.ts";
 import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
-import { memoryAdmin } from "./support/principal-links.ts";
+import { testAdmin } from "./support/principal-links.ts";
+import { testDatabaseUrl } from "./support/test-database.ts";
+import { createPostgresReplayDedupe } from "../src/auth/replay-dedupe.ts";
 
 function start(withAdmin = true, signingSecret?: string) {
   const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "admin-whoami-")) }));
@@ -19,7 +21,7 @@ function start(withAdmin = true, signingSecret?: string) {
     auditLog: built.auditLog,
   };
   const server = signingSecret
-    ? createServer(built.app, { ...deps, signingSecret })
+    ? createServer(built.app, { replayDedupe: createPostgresReplayDedupe(testDatabaseUrl()), ...deps, signingSecret })
     : createInsecureTestServer(built.app, deps);
   server.listen(0);
   const base = `http://localhost:${(server.address() as AddressInfo).port}`;
@@ -130,7 +132,7 @@ test("with a signing secret set, a whoami GET with a BAD/missing signature is 40
 });
 
 test("adminStatusOf reads the grant list directly (org_admin reported; non-admin otherwise)", async () => {
-  const svc = memoryAdmin();
+  const svc = testAdmin();
   const alice = svc.resolveActor("admin-alice@default-org")!;
   assert.deepEqual(await svc.adminStatusOf(alice), { isAdmin: true, role: "org_admin", scopeId: "org:default-org" });
   const nobody = svc.resolveActor("U-nobody@default-org")!;

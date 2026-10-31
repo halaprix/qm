@@ -1,3 +1,4 @@
+import { createSideChatController } from "./side-chat";
 import "./slack-reply";
 import type { SlackReply } from "./slack-reply";
 import { assistantSidebar, assistantMessage } from "./assistant-sidebar";
@@ -149,12 +150,7 @@ import { showStateError } from "./error-banner";
 import { splitLinks } from "./linkify";
 import { slackWireToPlain, splitSlackWire, stripSlackDirectives } from "./slack-text";
 import { installMarkdownSanitizer } from "./markdown-sanitize";
-import {
-  transcriptModel,
-  defaultEffortForModel,
-  harnessSupportsEffort,
-  harnessSupportsFastMode,
-} from "./model-options";
+import { transcriptModel, defaultEffortForModel } from "./model-options";
 import {
   attachmentGallery,
   avatarTpl,
@@ -217,6 +213,7 @@ import { base64ToBytes } from "./paste-text";
 import { pageAnchor, storeTranscript } from "./transcript-cache";
 import { tip } from "./tooltip";
 import { goalWorked, workSeconds, workedLabel } from "./work-duration";
+import { liveWorkDuration } from "./live-work-duration";
 import { decorateTextCodeBlocks } from "./text-code";
 
 import { createTranscriptViewport } from "./transcript-viewport";
@@ -285,6 +282,7 @@ export function createChatSurface(
   const runSlot = createRunSlot((message) => {
     ctx.composer.state.error = message;
   });
+  const sideChats = createSideChatController(ctx);
   let pendingFork: { index: number } | null = null;
   const transcriptViewport = createTranscriptViewport({ pinPrompt: pinLatestPrompt });
   const stopPrefsWatch = onChatPrefsChange(() => transcriptViewport.refresh());
@@ -456,12 +454,13 @@ export function createChatSurface(
   let readOnlyView: { id: string; threadRef: string; session: CoreSession; anchorSeq: number | null } | null = null;
 
   function teardownActiveChat(): void {
+    sideChats.dispose();
     transcriptViewport.dispose();
     transcriptRefreshGeneration++;
     readOnlyView = null;
     readonlyApprove = null;
     preserveOutgoingWorkingDot(null);
-    detachActiveAgent();
+    detachActiveChat();
     chatState.agent = null;
     clearLiveWork();
     resetBackgroundPanel();
@@ -530,7 +529,8 @@ export function createChatSurface(
     sessionsState.list = markWorking(sessionsState.list, live);
   }
 
-  function detachActiveAgent(): void {
+  function detachActiveChat(): void {
+    if (chatState.host) render(nothing, chatState.host);
     if (!chatState.agent) return;
     detachedAgents.add(chatState.agent);
     chatState.agent.abort();
@@ -551,7 +551,7 @@ export function createChatSurface(
     readonlyApprove = null;
     preserveOutgoingWorkingDot(threadRef);
     dropAbandonedNewChat(threadRef);
-    detachActiveAgent();
+    detachActiveChat();
     ctx.composer.resetComposer();
     forkOriginController.reset();
     chatState.threadRef = threadRef;
@@ -713,11 +713,9 @@ export function createChatSurface(
     if (!selected) throw new Error("No model is available");
     const target = { scopeId: chatState.scopeId, channelName: chatState.contextName };
     if (ctx.composer.followsDefault()) return target;
-    const harness = selected.harnessId;
     return {
-      ...(harnessSupportsEffort(harness) ? { effortLevel: ctx.composer.state.effortLevel } : {}),
-      ...(harnessSupportsFastMode(harness) ? { fastMode: ctx.composer.state.fastMode } : {}),
-      harness,
+      effortLevel: ctx.composer.state.effortLevel,
+      fastMode: ctx.composer.state.fastMode,
       ...target,
     };
   }
@@ -727,6 +725,7 @@ export function createChatSurface(
   }
 
   function inheritedHeader(): TemplateResult | typeof nothing {
+    if (ctx.container()?.closest(".side-chat-panel")) return nothing;
     const origin = chatState.forkSession
       ? forkOriginDetails(chatState.forkSession, chatState.inheritedLoaded ? chatState.inheritedMessages.length : 0)
       : null;
@@ -1030,12 +1029,7 @@ export function createChatSurface(
     return (work: WorkBlock) => {
       if (agent !== chatState.agent) return;
       appendConsumedSteers(agent.state.messages, work);
-      if (
-        work.runtime &&
-        switchedDefault(work.runtime) &&
-        (work.runtime.harnessId !== chatState.turnRuntime?.harnessId ||
-          work.runtime.modelId !== chatState.turnRuntime.modelId)
-      )
+      if (work.runtime && switchedDefault(work.runtime) && work.runtime.modelId !== chatState.turnRuntime?.modelId)
         void ctx.composer.followScopeDefault(agent);
       if (work.runtime) chatState.turnRuntime = work.runtime;
       else if (work !== chatState.liveWork) chatState.turnRuntime = null;
@@ -1225,7 +1219,7 @@ export function createChatSurface(
     if (!container) return;
     preserveOutgoingWorkingDot(s.threadRef);
     dropAbandonedNewChat(s.threadRef);
-    detachActiveAgent();
+    detachActiveChat();
     chatState.agent = null;
     clearLiveWork();
     chatState.host = null;
@@ -1662,6 +1656,7 @@ export function createChatSurface(
       connectionReturnMessageCount ??= currentMessages.length;
       if (connectionReturnMessageCount !== currentMessages.length) preserveConnectionScroll = false;
     }
+    sideChats.sync();
     const messages = chatState.inheritedExpanded
       ? [...chatState.inheritedMessages, ...currentMessages]
       : currentMessages;
@@ -1677,8 +1672,9 @@ export function createChatSurface(
     let messageContent: Array<TemplateResult | typeof nothing> | TemplateResult | typeof nothing = nothing;
     const inheritedOffset = chatState.inheritedExpanded ? chatState.inheritedMessages.length : 0;
     if (messages.length) {
-      messageContent = messages.map((m, i) =>
-        settledChatMessage(m, i - inheritedOffset, agent.state.isStreaming && m === agent.state.streamingMessage),
+      messageContent = messages.map(
+        (m, i) =>
+          html`${settledChatMessage(m, i - inheritedOffset, agent.state.isStreaming && m === agent.state.streamingMessage)}${sideChats.markers(messageEntrySeqs(m))}`,
       );
     }
     const tier = ctx.density();
@@ -1736,40 +1732,52 @@ export function createChatSurface(
       });
     } else {
       content = html`
-        <div
-          class="custom-chat-shell ${editingApp ? "app-edit-chat" : ""} ${ctx.pane ? "in-pane" : ""} ${ctx.composer.state.dragging ? "dragging" : ""} ${
-            emptyChat && !glanceTier && !editingApp ? "empty-chat" : ""
-          }"
-          @dragenter=${(e: DragEvent) => ctx.composer.onDragEnter(e)}
-          @dragover=${(e: DragEvent) => ctx.composer.onDragOver(e)}
-          @dragleave=${(e: DragEvent) => ctx.composer.onDragLeave(e)}
-          @drop=${(e: DragEvent) => void ctx.composer.onDrop(e, agent)}
-        >
-          ${
-            ctx.composer.state.dragging
-              ? html`<div class="drop-overlay">
-                  <div class="drop-overlay-card">${icon(Files, 30)}<span>Drop files or folders to attach</span></div>
-                </div>`
-              : nothing
-          }
-          ${uiCanvasPanel(ctx)} ${glanceTier || ctx.pane || editingApp ? nothing : sessionTopbar()}
-          ${glanceTier ? paneGlance(agent, messages, glanceTier) : nothing}
-          <section class="chat-scroll" tabindex="0" aria-label="Conversation">
-            ${pinnedStrip()}
-            <div class="message-stack ${emptyChat ? "empty-stack" : ""}">
-              ${showWelcome ? welcomeGreeting(!messages.length) : nothing} ${inheritedHeader()}
-              ${chatState.earlierCount > 0 ? earlierNotice() : nothing} ${messageContent} ${waitingSteerRows(agent)}
-              ${glanceTier ? nothing : liveWorkStatus(agent)}
-              ${emptyChat && !isNewUser && !editingApp && !showWelcome ? html`<h1 class="chat-cta">${chatCta()}</h1>` : nothing}
-              ${ctx.pane ? suggestions : nothing}
-              ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
+        <div class="side-chat-layout" @keydown=${sideChats.onKeydown}>
+          <div
+            class="custom-chat-shell ${editingApp ? "app-edit-chat" : ""} ${ctx.pane ? "in-pane" : ""} ${ctx.composer.state.dragging ? "dragging" : ""} ${
+              emptyChat && !glanceTier && !editingApp ? "empty-chat" : ""
+            }"
+            @dragenter=${(e: DragEvent) => ctx.composer.onDragEnter(e)}
+            @dragover=${(e: DragEvent) => ctx.composer.onDragOver(e)}
+            @dragleave=${(e: DragEvent) => ctx.composer.onDragLeave(e)}
+            @drop=${(e: DragEvent) => void ctx.composer.onDrop(e, agent)}
+          >
+            ${
+              ctx.composer.state.dragging
+                ? html`<div class="drop-overlay">
+                    <div class="drop-overlay-card">${icon(Files, 30)}<span>Drop files or folders to attach</span></div>
+                  </div>`
+                : nothing
+            }
+            ${uiCanvasPanel(ctx)} ${glanceTier || ctx.pane || editingApp ? nothing : sessionTopbar()}
+            ${glanceTier ? paneGlance(agent, messages, glanceTier) : nothing}
+            <section
+              class="chat-scroll"
+              tabindex="0"
+              aria-label="Conversation"
+              @mouseup=${sideChats.select}
+              @mousemove=${sideChats.hover}
+              @mouseleave=${sideChats.leave}
+              @keyup=${sideChats.select}
+              @scroll=${sideChats.onScroll}
+            >
+              ${pinnedStrip()}
+              <div class="message-stack ${emptyChat ? "empty-stack" : ""}">
+                ${showWelcome ? welcomeGreeting(!messages.length) : nothing} ${inheritedHeader()}
+                ${chatState.earlierCount > 0 ? earlierNotice() : nothing} ${messageContent} ${waitingSteerRows(agent)}
+                ${glanceTier ? nothing : liveWorkStatus(agent)}
+                ${emptyChat && !isNewUser && !editingApp && !showWelcome ? html`<h1 class="chat-cta">${chatCta()}</h1>` : nothing}
+                ${ctx.pane ? suggestions : nothing}
+                ${showStateError(messages, agent.state.errorMessage) ? html`<div class="composer-error inline">${agent.state.errorMessage}</div>` : nothing}
+              </div>
+            </section>
+            <div class="chat-bottom-dock">
+              ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()}
+              ${swarmUi.strip(chatState.sessionId)} ${backgroundActivityStrip()} ${ctx.composer.composerForm(agent)}
+              ${ctx.pane ? nothing : suggestions}
             </div>
-          </section>
-          <div class="chat-bottom-dock">
-            ${goalStrip(agent)} ${ctx.composer.queuedStrip(agent)} ${subagentStrip()}
-            ${swarmUi.strip(chatState.sessionId)} ${backgroundActivityStrip()} ${ctx.composer.composerForm(agent)}
-            ${ctx.pane ? nothing : suggestions}
           </div>
+          ${sideChats.view()}
         </div>
       `;
     }
@@ -2987,20 +2995,20 @@ export function createChatSurface(
     if (posting) {
       return {
         icon: MessageSquare,
-        label: secs > 0 ? `Posting message for ${secs}s` : "Posting message",
+        label: workedLabel("Posting message", secs),
         detail: firstLine(posting, 60),
       };
     }
     return {
       icon: meta.icon,
-      label: secs > 0 ? `${meta.active} for ${secs}s` : meta.active,
+      label: workedLabel(meta.active, secs),
       detail: toolDetail(tool, call, result),
     };
   }
 
   function elapsedSeconds(startedAt: number | null | undefined): number {
     if (typeof startedAt !== "number" || startedAt <= 0) return 0;
-    return Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    return Math.max(0, (Date.now() - startedAt) / 1000);
   }
 
   function usedToolsSuffix(work: WorkBlock): string {
@@ -3019,11 +3027,8 @@ export function createChatSurface(
   function preStepHead(work: WorkBlock): TemplateResult {
     const step = { icon: Brain, label: "Thinking" };
     liveStepLine.track(step);
-    const secs = workSeconds(work);
     return html`<details class="work work-fold work-${work.status} work-prestep">
-      <summary class="work-head">
-        ${liveStepLine.line(step, step.label, true, secs > 0 ? goalElapsedLabel(0, secs * 1000) : "")}
-      </summary>
+      <summary class="work-head">${liveStepLine.line(step, step.label, true, liveWorkDuration(work))}</summary>
     </details>`;
   }
 
@@ -3069,7 +3074,7 @@ export function createChatSurface(
       if (step) label = step.label;
       if (stopping && last) label = "Stop requested";
       if (stopped && last) label = `You stopped after ${goalElapsedLabel(0, workSeconds(work) * 1000)}`;
-      const elapsed = step && workSeconds(work) > 0 ? goalElapsedLabel(0, workSeconds(work) * 1000) : "";
+      const elapsed = step ? liveWorkDuration(work) : "";
       if (last) liveStepLine.track(step);
       if (
         timeline.length === 1 &&

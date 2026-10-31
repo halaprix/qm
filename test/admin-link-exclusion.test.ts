@@ -1,17 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AdminError, createAdminService } from "../src/admin/admin-service.ts";
-import {
-  createAdminGrantStore,
-  createMemoryAdminGrantPersistence,
-  type AdminGrant,
-} from "../src/admin/admin-grant-store.ts";
+import { createAdminGrantStore, type AdminGrant } from "../src/admin/admin-grant-store.ts";
 import { orgId } from "../src/config.ts";
 import { PrincipalLinkError } from "../src/identity/principal-links.ts";
 import type { PrincipalLink } from "../src/identity/principal-links.ts";
-import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
+import { type DurableMap } from "../src/persistence/durable-map.ts";
 import { scopeId } from "../src/types.ts";
-import { memoryPrincipalLinks } from "./support/principal-links.ts";
+import { testPrincipalLinks } from "./support/principal-links.ts";
+import { testMap, testAdminGrantStore } from "./support/test-database.ts";
 
 const ROOT = "root@acme.test";
 const ISSUER = "https://issuer.test";
@@ -30,10 +27,10 @@ function setup(
   wrap?: (store: ReturnType<typeof createAdminGrantStore>) => ReturnType<typeof createAdminGrantStore>,
   wrapLinks?: (backing: DurableMap<PrincipalLink>) => DurableMap<PrincipalLink>,
 ) {
-  const raw = createAdminGrantStore(createMemoryAdminGrantPersistence(), { seed: [root] });
+  const raw = testAdminGrantStore([root]);
   const store = wrap ? wrap(raw) : raw;
-  const backing = createMemoryMap<PrincipalLink>();
-  const links = memoryPrincipalLinks(wrapLinks ? wrapLinks(backing) : backing, store);
+  const backing = testMap<PrincipalLink>();
+  const links = testPrincipalLinks(wrapLinks ? wrapLinks(backing) : backing, store);
   const admin = createAdminService(store, { principalLinks: links, trustedOidcAdminIssuer: ISSUER });
   const grantRows = async (id: string) => (await raw.list()).filter((g) => g.principalId === id);
   return { raw, links, admin, grantRows };

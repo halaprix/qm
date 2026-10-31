@@ -13,11 +13,10 @@ import type {
   OutgoingAttachment,
   PendingApproval,
   ScopeId,
-  SurfaceContextRequest,
-  SurfaceContextResult,
   TurnRequest,
   TurnResult,
 } from "../types.ts";
+import type { SurfaceContextRequest, SurfaceContextResult } from "../reach/reach.ts";
 import { sleep } from "../util/async.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
 import type { IdentityService } from "../identity/identity-service.ts";
@@ -66,6 +65,7 @@ export interface SurfaceCoreClient {
   getDelivery(id: string): Promise<Delivery | null>;
   ackDelivery(id: string, body?: { recipientThreadRef?: string; slackApiMs?: number }): Promise<void>;
   reportDeliveryUndeliverable(id: string, reason: string): Promise<void>;
+  failDelivery(id: string, reason: string): Promise<void>;
   onDeliveryEnqueued(listener: () => void): () => void;
   holdDeliveryDispatch<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
   holdDirectorySync<T>(fn: (lost: Promise<void>) => Promise<T>): Promise<T | null>;
@@ -329,6 +329,19 @@ export function createSurfaceCoreClient(deps: SurfaceCoreClientDeps, surface: st
         category: "delivery",
         code: "delivery_undeliverable",
         message: `delivery ${id} cannot be delivered (${reason}) — retrying until the TTL expires it`,
+        scopeLabel: `${surface}:deliveries` as ScopeId,
+      });
+    },
+
+    async failDelivery(id, reason) {
+      const failed = await deps.app.failDelivery(id, reason);
+      if (!failed) return;
+      deps.errors?.record({
+        category: "delivery",
+        code: "delivery_failed",
+        message:
+          `delivery ${id} to ${failed.destination.type} ${failed.destination.target} was refused permanently (${reason}) — ` +
+          `dropped, not retried${failed.destination.commandApprovalId ? `; approval ${failed.destination.commandApprovalId} never reached its requester` : ""}`,
         scopeLabel: `${surface}:deliveries` as ScopeId,
       });
     },

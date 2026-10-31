@@ -5,7 +5,8 @@ import { createIdentityService, type IdentityService } from "../src/identity/ide
 import { type PrincipalLinkService } from "../src/identity/principal-links.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { discordExternalId } from "../src/discord/config.ts";
-import { memoryPrincipalLinks } from "./support/principal-links.ts";
+import { testPrincipalLinks } from "./support/principal-links.ts";
+import { testMap } from "./support/test-database.ts";
 
 type DiscordCoreDeps = Parameters<typeof createDiscordCoreClient>[0];
 
@@ -22,9 +23,9 @@ describe("discord core client identity links", () => {
   });
 
   it("classifies unlinked, linked internal, and deactivated discord users", async () => {
-    const links: PrincipalLinkService = memoryPrincipalLinks();
+    const links: PrincipalLinkService = testPrincipalLinks();
     installPrincipalLinks(links);
-    const identity = createIdentityService(undefined, { principalLinks: links });
+    const identity = createIdentityService(testMap(), { externalMembers: testMap(), principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
 
     assert.equal(await client.linkedInternal("unlinked-user"), false);
@@ -44,9 +45,9 @@ describe("discord core client identity links", () => {
   });
 
   it("discordUserIdsFor returns only the discord ids linked to a principal", async () => {
-    const links: PrincipalLinkService = memoryPrincipalLinks();
+    const links: PrincipalLinkService = testPrincipalLinks();
     installPrincipalLinks(links);
-    const identity = createIdentityService(undefined, { principalLinks: links });
+    const identity = createIdentityService(testMap(), { externalMembers: testMap(), principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
 
     await links.link({
@@ -68,9 +69,9 @@ describe("discord core client identity links", () => {
   });
 
   it("active external member linked stays guest on Discord", async () => {
-    const links: PrincipalLinkService = memoryPrincipalLinks();
+    const links: PrincipalLinkService = testPrincipalLinks();
     installPrincipalLinks(links);
-    const identity = createIdentityService(undefined, { principalLinks: links });
+    const identity = createIdentityService(testMap(), { externalMembers: testMap(), principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
 
     await identity.putExternalMember({
@@ -102,9 +103,9 @@ describe("discord core client identity links", () => {
   });
 
   it("coreStatus.notInternal is true for deactivated user and false for normal user", async () => {
-    const links: PrincipalLinkService = memoryPrincipalLinks();
+    const links: PrincipalLinkService = testPrincipalLinks();
     installPrincipalLinks(links);
-    const identity = createIdentityService(undefined, { principalLinks: links });
+    const identity = createIdentityService(testMap(), { externalMembers: testMap(), principalLinks: links });
     const client = createDiscordCoreClient(createDeps(identity));
 
     assert.equal((await client.coreStatus("unlinked-normal")).notInternal, false);

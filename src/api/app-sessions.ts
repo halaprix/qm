@@ -1,3 +1,5 @@
+import { commonEntrySeqs } from "../sessions/transcript-source.ts";
+import { isSideChatAnchor } from "../sessions/side-chat.ts";
 import { composeSoul } from "../resolution/resolution-service.ts";
 import { createCurrentScopeMembers } from "../resolution/scope-membership.ts";
 import { notifyDeploymentShared } from "../deploy/share-notice.ts";
@@ -10,7 +12,7 @@ import { parseScopeId, scopeId } from "../types.ts";
 import { fileArtifactId, artifactPath } from "../files/file-artifact-store.ts";
 import { acquireLeaseWithin, entryWithinTenure, windowedTranscript } from "../sessions/session-store.ts";
 import { createTranscriptSource } from "../sessions/transcript-source.ts";
-import { cancelGoal, goalCancelledPayload, openGoal } from "../harness/goal.ts";
+import { cancelGoal, goalCancelledPayload, openGoal } from "../agent/goal.ts";
 import { goalView } from "../runs/turn-stream.ts";
 import { SEARCH_HIT_LIMIT, entrySearchText, searchSnippet, searchTerms } from "../sessions/entry-search.ts";
 import { supportsProcessSessions } from "../sandbox/sandbox.ts";
@@ -28,6 +30,7 @@ import { projectIdFromGroupRef, projectScopeId } from "../projects/project-store
 
 import type { App, AppDeps } from "./app-types.ts";
 import {
+  SideChatAnchorError,
   SoulUpdateDeniedError,
   SoulVersionConflictError,
   toFileItem,
@@ -80,6 +83,8 @@ export function createSessionMethods(
   | "listSessions"
   | "listSessionPage"
   | "sessionChildren"
+  | "sideChats"
+  | "expandSideChat"
   | "sessionRow"
   | "searchSessions"
   | "sessionBackground"
@@ -613,6 +618,24 @@ export function createSessionMethods(
       };
     },
 
+    async sideChats(principalId, sessionId) {
+      if (!(await sessionForViewer(sessionId, principalId))) return null;
+      const rows = await deps.sessions.sideChatsOf(sessionId);
+      const visible = await Promise.all(rows.map((row) => sessionForViewer(row.id, principalId)));
+      return Promise.all(
+        visible
+          .filter((row): row is Session => row !== null)
+          .map(async (row) => ({ ...row, canContinue: await canContinueOnWeb(principalId, row) })),
+      );
+    },
+
+    async expandSideChat(principalId, sessionId) {
+      const session = await sessionForViewer(sessionId, principalId);
+      if (!session?.sideChat || !(await mayWriteSession(principalId, session))) return null;
+      await deps.sessions.expandSideChat(sessionId);
+      return sessionForViewer(sessionId, principalId);
+    },
+
     async sessionChildren(principalId, sessionId) {
       const root = await sessionForViewer(sessionId, principalId);
       if (!root) return null;
@@ -987,11 +1010,9 @@ export function createSessionMethods(
         await deps.sessions.setParentSession(sessionId, null);
         return { detached: true as const };
       };
-      return deps.advisoryLock
-        ? deps.advisoryLock.withLock("session-tree-admission", () =>
-            deps.advisoryLock!.withLock("session-run-admission", detach),
-          )
-        : detach();
+      return deps.advisoryLock.withLock("session-tree-admission", () =>
+        deps.advisoryLock.withLock("session-run-admission", detach),
+      );
     },
 
     async cancelSessionGoal(sessionId, principalId) {
@@ -1041,15 +1062,16 @@ export function createSessionMethods(
           const views = await Promise.all(
             projectMembers.map(async (memberId) => (await transcripts.forViewer(sessionId, memberId)).entries),
           );
-          const common = new Set(views[0]!.map((entry) => entry.seq));
-          for (const view of views.slice(1)) {
-            const seqs = new Set(view.map((entry) => entry.seq));
-            for (const seq of common) if (!seqs.has(seq)) common.delete(seq);
-          }
+          const common = commonEntrySeqs(views);
           visible = visible.filter((entry) => common.has(entry.seq));
         }
         const upToSeq = opts?.upToSeq;
         const copied = upToSeq === undefined ? visible : visible.filter((entry) => entry.seq <= upToSeq);
+        if (
+          opts?.sideChat &&
+          (!isSideChatAnchor(opts.sideChat) || !copied.some((entry) => entry.seq === opts.sideChat!.entrySeq))
+        )
+          throw new SideChatAnchorError();
         const threadRef = `web:${principalId}:${randomUUID()}`;
         const forked = await deps.sessions.getOrCreateByThread(
           threadRef,
@@ -1077,6 +1099,7 @@ export function createSessionMethods(
           await deps.sessions.updateForkProvenance(forked.id, {
             forkedFrom: { sessionId, title: source.title ?? null },
             forkBoundarySeq,
+            ...(opts?.sideChat ? { sideChat: { ...opts.sideChat, expanded: false } } : {}),
           });
         }
         const sourceTitle = source.title?.trim();
@@ -1160,7 +1183,7 @@ export function createSessionMethods(
       return true;
     },
 
-    async grant(g) {
+    async grant(g, opts) {
       if (parseRef(g.ref).kind === "deploy") {
         g = {
           ...g,
@@ -1183,7 +1206,7 @@ export function createSessionMethods(
         scopeLabel: g.granteeScopeId,
       });
       const ref = parseRef(g.ref);
-      if (ref.kind === "deploy")
+      if (ref.kind === "deploy" && opts?.notify !== false)
         await notifyDeploymentShared(
           deps,
           deps.deploy.getDeployment(ref.id),
@@ -1323,7 +1346,7 @@ export function createSessionMethods(
           throw error;
         }
       };
-      return deps.advisoryLock?.withLock(`admin-governance:${scopeIdValue}`, write) ?? write();
+      return deps.advisoryLock.withLock(`admin-governance:${scopeIdValue}`, write);
     },
   };
 }
