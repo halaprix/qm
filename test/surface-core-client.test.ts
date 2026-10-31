@@ -6,7 +6,8 @@ import {
   readOutgoingAttachment,
   type SurfaceCoreClientDeps,
 } from "../src/api/surface-core-client.ts";
-import type { Delivery, SurfaceContextRequest, TurnRequest } from "../src/types.ts";
+import type { Delivery, TurnRequest } from "../src/types.ts";
+import type { SurfaceContextRequest } from "../src/reach/reach.ts";
 
 function fakeDeps(seen: TurnRequest[] = []): SurfaceCoreClientDeps {
   return {

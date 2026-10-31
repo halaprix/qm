@@ -57,17 +57,6 @@ export function parseAdminGrants(raw: string | undefined, orgId: string): AdminG
   return grants;
 }
 
-function defaultAdminGrants(orgId: string): AdminGrant[] {
-  return [
-    { principalId: "admin-alice", scopeId: scopeId("org", orgId), role: "org_admin" },
-    { principalId: "admin-bob", scopeId: scopeId("org", orgId), role: "org_admin" },
-  ];
-}
-
-export function bootAdminGrantSeed(rawAdminGrants: string | undefined, orgId: string, durable: boolean): AdminGrant[] {
-  return parseAdminGrants(rawAdminGrants, orgId) ?? (durable ? [] : defaultAdminGrants(orgId));
-}
-
 export interface AdminServiceOptions {
   now?: () => number;
   trustedOidcAdminIssuer?: string;

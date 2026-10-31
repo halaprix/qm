@@ -10,7 +10,6 @@ import { destinationVisible, runTrigger, type TriggerDeps } from "../src/trigger
 import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts";
 import { createIdentityService } from "../src/identity/identity-service.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import type { BuiltApp } from "../src/wiring.ts";
 import { buildApp } from "./support/build-app.ts";
 import { createServer } from "../src/api/server.ts";
@@ -18,8 +17,10 @@ import { createControlService } from "../src/api/control-service.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS } from "../src/auth/capability-token.ts";
 import { testConfig } from "./support/test-config.ts";
 import { scopeActor, scopeId } from "../src/types.ts";
-import type { SurfaceContextQuery, SurfaceContextRequest, SurfaceContextResult } from "../src/types.ts";
+import type { SurfaceContextQuery, SurfaceContextRequest, SurfaceContextResult } from "../src/reach/reach.ts";
 import { installDiscord, noLinkChannels } from "./support/discord-channels.ts";
+import { createPostgresReplayDedupe } from "../src/auth/replay-dedupe.ts";
+import { testDatabaseUrl, testMap } from "./support/test-database.ts";
 
 const SLACK_CHANNEL = { channelId: "C-eng", name: "eng" };
 
@@ -358,8 +359,8 @@ test("a prompt cron homed in a Discord channel runs when its owner can view the 
     const out = await runTrigger(
       {
         deliveries: createDeliveryStore(),
-        idempotency: createIdempotencyStore(createMemoryMap()),
-        identity: createIdentityService(),
+        idempotency: createIdempotencyStore(testMap()),
+        identity: createIdentityService(testMap(), { externalMembers: testMap() }),
         run: async () => {
           ran = true;
           return { status: "ok", reply: "done" };
@@ -398,11 +399,11 @@ function homedTrigger(
   opts: { message?: string; fireKey: string; mayDeferReaders?: boolean },
 ) {
   const ran: string[] = [];
-  const idempotency = createIdempotencyStore(createMemoryMap());
+  const idempotency = createIdempotencyStore(testMap());
   const deps = {
     deliveries: createDeliveryStore(),
     idempotency,
-    identity: createIdentityService(),
+    identity: createIdentityService(testMap(), { externalMembers: testMap() }),
     run: async () => {
       ran.push("run");
       return { status: "ok", reply: "done" };
@@ -436,8 +437,8 @@ test("a Discord-homed trigger with no destination checks the owner's Discord acc
     const out = await runTrigger(
       {
         deliveries: createDeliveryStore(),
-        idempotency: createIdempotencyStore(createMemoryMap()),
-        identity: createIdentityService(),
+        idempotency: createIdempotencyStore(testMap()),
+        identity: createIdentityService(testMap(), { externalMembers: testMap() }),
         run: async () => {
           ran.push("run");
           return { status: "ok", reply: "done" };
@@ -517,8 +518,8 @@ test("a non-home Discord destination still runs the turn while channel readers a
   const out = await runTrigger(
     {
       deliveries,
-      idempotency: createIdempotencyStore(createMemoryMap()),
-      identity: createIdentityService(),
+      idempotency: createIdempotencyStore(testMap()),
+      identity: createIdentityService(testMap(), { externalMembers: testMap() }),
       run: async () => {
         ran.push("run");
         return { status: "ok", reply: "done" };
@@ -553,8 +554,8 @@ function triggerRunDeps(lookup: NonNullable<ReachDirectory["discordLookup"]>) {
   const ran: string[] = [];
   const deps = {
     deliveries,
-    idempotency: createIdempotencyStore(createMemoryMap()),
-    identity: createIdentityService(),
+    idempotency: createIdempotencyStore(testMap()),
+    identity: createIdentityService(testMap(), { externalMembers: testMap() }),
     run: async () => {
       ran.push("run");
       return { status: "ok", reply: "done" };
@@ -610,8 +611,8 @@ function homeMessageDeps(lookup: NonNullable<ReachDirectory["discordLookup"]>, r
   const deliveries = createDeliveryStore();
   const deps = {
     deliveries,
-    idempotency: createIdempotencyStore(createMemoryMap()),
-    identity: createIdentityService(),
+    idempotency: createIdempotencyStore(testMap()),
+    identity: createIdentityService(testMap(), { externalMembers: testMap() }),
     run: async () => ({ status: "ok", reply: "done" }),
     directory: {
       channelMember: async () => true,
@@ -960,7 +961,10 @@ describe("POST /v1/reach into a Discord channel", () => {
     built = buildApp(testConfig({ signingSecret: SECRET }));
     await installDiscord(built);
     await built.app.upsertDirectory([{ principalId: "U-carol", displayName: "Carol", type: "internal" }]);
-    server = createServer(built.app, { signingSecret: SECRET });
+    server = createServer(built.app, {
+      signingSecret: SECRET,
+      replayDedupe: createPostgresReplayDedupe(testDatabaseUrl()),
+    });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     base = `http://localhost:${(server.address() as AddressInfo).port}`;
     void (async () => {

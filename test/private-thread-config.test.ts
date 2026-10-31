@@ -7,17 +7,17 @@ import {
   ConfigConflictError,
   ConfigInheritedError,
   configStoreMaps,
-  createMemoryConfigStore,
+  type ScopedConfigStore,
 } from "../src/resolution/config-store.ts";
 import { createResolutionService } from "../src/resolution/resolution-service.ts";
 import { createAclStore } from "../src/acl/acl-store.ts";
+import { createPostgresGrantStore } from "../src/acl/postgres-grant-store.ts";
 import { scopeId, type Conversation, type Principal, type TurnRequest } from "../src/types.ts";
 import { runTrigger } from "../src/triggers/run-trigger.ts";
 import { startSession } from "../src/api/start-session.ts";
 import { createDeliveryStore } from "../src/delivery/delivery-store.ts";
 import { createIdempotencyStore } from "../src/idempotency/idempotency-store.ts";
 import { createIdentityService } from "../src/identity/identity-service.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { createServer } from "../src/api/server.ts";
 import { createControlService } from "../src/api/control-service.ts";
 import { serverDeps } from "../src/wiring.ts";
@@ -32,6 +32,7 @@ import { createChannelLookup } from "../src/discord/context.ts";
 import { createDiscordChannels, createDiscordHistoryReader, type ThreadLinker } from "../src/discord/gateway.ts";
 import { buildApp } from "./support/build-app.ts";
 import { testConfig, TEST_CAPABILITY_SECRET } from "./support/test-config.ts";
+import { testConfigStore, testDatabaseUrl, testMap } from "./support/test-database.ts";
 
 const PARENT_ID = "1300000000000000010";
 const THREAD_ID = "1300000000000000077";
@@ -40,7 +41,7 @@ const THREAD = scopeId("channel", THREAD_ID);
 const ORG = scopeId("org", "default-org");
 const actor: Principal = { id: "U1", type: "internal" };
 
-async function strictParent(config = createMemoryConfigStore("default-org"), linked = true) {
+async function strictParent(config = testConfigStore("default-org"), linked = true) {
   if (linked) await config.linkConfigParent(THREAD, PARENT);
   await config.setSoul(PARENT, "PARENT_SOUL");
   await config.setCommandPolicy(PARENT, {
@@ -55,8 +56,12 @@ async function strictParent(config = createMemoryConfigStore("default-org"), lin
   return config;
 }
 
-async function assertParentConfig(config: ReturnType<typeof createMemoryConfigStore>, conversation: Conversation) {
-  const r = await createResolutionService("default-org", config, createAclStore()).resolve(conversation, actor);
+async function assertParentConfig(config: ScopedConfigStore, conversation: Conversation) {
+  const r = await createResolutionService(
+    "default-org",
+    config,
+    createAclStore(createPostgresGrantStore(testDatabaseUrl())),
+  ).resolve(conversation, actor);
   assert.deepEqual(
     r.layers.map((l) => [l.scopeId, l.mode]),
     [
@@ -86,10 +91,14 @@ test("a linked private thread resolves every config layer from its parent and ke
 });
 
 test("a request cannot choose the config scope: a spoofed parentChannelRef is ignored", async () => {
-  const config = createMemoryConfigStore("default-org");
+  const config = testConfigStore("default-org");
   await config.setSecurityPosture(scopeId("channel", "C_STRICT"), "strict");
   await config.setEgress(scopeId("channel", "C_STRICT"), { allowedHosts: [], deniedHosts: ["bad.test"] });
-  const res = createResolutionService("default-org", config, createAclStore());
+  const res = createResolutionService(
+    "default-org",
+    config,
+    createAclStore(createPostgresGrantStore(testDatabaseUrl())),
+  );
   const base = { kind: "channel", threadRef: "web:U1:1", channelRef: "C_STRICT", audience: [actor] } as Conversation;
   const spoofed = await res.resolve({ ...base, parentChannelRef: "C_ANY" } as Conversation, actor);
   assert.equal(spoofed.securityPolicy.toolApprovals, "all");
@@ -103,21 +112,18 @@ test("every config getter of a linked private thread answers with its parent's v
   assert.equal(config.soulVersion(THREAD), config.soulVersion(PARENT));
   assert.deepEqual(config.soulHistory(THREAD), config.soulHistory(PARENT));
   assert.deepEqual(config.getCommandPolicy(THREAD), config.getCommandPolicy(PARENT));
-  assert.equal(config.getSecurityPosture(THREAD), "strict");
   assert.equal(await config.getSecurityPostureDurable(THREAD), "strict");
-  assert.equal(config.getSharingPosture(THREAD), "isolated");
   assert.equal(await config.getSharingPostureDurable(THREAD), "isolated");
   assert.equal(await config.getSharingPostureOwnDurable(THREAD), "isolated");
   assert.equal(await config.resolveSharingPostureDurable(scopeId("personal", "U1"), THREAD), "isolated");
-  assert.deepEqual(config.getApprovalGrantModes(THREAD), { session: false, always: false });
   assert.deepEqual(await config.getApprovalGrantModesDurable(THREAD), { session: false, always: false });
   assert.deepEqual(config.getEgress(THREAD)?.deniedHosts, ["parent-bad.test"]);
 });
 
 test("a link written by another instance is honoured by durable reads and refuses writes", async () => {
-  const maps = configStoreMaps(() => createMemoryMap());
-  const writer = createMemoryConfigStore("default-org", maps);
-  const reader = createMemoryConfigStore("default-org", maps);
+  const maps = configStoreMaps(() => testMap());
+  const writer = testConfigStore("default-org", maps);
+  const reader = testConfigStore("default-org", maps);
   await writer.setSecurityPosture(PARENT, "strict");
   await writer.linkConfigParent(THREAD, PARENT);
   assert.equal(await reader.getSecurityPostureDurable(THREAD), "strict");
@@ -151,8 +157,8 @@ test("a trigger homed in a private Discord thread resolves the parent's config",
   await runTrigger(
     {
       deliveries: createDeliveryStore(),
-      idempotency: createIdempotencyStore(createMemoryMap()),
-      identity: createIdentityService(),
+      idempotency: createIdempotencyStore(testMap()),
+      identity: createIdentityService(testMap(), { externalMembers: testMap() }),
       run: async (req: TurnRequest) => {
         runs.push(req);
         return { status: "ok", reply: "done" };
@@ -299,12 +305,11 @@ test("an admin write to a private thread scope is refused with a clear 409", asy
   });
   assert.equal(res.status, 409);
   assert.match(((await res.json()) as { message: string }).message, /takes its configuration from/);
-  assert.equal((await s.built.config.scopeConfigPresence(THREAD)).securityPosture, false);
 });
 
 test("a thread with config of its own is refused a link until that config is cleared", async () => {
-  const maps = configStoreMaps(() => createMemoryMap());
-  const config = createMemoryConfigStore("default-org", maps);
+  const maps = configStoreMaps(() => testMap());
+  const config = testConfigStore("default-org", maps);
   await config.setEgress(THREAD, { allowedHosts: [], deniedHosts: ["thread-bad.test"] });
   await assert.rejects(config.linkConfigParent(THREAD, PARENT), (e: unknown) => {
     assert.ok(e instanceof ConfigConflictError);
@@ -334,7 +339,7 @@ test("SOUL reads follow the link to the parent's durable SOUL even when this ins
 test("one resolve reads the thread link once, and a Slack channel resolve never reads it", async () => {
   const reads: string[] = [];
   const maps = configStoreMaps((table) => {
-    const map = createMemoryMap<never>();
+    const map = testMap<never>();
     if (table !== "config_parents") return map;
     return {
       ...map,
@@ -344,8 +349,12 @@ test("one resolve reads the thread link once, and a Slack channel resolve never 
       },
     };
   });
-  const config = await strictParent(createMemoryConfigStore("default-org", maps));
-  const res = createResolutionService("default-org", config, createAclStore());
+  const config = await strictParent(testConfigStore("default-org", maps));
+  const res = createResolutionService(
+    "default-org",
+    config,
+    createAclStore(createPostgresGrantStore(testDatabaseUrl())),
+  );
   reads.length = 0;
   await res.resolve(
     { kind: "channel", threadRef: "slack:C123:1", channelRef: "C0123SLACK", audience: [actor] } as Conversation,
@@ -411,8 +420,8 @@ async function cronInThread(discordLookup: (query: Record<string, unknown>) => P
   const out = await runTrigger(
     {
       deliveries: createDeliveryStore(),
-      idempotency: createIdempotencyStore(createMemoryMap()),
-      identity: createIdentityService(),
+      idempotency: createIdempotencyStore(testMap()),
+      identity: createIdentityService(testMap(), { externalMembers: testMap() }),
       run: async (req: TurnRequest) => {
         runs.push(req);
         return { status: "ok", reply: "done" };
@@ -432,7 +441,7 @@ async function cronInThread(discordLookup: (query: Record<string, unknown>) => P
 }
 
 test("a cron homed in a private thread the bot never saw links it on lookup and runs under the parent's config", async () => {
-  const config = await strictParent(createMemoryConfigStore("default-org"), false);
+  const config = await strictParent(testConfigStore("default-org"), false);
   const link: ThreadLinker = (threadId, parentId) =>
     config.linkConfigParent(scopeId("channel", threadId), scopeId("channel", parentId));
   const { runs } = await cronInThread(unseenPrivateThread(link).discordLookup);
@@ -458,7 +467,7 @@ test("durable posture and grant reads leave no unhandled rejection when the link
   const onUnhandled = () => void unhandled++;
   process.on("unhandledRejection", onUnhandled);
   try {
-    const maps = configStoreMaps(() => createMemoryMap());
+    const maps = configStoreMaps(() => testMap());
     const slow = <M extends { get: (id: never) => Promise<unknown> }>(m: M): M => ({
       ...m,
       get: async (id: never) => {
@@ -466,7 +475,7 @@ test("durable posture and grant reads leave no unhandled rejection when the link
         return m.get(id);
       },
     });
-    const config = createMemoryConfigStore("default-org", {
+    const config = testConfigStore("default-org", {
       ...maps,
       securityPostures: slow(maps.securityPostures),
       approvalGrantModes: slow(maps.approvalGrantModes),

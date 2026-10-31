@@ -354,6 +354,7 @@ class FakeCore implements SlackCoreClient {
     return [];
   }
   async ackDelivery(): Promise<void> {}
+  async failDelivery(): Promise<void> {}
   deliverySubscriptions = 0;
   onDeliveryEnqueued(): () => void {
     this.deliverySubscriptions++;

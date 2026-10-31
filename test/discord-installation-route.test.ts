@@ -7,14 +7,14 @@ import {
   putDiscordInstallation,
 } from "../src/api/routes/admin/discord-installation.ts";
 import type { ApiCtx } from "../src/api/routes/route.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import { createDiscordInstallationStore } from "../src/surfaces/discord-installation.ts";
+import { testMap } from "./support/test-database.ts";
 
 const TOKEN = "MTIzNDU2Nzg5MDEyMzQ1Njc4.SECRET.TOKENVALUE";
 const CLIENT_SECRET = "oauth-client-SECRET-value";
 
 async function fixture(t: test.TestContext, options: { omitStore?: boolean } = {}) {
-  const map = createMemoryMap();
+  const map = testMap();
   const store = options.omitStore
     ? undefined
     : createDiscordInstallationStore("test", map as Parameters<typeof createDiscordInstallationStore>[1], "test-key");

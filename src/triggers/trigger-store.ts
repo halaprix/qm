@@ -1,4 +1,5 @@
-import type { Destination, ScopeId, TriggerBase } from "../types.ts";
+import type { Destination, ScopeId } from "../types.ts";
+import type { TriggerBase } from "./types.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { samePerson } from "../directory/person.ts";
 import { canonicalJson } from "../../cli/src/canonical-json.ts";
@@ -48,6 +49,12 @@ export async function setTriggerEnabled<T extends TriggerBase>(
   enabled: boolean,
 ): Promise<void> {
   await backing.merge(id, { enabled } as Partial<T>);
+}
+
+export async function ownedBy<T extends TriggerBase>(backing: DurableMap<T>, scopeId: string): Promise<T[]> {
+  const field = "ownerScopeId" as Extract<keyof T, string>;
+  const rows = await backing.select({ where: { field, anyOfFold: [scopeId] } });
+  return rows.filter((row) => row.ownerScopeId === scopeId);
 }
 
 export const DROP_RECIPIENT_CONSENT_MIGRATION = {

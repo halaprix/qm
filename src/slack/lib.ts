@@ -120,7 +120,6 @@ export {
 } from "./delivery.ts";
 export {
   CURATED_ACK_EMOJI,
-  stripAckPrefix,
   renderGoalNotice,
   type GoalNoticeView,
   type GoalNoticePresenter,

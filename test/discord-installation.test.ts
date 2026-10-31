@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
 import {
   createDiscordInstallationStore,
   discordLinkRedirectUri,
@@ -10,6 +9,7 @@ import {
   type StoredDiscordInstallation,
   validateDiscordToken,
 } from "../src/surfaces/discord-installation.ts";
+import { testMap } from "./support/test-database.ts";
 
 const TOKEN = "MTIzNDU2Nzg5MDEyMzQ1Njc4.SECRET.TOKENVALUE";
 const CLIENT_SECRET = "oauth-client-SECRET-value";
@@ -20,7 +20,7 @@ const settings = {
 };
 
 test("the token and the OAuth client secret are encrypted at rest and absent from status", async () => {
-  const map = createMemoryMap<unknown>();
+  const map = testMap<unknown>();
   const store = createDiscordInstallationStore("acme", map as never, "k");
   const status = await store.set({ ...settings, bot: BOT, oauthClientSecret: CLIENT_SECRET, updatedBy: "admin" });
   for (const secret of [TOKEN, CLIENT_SECRET]) {
@@ -53,7 +53,7 @@ test("parseDiscordSettings rejects when internalRoleIds contains a guild id", ()
 });
 
 test("updating settings without a token keeps the stored token", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });
   await store.set({ ...settings, guildIds: ["900000000000000000"], updatedBy: "a" });
   const got = (await store.get())!;
@@ -62,12 +62,12 @@ test("updating settings without a token keeps the stored token", async () => {
 });
 
 test("a first save without a token is refused", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   await assert.rejects(store.set({ ...settings, updatedBy: "a" }), /bot token is required/);
 });
 
 test("delete removes the installation", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });
   await store.delete();
   assert.equal(await store.get(), null);
@@ -75,7 +75,7 @@ test("delete removes the installation", async () => {
 });
 
 test("settings-only set fails if the record vanished before the update", async () => {
-  const map = createMemoryMap<StoredDiscordInstallation>();
+  const map = testMap<StoredDiscordInstallation>();
   const store = createDiscordInstallationStore("acme", map, "k");
   await store.set({ ...settings, bot: BOT, updatedBy: "a" });
   const realUpdate = map.update!.bind(map);
@@ -87,7 +87,7 @@ test("settings-only set fails if the record vanished before the update", async (
 });
 
 test("a first set where update rejects leaves the record in place", async () => {
-  const map = createMemoryMap<StoredDiscordInstallation>();
+  const map = testMap<StoredDiscordInstallation>();
   map.update = (async () => {
     throw new Error("db failure during update");
   }) as never;
@@ -97,13 +97,13 @@ test("a first set where update rejects leaves the record in place", async () => 
 });
 
 test("a set without client secret reports oauthConfigured false", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   const status = await store.set({ ...settings, bot: BOT, updatedBy: "a" });
   assert.equal(status.oauthConfigured, false);
 });
 
 test("changing application id drops stored oauth client secret", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   await store.set({ ...settings, bot: BOT, oauthClientSecret: CLIENT_SECRET, updatedBy: "a" });
   assert.equal((await store.status()).oauthConfigured, true);
   const bot2 = { ...BOT, applicationId: "different-app-id" };
@@ -114,7 +114,7 @@ test("changing application id drops stored oauth client secret", async () => {
 });
 
 test("keeping application id keeps stored oauth client secret", async () => {
-  const store = createDiscordInstallationStore("acme", createMemoryMap() as never, "k");
+  const store = createDiscordInstallationStore("acme", testMap() as never, "k");
   await store.set({ ...settings, bot: BOT, oauthClientSecret: CLIENT_SECRET, updatedBy: "a" });
   assert.equal((await store.status()).oauthConfigured, true);
   const botSameApp = { ...BOT, tag: "qm#2" };
@@ -240,7 +240,7 @@ test("discordPluginConfigFromInstallation maps installation fields", () => {
 test("settings carry guild and role ids only: a user allow list is neither parsed, stored nor reported", async () => {
   const parsed = parseDiscordSettings({ allowUserIds: ["123456789012345678"], guildIds: [], internalRoleIds: [] });
   assert.deepEqual(Object.keys(parsed).sort(), ["guildIds", "internalRoleIds"]);
-  const store = createDiscordInstallationStore("org", createMemoryMap<StoredDiscordInstallation>(), "key-material");
+  const store = createDiscordInstallationStore("org", testMap<StoredDiscordInstallation>(), "key-material");
   const status = await store.set({ ...parsed, bot: BOT, updatedBy: "admin" });
   assert.equal("allowUserIds" in status, false);
 });

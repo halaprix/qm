@@ -369,7 +369,7 @@ export function createPostgresDirectoryStore(connectionString: string): Director
           ];
     const hash = hashRoster([...channelsPart, ...membersPart]);
 
-    const applied = await swapIfChanged(
+    return swapIfChanged(
       discordBatch ? "discord_channels_hash" : "channels_hash",
       hash,
       syncedAt,
@@ -448,10 +448,6 @@ export function createPostgresDirectoryStore(connectionString: string): Director
       },
       partial,
     );
-    if (applied && membershipRows !== undefined) {
-      await q("UPDATE directory_sync SET channel_members_synced = TRUE WHERE org_id = $1", [orgId]);
-    }
-    return applied;
   }
 
   return {

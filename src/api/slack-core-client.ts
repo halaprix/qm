@@ -16,7 +16,8 @@ import { resolveBranding } from "../resolution/branding.ts";
 import type { App } from "./app.ts";
 import type { ErrorLog } from "../admin/error-log.ts";
 import type { LeaderLease } from "../persistence/leader-lease.ts";
-import type { Delivery, ScopeId, SurfaceContextRequest, TurnRequest } from "../types.ts";
+import type { Delivery, ScopeId, TurnRequest } from "../types.ts";
+import type { SurfaceContextRequest } from "../reach/reach.ts";
 import { scopeId } from "../types.ts";
 import type { CachedMessage, ReadMessagesOpts, IngestEvent } from "../surface-cache/surface-cache.ts";
 import type { AckEmojiPickStore } from "../surface-cache/ack-emoji-pick-store.ts";
@@ -27,8 +28,8 @@ import type { RunStore } from "../runs/run-store.ts";
 import type { TurnStream } from "../runs/turn-stream.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { swallowAs } from "../util/errors.ts";
-import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
-import type { RuntimeChoice } from "../harness/harness.ts";
+import { resolveRuntimeChoice } from "../agent/runtime-choice.ts";
+import type { RuntimeChoice } from "../agent/agent.ts";
 import { modelDisplayName } from "../model/pi-models.ts";
 import type { ConversationEvent } from "../loops/sources/adapter.ts";
 import { slackConversationRef } from "../loops/sources/slack.ts";
@@ -157,7 +158,7 @@ export function createSlackCoreClient(deps: SlackCoreClientDeps): SlackCoreClien
 
     async surfaceHeaderFacts(scope) {
       const [choice, branding] = await Promise.all([
-        resolveRuntimeChoiceDurable(deps.config, orgScope, scope, deps.runtimeFallback),
+        resolveRuntimeChoice(deps.config, orgScope, scope, deps.runtimeFallback),
         resolveBranding(deps.config, orgScope, deps.brandingDefault),
       ]);
       return {

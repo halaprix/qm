@@ -8,10 +8,9 @@ import { mintSignedPayload } from "../src/auth/signed-token.ts";
 import { orgId } from "../src/config.ts";
 import { installPrincipalLinks } from "../src/directory/person.ts";
 import { PrincipalLinkError } from "../src/identity/principal-links.ts";
-import { createAdminGrantStore, createMemoryAdminGrantPersistence } from "../src/admin/admin-grant-store.ts";
 import { scopeId } from "../src/types.ts";
-import { createMemoryMap } from "../src/persistence/durable-map.ts";
-import { memoryPrincipalLinks } from "./support/principal-links.ts";
+import { testPrincipalLinks } from "./support/principal-links.ts";
+import { testMap, testAdminGrantStore } from "./support/test-database.ts";
 
 const PROVEN = "111111111111111111";
 const CLAIMED = "666666666666666666";
@@ -37,10 +36,8 @@ interface FixtureOpts {
 
 async function fixture(t: TestContext, opts: FixtureOpts = {}) {
   const internal = opts.internal ?? new Set(["ana@acme.com", "bob@acme.com"]);
-  const grantStore = createAdminGrantStore(createMemoryAdminGrantPersistence(), {
-    seed: (opts.grants ?? []).map((g) => ({ ...g, scopeId: scopeId("org", orgId()) })),
-  });
-  const links = memoryPrincipalLinks(createMemoryMap(), grantStore);
+  const grantStore = testAdminGrantStore((opts.grants ?? []).map((g) => ({ ...g, scopeId: scopeId("org", orgId()) })));
+  const links = testPrincipalLinks(testMap(), grantStore);
   installPrincipalLinks(links);
   const tokenCalls: string[] = [];
   const tokenRedirects: Array<string | null> = [];
